@@ -1,0 +1,120 @@
+package io.github.mayusi.calibratesoc.ui.settings
+
+import android.content.ComponentName
+import android.content.Context
+import android.provider.Settings
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.mayusi.calibratesoc.BuildConfig
+import io.github.mayusi.calibratesoc.data.baseline.FactoryBaseline
+import io.github.mayusi.calibratesoc.data.baseline.FactoryBaselineRecorder
+import io.github.mayusi.calibratesoc.data.baseline.FactoryRestorer
+import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
+import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import io.github.mayusi.calibratesoc.data.capability.RootKind
+import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+import io.github.mayusi.calibratesoc.data.profiles.ForegroundAppWatcher
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+@HiltViewModel
+class SettingsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val capabilityProbe: CapabilityProbe,
+    private val userPrefs: UserPrefs,
+    private val baselineRecorder: FactoryBaselineRecorder,
+    private val factoryRestorer: FactoryRestorer,
+) : ViewModel() {
+
+    /** Factory baseline state surfaced in Settings so the user can
+     *  see "captured at <date>, <N> tunables" before restoring. */
+    private val _baseline = MutableStateFlow<FactoryBaseline?>(baselineRecorder.existing())
+    val baseline: StateFlow<FactoryBaseline?> = _baseline.asStateFlow()
+
+    private val _restoreSummary = MutableStateFlow<FactoryRestorer.RestoreSummary?>(null)
+    val restoreSummary: StateFlow<FactoryRestorer.RestoreSummary?> = _restoreSummary.asStateFlow()
+
+    fun restoreToFactory() {
+        viewModelScope.launch {
+            val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
+            val current = _baseline.value ?: return@launch
+            _restoreSummary.value = factoryRestorer.restore(current, report)
+        }
+    }
+
+    fun clearRestoreSummary() { _restoreSummary.value = null }
+
+    val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    private val _accessibilityGranted = MutableStateFlow(checkAccessibilityGranted())
+    val accessibilityGranted: StateFlow<Boolean> = _accessibilityGranted.asStateFlow()
+
+    /** User opt-in to Magisk/KernelSU tier. False = the app behaves as
+     *  if root doesn't exist (the friendlier default for non-modder
+     *  users). True = the capability probe selects ROOT when su is
+     *  present. */
+    val rootModeEnabled: StateFlow<Boolean> = userPrefs.rootModeEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Master switch for experimental features (HUD ± steppers, etc).
+     *  Default OFF. Flipped ON requires a typed-confirm modal in the
+     *  Settings UI. */
+    val experimentalEnabled: StateFlow<Boolean> = userPrefs.experimentalEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun setExperimentalEnabled(value: Boolean) {
+        viewModelScope.launch { userPrefs.setExperimentalEnabled(value) }
+    }
+
+    /** Whether root could theoretically be enabled — surfaced so the
+     *  Settings UI can disable the toggle on devices with no su. */
+    val rootDetected: StateFlow<Boolean> = capabilityProbe.report
+        .let { reportFlow ->
+            MutableStateFlow(false).also { sink ->
+                viewModelScope.launch {
+                    reportFlow.collect { report ->
+                        sink.value = (report?.rootKind ?: RootKind.NONE) != RootKind.NONE
+                    }
+                }
+            }
+        }
+
+    val appVersion: String = BuildConfig.VERSION_NAME
+
+    fun setRootModeEnabled(value: Boolean) {
+        viewModelScope.launch {
+            userPrefs.setRootModeEnabled(value)
+            // Re-probe so the new tier classification takes effect
+            // immediately rather than waiting for next screen resume.
+            capabilityProbe.refresh()
+        }
+    }
+
+    fun refresh() {
+        _accessibilityGranted.value = checkAccessibilityGranted()
+        viewModelScope.launch { capabilityProbe.refresh() }
+    }
+
+    /**
+     * Read AccessibilityManager's enabled-services string for our
+     * component. Returns true if the user has flipped the switch in
+     * Settings > Accessibility. Updated on each screen resume — no
+     * way to observe the system setting from a Compose StateFlow
+     * without a content observer, which is overkill here.
+     */
+    private fun checkAccessibilityGranted(): Boolean {
+        val enabled = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        val needle = ComponentName(context, ForegroundAppWatcher::class.java).flattenToString()
+        return enabled.split(':').any { it.equals(needle, ignoreCase = true) }
+    }
+}

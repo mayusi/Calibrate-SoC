@@ -1,0 +1,161 @@
+[
+  {
+    "key": "ayn_odin2",
+    "displayName": "AYN Odin 2",
+    "vendorAppPackage": "com.odin.gameassistant",
+    "fanAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "fan_mode",
+      "supportsCurve": true,
+      "presets": ["Off", "Quiet", "Smart", "Sport", "Custom"]
+    },
+    "perfPresetAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "performance_mode",
+      "presets": [
+        { "display": "Standard", "value": "0" },
+        { "display": "Performance", "value": "1" },
+        { "display": "High Performance", "value": "2" }
+      ]
+    },
+    "perfDaemonsToStopOnWrite": ["perfd"],
+    "chmodLockCpuFreqWrites": true,
+    "thermalLabelOverrides": {},
+    "notes": "Snapdragon 8 Gen 2. Settings.System keys verified on Odin 3 hardware (same firmware namespace); Odin 2 confirmation pending. fan_mode + performance_mode are int values flipped by AYN's own Quick Settings tile."
+  },
+  {
+    "key": "ayn_odin3",
+    "displayName": "AYN Odin 3",
+    "vendorAppPackage": "com.odin.gameassistant",
+    "fanAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "fan_mode",
+      "supportsCurve": true,
+      "presets": ["Off", "Quiet", "Smart", "Sport", "Custom"]
+    },
+    "perfPresetAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "performance_mode",
+      "presets": [
+        { "display": "Standard", "value": "0" },
+        { "display": "Performance", "value": "1" },
+        { "display": "High Performance", "value": "2" }
+      ]
+    },
+    "perfDaemonsToStopOnWrite": [
+      "perfd",
+      "vendor.perf-hal-1-0",
+      "vendor.perf-hal-2-0"
+    ],
+    "chmodLockCpuFreqWrites": true,
+    "communityPresets": [
+      {
+        "name": "Underclock — Large",
+        "description": "TheOldTaylor's aggressive cap. ~14W from ~20W in 1080p AAA, temps 50-60C from 90-100C. Reported by author; safety not formally verified.",
+        "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+        "cpuPolicyMaxKhz": {
+          "0": 1785600,
+          "6": 1958400
+        },
+        "cpuPolicyMinKhz": {
+          "0": 384000,
+          "6": 1017600
+        }
+      },
+      {
+        "name": "Underclock — Medium",
+        "description": "TheOldTaylor's middle preset. Less power savings than Large but more headroom for AAA.",
+        "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+        "cpuPolicyMaxKhz": {
+          "0": 2227200,
+          "6": 2246400
+        },
+        "cpuPolicyMinKhz": {
+          "0": 384000,
+          "6": 1017600
+        }
+      },
+      {
+        "name": "Underclock — Small",
+        "description": "TheOldTaylor's mildest underclock. Small thermal/power benefit, almost no performance loss.",
+        "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+        "cpuPolicyMaxKhz": {
+          "0": 2745600,
+          "6": 3072000
+        },
+        "cpuPolicyMinKhz": {
+          "0": 384000,
+          "6": 1017600
+        }
+      }
+    ],
+    "notes": "Snapdragon 8 Elite (Dragonwing). 2-cluster: policy0 (6 cores, stock max 3532.8 MHz) + policy6 (2 prime, stock max 4320 MHz). NOT 8 Gen 2 topology — no policy4/7. Three perf daemons must stop+chmod-lock around cpufreq writes or they race the value back; see TheOldTaylor scripts."
+  },
+  {
+    "key": "ayn_thor",
+    "displayName": "AYN Thor (dual screen)",
+    "vendorAppPackage": "com.odin.gameassistant",
+    "fanAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "fan_mode",
+      "supportsCurve": true,
+      "presets": ["Off", "Quiet", "Smart", "Sport", "Custom"]
+    },
+    "perfPresetAdapter": null,
+    "perfDaemonsToStopOnWrite": ["perfd"],
+    "chmodLockCpuFreqWrites": true,
+    "notes": "Snapdragon 8 Gen 2 (QCS8550 / kalama), Android 13. THREE CPU clusters: policy0 (cores 0-2, little, max 2016 MHz), policy3 (cores 3-6, gold, max 2803 MHz), policy7 (core 7, prime, max 3187 MHz). GPU Adreno 740 (max 680 MHz). fan_mode Settings.System key VERIFIED present on Thor firmware (value observed: 4). performance_mode key NOT present on Thor (Odin 3 has it, Thor does not) — perf preset switching goes through com.qualcomm.qti.performancemode / Game Assistant instead, so perfPresetAdapter is null here. scaling_max_freq is mode 660 owned system:system — no direct UID write; live tuning needs root or the one-shot Odin runner script."
+  },
+  {
+    "key": "retroid_pocket5",
+    "displayName": "Retroid Pocket 5",
+    "vendorAppPackage": null,
+    "fanAdapter": null,
+    "perfPresetAdapter": null,
+    "notes": "Pocket 5 is passively cooled. Sysfs discovery for clocking only."
+  },
+  {
+    "key": "retroid_pocket6",
+    "displayName": "Retroid Pocket 6",
+    "vendorAppPackage": "com.rp.gameassistant",
+    "fanAdapter": {
+      "kind": "SETTINGS_KEY",
+      "target": "fan_mode",
+      "supportsCurve": false,
+      "presets": ["Off", "Quiet", "Smart", "Sport"]
+    },
+    "perfPresetAdapter": null,
+    "perfDaemonsToStopOnWrite": ["perfd"],
+    "chmodLockCpuFreqWrites": true,
+    "notes": "Snapdragon 8 Gen 2 (QCS8550 / kalama, mfr Moorechip), Android 13. SAME 3-cluster topology as AYN Thor: policy0 (cores 0-2, little, 2016 MHz), policy3 (cores 3-6, gold, 2803 MHz), policy7 (core 7, prime, 3187 MHz). GPU Adreno 740 (max 680 MHz). Storage YMTC YMUS9B4TF2D1C1 (UFS 4.0). fan_mode Settings.System key VERIFIED present (value 4). Vendor app com.rp.gameassistant owns perf presets (no performance_mode key). scaling_max_freq is mode 660 owned system:system — per-file SELinux denial observed (policy0 max denied, policy3/7 allowed) so monitor falls back to OPP bounds; live tuning needs root or one-shot script via the device's own runner."
+  },
+  {
+    "key": "retroid_pocket4",
+    "displayName": "Retroid Pocket 4",
+    "vendorAppPackage": null,
+    "fanAdapter": null,
+    "perfPresetAdapter": null,
+    "notes": "Pocket 4 is passively cooled."
+  },
+  {
+    "key": "ayaneo_pocket_s",
+    "displayName": "AYANEO Pocket S",
+    "vendorAppPackage": "com.ayaneo.ayaspace",
+    "fanAdapter": {
+      "kind": "SERVICE_INTENT",
+      "target": "com.ayaneo.ayaspace.SET_FAN_MODE",
+      "supportsCurve": false,
+      "presets": ["Quiet", "Smart", "Sport"]
+    },
+    "perfPresetAdapter": null,
+    "notes": "Fan is controlled by AYASpace via private binder. SERVICE_INTENT action is a placeholder pending reverse-engineering."
+  },
+  {
+    "key": "anbernic_rg556",
+    "displayName": "Anbernic RG556",
+    "vendorAppPackage": null,
+    "fanAdapter": null,
+    "perfPresetAdapter": null,
+    "notes": "Helio G99, passive. Sysfs clocking only."
+  }
+]

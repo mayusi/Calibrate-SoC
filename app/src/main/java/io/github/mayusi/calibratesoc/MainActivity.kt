@@ -1,0 +1,66 @@
+package io.github.mayusi.calibratesoc
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.lifecycleScope
+import dagger.hilt.android.AndroidEntryPoint
+import io.github.mayusi.calibratesoc.data.display.RefreshRateController
+import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+import io.github.mayusi.calibratesoc.ui.CalibrateSocApp
+import io.github.mayusi.calibratesoc.ui.setup.OnboardingScreen
+import io.github.mayusi.calibratesoc.ui.theme.CalibrateSocTheme
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+/**
+ * Single host activity. All screens are Compose destinations inside
+ * [CalibrateSocApp]. Also applies the user's saved preferred refresh
+ * rate on every resume — without this, the Window snaps back to the
+ * panel's default Hz between launches.
+ */
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+    @Inject lateinit var refreshRateController: RefreshRateController
+    @Inject lateinit var userPrefs: UserPrefs
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            CalibrateSocTheme {
+                // Gate: show onboarding wizard until user finishes or
+                // explicitly skips it. State persisted in DataStore so
+                // it appears exactly once per install (or after a wipe).
+                val done by userPrefs.onboardingComplete.collectAsState(initial = null)
+                when (done) {
+                    null -> { /* DataStore still loading — render nothing for ~1 frame */ }
+                    false -> OnboardingScreen(onFinished = { /* state flip triggers recompose */ })
+                    true -> CalibrateSocApp()
+                }
+            }
+        }
+        lifecycleScope.launch { applyPreferredRefreshRate() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        lifecycleScope.launch { applyPreferredRefreshRate() }
+    }
+
+    private suspend fun applyPreferredRefreshRate() {
+        val hz = refreshRateController.preferredHz.first() ?: return
+        val modeId = refreshRateController.resolveModeIdForHz(hz) ?: return
+        val attrs = window.attributes
+        attrs.preferredDisplayModeId = modeId
+        attrs.preferredRefreshRate = hz
+        window.attributes = attrs
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            runCatching { window.decorView.requestedFrameRate = hz }
+        }
+    }
+}

@@ -1,0 +1,82 @@
+## Android / Gradle / IDE noise
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.hprof
+
+## Signing — never commit the real keystore or its credentials.
+release/
+*.jks
+*.keystore
+keystore.properties
+keystore.properties.local
+
+## KSP / generated
+**/generated/
+**/build/
+
+## Kotlin compiler session cache
+.kotlin/
+
+## Build log we tee'd while developing
+build.log
+
+## OS / editor
+Thumbs.db
+*.swp
+*.swo
+
+## Development-only diagnostic + emergency scripts (not shipped)
+/probe.sh
+/probe*.sh
+/emergency_cooldown.sh
+/factory_reset.sh
+/reset_min.sh
+/sf_*.txt
+/hw.png
+/hud_test.png
+/screen.png
+
+# Dev probe artifacts (per-device hardware dumps)
+/dev_probe.sh
+/probe_*.txt
+/release_notes.md
+/thor*.png
+/odin*.png
+/release_notes_v011.md
+/rp6*.png
+/ds_*.png
+/probe_ds.txt
+/probe_rp6.txt
+/release_notes_v012.md
+/release_notes_v013.md
+/CalibrateSoC-v*.apk
+/test_*.sh
+/rp6_*.png
+/release_notes_v014.md
+/release_notes_v015.md
+/bench_history.db*
+/.git_commit_msg.txt
+/sysinfo_probe.sh
+/.commitmsg.txt
+/rn*.md
+/CalibrateSoC-v*.apk
+
+## Internal planning / dev docs — not part of the public repo
+/PLAN.md
+/.claude/
+/.codex/
+*.diag.png
+/rp6_sysfs_diag.png
+
+/.ci_pending/

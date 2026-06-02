@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Generated AYN scripts land in /sdcard/CalibrateSoC. Expose that
+         directory through our FileProvider so the system "Open with"
+         chooser can hand off to Odin Settings' script runner. -->
+    <external-path name="calibratesoc_scripts" path="CalibrateSoC/" />
+    <external-files-path name="app_private_scripts" path="" />
+</paths>

@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Reading capability + posting an opt-in anonymous device report
+      to the crowdsourced device DB.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Notifications: monitoring service + benchmark progress + overlay foreground svc. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Foreground service categories. Monitor + overlay run as
+         FOREGROUND_SERVICE_SPECIAL_USE (perf/system tuning, no AOSP category). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Keep CPU awake during benchmark runs so a long sustained-throttle test
+         can't be killed mid-sample. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      Floating in-game HUD (RTSS analog). User grants this via system
+      settings; we never auto-grant.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+      Bound at runtime by ForegroundAppWatcher when the user grants
+      Accessibility access. Declared so the system shows our entry
+      in Settings > Accessibility > Installed apps.
+    -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+      Per-app profile switching: need PACKAGE_USAGE_STATS to read the
+      current foreground package (Accessibility-service is the alternative
+      pathway; we prefer usage stats where granted for lower overhead).
+    -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+      The headline no-root capability on AYN handhelds: write to
+      Settings.System keys like performance_mode and fan_mode. This is
+      a signature/system permission, so Android won't grant it on a
+      normal install — but it CAN be granted once via:
+
+        adb shell pm grant io.github.mayusi.calibratesoc \
+          android.permission.WRITE_SECURE_SETTINGS
+
+      or through Shizuku once Shizuku is bound. The grant survives
+      reboots. We must declare it here or pm grant silently no-ops
+      because the runtime won't grant a permission the manifest never
+      requested.
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+      DUMP enables `dumpsys gfxinfo <foreground pkg> framestats` so the
+      HUD can show real game FPS. Same signature/protection level as
+      WRITE_SECURE_SETTINGS — must be declared here or `pm grant DUMP`
+      silently no-ops. The user grants it once by running our setup
+      script via Odin Settings → Run script as Root.
+    -->
+    <uses-permission android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Re-apply boot-restore preset on cold boot when user opted in. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+      Lets us fire the direct "Allow background running?" system dialog
+      (ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS). WITHOUT this declared,
+      that intent throws and the Battery-optimization wizard step appears
+      to do nothing. Normal (non-dangerous) permission, granted at install.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+      Needed to read every installed package's label/icon when building the
+      per-app override picker (Android 11+ visibility restriction).
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <!-- Detect Shizuku peer + known vendor companion apps. The Odin 3
+             firmware uses the com.odin.* namespace (internal classes are
+             com.ro.*); older docs and Odin 2 firmware sometimes use
+             com.ayn.* — query both so detection works regardless. -->
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.odin.gameassistant" />
+        <package android:name="com.odin.settings" />
+        <package android:name="com.ayn.gameassistant" />
+        <package android:name="de.langerhans.odintools" />
+        <package android:name="com.ayaneo.ayaspace" />
+        <!-- Retroid Pocket 6 vendor apps (verified live on RP6).
+             com.rp.settings hosts the "run script as root" runner
+             (same com.ro.* firmware base as Odin). -->
+        <package android:name="com.rp.gameassistant" />
+        <package android:name="com.rp.settings" />
+        <package android:name="com.retroidpocket.gamelauncher" />
+        <package android:name="com.retroidpocket.gameassistant" />
+
+        <!-- resolveActivity() for Odin's fan-curve editor deep link
+             needs this <intent> filter on Android 11+ or it returns null
+             even when the target Activity is exported. -->
+        <intent>
+            <action android:name="action_fan_temp_control_curve_config" />
+        </intent>
+
+        <!-- Battery-optimization settings screens. Android 11+ package
+             visibility hides these from startActivity() unless declared,
+             which is why the fallback "open the battery list" path could
+             silently fail on some firmwares. -->
+        <intent>
+            <action android:name="android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.APPLICATION_DETAILS_SETTINGS" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".CalibrateSocApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CalibrateSoC"
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.CalibrateSoC">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Benchmark crash isolation. The native CPU + (future) Vulkan
+          benchmark kernels run inside the :bench process so a native
+          crash can't kill the dashboard / monitor service. Service
+          declaration deferred until BenchmarkService lands; the
+          android:process attribute on the service binding will route
+          to ":bench".
+        -->
+
+        <!--
+          FileProvider for sharing generated AYN tuning scripts with
+          Odin Settings' "Run script as Root" picker. Required because
+          Android 7+ blocks file:// URIs across app boundaries.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
+
+        <!-- Shizuku provider hook: lets Shizuku auto-grant peer permission. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!--
+          BOOT_COMPLETED revert: by default every sysfs tunable we wrote
+          during the previous session reverts to its pre-write value at
+          boot. Profiles marked applyOnBoot are then re-applied on top
+          of the reverted baseline.
+        -->
+        <receiver
+            android:name=".data.tunables.BootRevertReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          No-root "persistent" script path: posts a post-boot notification
+          asking the user to re-run their tune via Odin Settings. Only
+          fires when the user has explicitly registered one or more
+          presets via Tune → Generate script → Remind me at boot.
+        -->
+        <receiver
+            android:name=".data.script.BootScriptReminderReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Floating HUD overlay. TYPE_APPLICATION_OVERLAY foreground
+          service so the panel survives the user backgrounding our
+          app and switching into a game. SPECIAL_USE category — no
+          AOSP category covers "perf monitor / on-screen tuner".
+        -->
+        <service
+            android:name=".ui.overlay.OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating performance HUD overlay" />
+        </service>
+
+        <!--
+          Quick Settings tile to toggle the HUD without opening the app.
+          The user has to drag this into their tile tray via Edit tiles
+          once — Android won't auto-add system tiles to the active set.
+        -->
+        <service
+            android:name=".ui.overlay.HudQuickTileService"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/hud_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Foreground-app watcher for per-app profile auto-switching.
+          Disabled until the user explicitly grants Accessibility access
+          (Settings > Accessibility > Installed apps > Calibrate SoC).
+          Without that grant the service class exists but receives no
+          events, so per-app overrides become a no-op.
+        -->
+        <service
+            android:name=".data.profiles.ForegroundAppWatcher"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+
+</manifest>

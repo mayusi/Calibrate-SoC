@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility-service config for ForegroundAppWatcher. We need
+  TYPE_WINDOW_STATE_CHANGED across all packages so we can detect the
+  user switching apps. No keystroke / touch interception, no overlay,
+  no content-tree reading.
+
+  feedbackType = generic because we don't produce any accessibility
+  feedback ourselves — we're hijacking the event stream for a
+  per-app profile-switching side-effect.
+
+  notificationTimeout 100 ms collapses rapid focus storms so a single
+  app launch doesn't queue ten apply calls.
+
+  flagDefault keeps us out of the "fast event delivery" path —
+  predictable timing matters more than millisecond-level latency
+  because our handler hits sysfs through libsu.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault"
+    android:description="@string/accessibility_service_description"
+    android:summary="@string/accessibility_service_summary" />

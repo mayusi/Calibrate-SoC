@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Conservative backup policy: exclude device-specific tunable snapshots
+  (last_known_good.json) and Shizuku state so a cross-device restore can't
+  push the previous device's CPU caps onto a different SoC.
+-->
+<full-backup-content>
+    <exclude domain="file" path="last_known_good.json" />
+    <exclude domain="file" path="capability_cache.json" />
+    <exclude domain="database" path="bench_history.db" />
+</full-backup-content>

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground for Calibrate SoC.
+
+  Composition:
+    1. Stylized SoC chip silhouette — rounded square with eight pins
+       (two per side). Sits inside the safe 72dp inner zone of the
+       108dp adaptive-icon canvas so it survives every launcher mask
+       (circle, squircle, teardrop, etc.).
+    2. Stacked S+C monogram in the chip — geometric stroke
+       letterforms, the S threading through the C's opening.
+    3. A subtle calibration crosshair (+) tucked into the
+       upper-right corner — signals "tuning / measurement".
+
+  Palette mirrors the app theme:
+    - #60A5FA (electric blue) for the chip outline + monogram
+    - #34D399 (emerald) for the crosshair accent
+    - #0B1220 background dark via ic_launcher_background
+
+  No gradients. No fake bevels. No AI-art shading.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Chip body. Rounded square, ~58dp across, centered. -->
+    <path
+        android:strokeColor="#60A5FA"
+        android:strokeWidth="3"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M 34 25 L 74 25 Q 83 25 83 34 L 83 74 Q 83 83 74 83 L 34 83 Q 25 83 25 74 L 25 34 Q 25 25 34 25 Z" />
+
+    <!-- Eight chip pins (two per side). Each pin is a tiny stub
+         protruding outward. -->
+    <!-- Top pins -->
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 44 19 L 44 25 L 48 25 L 48 19 Z" />
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 60 19 L 60 25 L 64 25 L 64 19 Z" />
+    <!-- Bottom pins -->
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 44 83 L 44 89 L 48 89 L 48 83 Z" />
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 60 83 L 60 89 L 64 89 L 64 83 Z" />
+    <!-- Left pins -->
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 19 44 L 25 44 L 25 48 L 19 48 Z" />
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 19 60 L 25 60 L 25 64 L 19 64 Z" />
+    <!-- Right pins -->
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 83 44 L 89 44 L 89 48 L 83 48 Z" />
+    <path android:fillColor="#60A5FA"
+        android:pathData="M 83 60 L 89 60 L 89 64 L 83 64 Z" />
+
+    <!-- Letter C (left half of the monogram). 270° arc opening
+         right, centered at (50, 54). -->
+    <path
+        android:strokeColor="#E2E8F0"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M 60 41 A 14 14 0 1 0 60 67" />
+
+    <!-- Letter S (right half, threaded through the C's opening).
+         Two arcs forming the upper and lower curves of the S.
+         The S sits slightly right of and overlapping the C, so the
+         two letters read as a unified mark. -->
+    <path
+        android:strokeColor="#60A5FA"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M 70 43 Q 56 43 56 50 Q 56 57 70 57 Q 84 57 84 64 Q 84 71 70 71" />
+
+    <!-- Calibration crosshair, upper-right corner of the chip. -->
+    <path
+        android:strokeColor="#34D399"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M 73 31 L 78 31 M 75.5 28.5 L 75.5 33.5" />
+    <!-- Crosshair circle. -->
+    <path
+        android:strokeColor="#34D399"
+        android:strokeWidth="1.5"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M 75.5 31 m -4 0 a 4 4 0 1 0 8 0 a 4 4 0 1 0 -8 0" />
+
+</vector>

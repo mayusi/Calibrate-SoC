@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Bootstrap theme used only between activity launch and the first Compose
+      frame. Real theming lives in ui/theme/Theme.kt. Dark window background
+      prevents a white flash on cold start.
+    -->
+    <style name="Theme.CalibrateSoC" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/splash_window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>

@@ -1,0 +1,214 @@
+package io.github.mayusi.calibratesoc.data.script
+
+import android.content.Context
+import android.os.Environment
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * One-time "unlock the good stuff" setup script. The user runs this
+ * once via Odin Settings → Run script as Root. It does what we cannot
+ * do from our own UID:
+ *
+ *   - `pm grant DUMP`            → lets us run `dumpsys gfxinfo <pkg>`
+ *                                   so the HUD can show real game FPS
+ *   - `pm grant PACKAGE_USAGE_STATS` → lets us read which app is in
+ *                                       the foreground without an
+ *                                       AccessibilityService
+ *   - `pm grant WRITE_SECURE_SETTINGS` → vendor preset key writes
+ *                                         without Shizuku
+ *
+ * pm-granted runtime perms PERSIST across reboots — the user does
+ * this once and the HUD has these powers forever. We don't keep the
+ * root channel; we just need it for the grant.
+ *
+ * We never auto-grant; the user has to consent by running the script
+ * via Odin's own runner. The script is plain text, auditable.
+ */
+@Singleton
+class AdvancedPermissionsScript @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
+
+    fun deploy(): Deployed {
+        val pkg = context.packageName
+        val body = buildString {
+            appendLine("#!/system/bin/sh")
+            appendLine("# Calibrate SoC — unlock script")
+            appendLine("# REQUIRES \"Force SELinux\" ON in your device's settings (if it")
+            appendLine("# has the toggle) — otherwise the chmod 666 calls below silently")
+            appendLine("# fail and the HUD +/- buttons won't write sysfs directly.")
+            appendLine()
+            appendLine("# === 1. Permissions (persist across reboot) ===")
+            appendLine("pm grant $pkg android.permission.DUMP")
+            appendLine("pm grant $pkg android.permission.PACKAGE_USAGE_STATS")
+            appendLine("pm grant $pkg android.permission.WRITE_SECURE_SETTINGS")
+            appendLine()
+            appendLine("# === 2. Stop vendor perf daemons so they can't clobber our writes ===")
+            appendLine("stop perfd 2>/dev/null")
+            appendLine("stop perf-hal-1-0 2>/dev/null")
+            appendLine("stop perf-hal-1-1 2>/dev/null")
+            appendLine("stop perf-hal-1-2 2>/dev/null")
+            appendLine("stop vendor.perfservice 2>/dev/null")
+            appendLine()
+            appendLine("# === 3. chmod 666 on every cpufreq policy ===")
+            appendLine("# With SELinux permissive, this STICKS. The HUD's app UID can")
+            appendLine("# then write scaling_max_freq / _min_freq / _governor directly")
+            appendLine("# via FileWriter. Zero Odin Settings round-trips per ± tap.")
+            appendLine("# Resets at reboot — re-run this script after each boot, or")
+            appendLine("# leave Force SELinux ON and re-run only the chmod loop.")
+            appendLine("for p in /sys/devices/system/cpu/cpufreq/policy*; do")
+            appendLine("  [ -e \"\$p/scaling_max_freq\" ] && chmod 666 \"\$p/scaling_max_freq\"")
+            appendLine("  [ -e \"\$p/scaling_min_freq\" ] && chmod 666 \"\$p/scaling_min_freq\"")
+            appendLine("  [ -e \"\$p/scaling_governor\" ] && chmod 666 \"\$p/scaling_governor\"")
+            appendLine("done")
+            appendLine()
+            appendLine("# === 4. GPU sysfs ===")
+            appendLine("for g in /sys/class/kgsl/kgsl-3d0/devfreq /sys/class/devfreq/*mali* /sys/class/kgsl/kgsl-3d0; do")
+            appendLine("  [ -e \"\$g/min_freq\" ] && chmod 666 \"\$g/min_freq\"")
+            appendLine("  [ -e \"\$g/max_freq\" ] && chmod 666 \"\$g/max_freq\"")
+            appendLine("  [ -e \"\$g/governor\" ] && chmod 666 \"\$g/governor\"")
+            appendLine("done")
+            appendLine("[ -e /sys/class/kgsl/kgsl-3d0/max_gpuclk ] && chmod 666 /sys/class/kgsl/kgsl-3d0/max_gpuclk")
+            appendLine("[ -e /sys/class/kgsl/kgsl-3d0/min_pwrlevel ] && chmod 666 /sys/class/kgsl/kgsl-3d0/min_pwrlevel")
+            appendLine("[ -e /sys/class/kgsl/kgsl-3d0/max_pwrlevel ] && chmod 666 /sys/class/kgsl/kgsl-3d0/max_pwrlevel")
+            appendLine()
+            appendLine("# === 5. Report what stuck ===")
+            appendLine("# A '666' result here means the HUD can now write directly.")
+            appendLine("# Anything still '444' means SELinux blocked the chmod (Force")
+            appendLine("# SELinux probably wasn't ON when this script ran).")
+            appendLine("echo 'Calibrate SoC unlock complete.'")
+            appendLine("for p in /sys/devices/system/cpu/cpufreq/policy*; do")
+            appendLine("  m=\$(stat -c %a \"\$p/scaling_max_freq\" 2>/dev/null)")
+            appendLine("  echo \"  \$(basename \$p): scaling_max_freq mode=\$m\"")
+            appendLine("done")
+            appendLine("echo 'If any mode is 444 instead of 666 — enable Force SELinux in Odin Settings and re-run.'")
+        }
+
+        val filename = "calibratesoc_unlock.sh"
+        runCatching {
+            @Suppress("DEPRECATION")
+            val pub = Environment.getExternalStorageDirectory()
+            val dir = File(pub, "CalibrateSoC").apply { mkdirs() }
+            val out = File(dir, filename)
+            out.writeText(body)
+            return Deployed(out.absolutePath, visibleToOdinPicker = true)
+        }
+        val priv = File(context.getExternalFilesDir(null), filename)
+        priv.writeText(body)
+        return Deployed(priv.absolutePath, visibleToOdinPicker = false)
+    }
+
+    /** Check whether the three advanced perms are granted now. The
+     *  HUD calls this on each open so the FPS line / direct-write path
+     *  light up automatically the moment the user runs the script. */
+    fun grantsCurrentlyHeld(): Grants {
+        val pm = context.packageManager
+        fun has(name: String) = pm.checkPermission(name, context.packageName) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        return Grants(
+            dump = has(android.Manifest.permission.DUMP),
+            usageStats = has(android.Manifest.permission.PACKAGE_USAGE_STATS),
+            writeSecureSettings = has(android.Manifest.permission.WRITE_SECURE_SETTINGS),
+            sysfsWritable = isSysfsWritable(),
+        )
+    }
+
+    /** True when we have ANY path that lets us write CPU sysfs:
+     *   (a) direct write (chmod 666 + SELinux happy), OR
+     *   (b) PServer binder actually executes our commands.
+     *  Either way, the HUD ± steppers will work.
+     *
+     *  We check direct-write FIRST (cheap, no IPC) and only fall back
+     *  to the PServer transact probe if that fails. The PServer probe
+     *  is a REAL no-op transact, not a getService()!=null existence
+     *  check — on the Odin 3 / Thor the binder is registered but
+     *  rejects our UID, so existence alone is a false positive. */
+    private fun isSysfsWritable(): Boolean {
+        if (isSysfsDirectlyWritable()) return true
+        return isPServerTransactable()
+    }
+
+    /** Probe whether Odin's PServer binder actually EXECUTES a no-op
+     *  shell command from our UID (not merely that the service is
+     *  published). Runs `true` and checks for a clean status. With
+     *  Force SELinux ON + an allow-listed UID this opens the entire
+     *  root-shell pathway; on stock firmware it returns false because
+     *  the wire format gates on caller UID. */
+    private fun isPServerTransactable(): Boolean = runCatching {
+        val clazz = Class.forName("android.os.ServiceManager")
+        val getService = clazz.getMethod("getService", String::class.java)
+        val binder = getService.invoke(null, "PServerBinder") as? android.os.IBinder
+            ?: return false
+        val data = android.os.Parcel.obtain()
+        val reply = android.os.Parcel.obtain()
+        try {
+            data.writeInterfaceToken("PServerBinder")
+            data.writeString("true")
+            val ok = binder.transact(1, data, reply, 0)
+            if (!ok) return false
+            reply.setDataPosition(0)
+            val status = runCatching { reply.readInt() }.getOrDefault(-1)
+            status == 0
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }.getOrDefault(false)
+
+    /** Original direct-write probe; reads the value and writes it back
+     *  unchanged. Reliable per-UID signal, no kernel effect. */
+    private fun isSysfsDirectlyWritable(): Boolean {
+        val cpufreq = java.io.File("/sys/devices/system/cpu/cpufreq")
+        val policies = runCatching {
+            cpufreq.listFiles { f -> f.isDirectory && f.name.startsWith("policy") }.orEmpty()
+        }.getOrElse {
+            android.util.Log.e("CalibrateSoC", "isSysfsWritable: cannot list cpufreq dir: $it")
+            return false
+        }
+        if (policies.isEmpty()) {
+            android.util.Log.e("CalibrateSoC", "isSysfsWritable: no policy dirs found")
+            return false
+        }
+        for (policyDir in policies) {
+            val target = java.io.File(policyDir, "scaling_max_freq")
+            if (!target.exists()) {
+                android.util.Log.i("CalibrateSoC", "isSysfsWritable: ${target.path} doesn't exist")
+                continue
+            }
+            val read = runCatching { target.readText().trim() }
+            if (read.isFailure) {
+                android.util.Log.e("CalibrateSoC", "isSysfsWritable: read ${target.path} failed: ${read.exceptionOrNull()}")
+                continue
+            }
+            val current = read.getOrNull()
+            if (current.isNullOrEmpty()) {
+                android.util.Log.i("CalibrateSoC", "isSysfsWritable: ${target.path} empty")
+                continue
+            }
+            val write = runCatching {
+                target.bufferedWriter().use { it.write(current) }
+            }
+            if (write.isSuccess) {
+                android.util.Log.i("CalibrateSoC", "isSysfsWritable: OK on ${target.path}")
+                return true
+            } else {
+                android.util.Log.e("CalibrateSoC", "isSysfsWritable: write ${target.path} failed: ${write.exceptionOrNull()}")
+            }
+        }
+        return false
+    }
+
+    data class Deployed(val path: String, val visibleToOdinPicker: Boolean)
+    data class Grants(
+        val dump: Boolean,
+        val usageStats: Boolean,
+        val writeSecureSettings: Boolean,
+        val sysfsWritable: Boolean,
+    ) {
+        val anyHeld: Boolean get() = dump || usageStats || writeSecureSettings || sysfsWritable
+        val allHeld: Boolean get() = dump && usageStats && writeSecureSettings && sysfsWritable
+    }
+}
