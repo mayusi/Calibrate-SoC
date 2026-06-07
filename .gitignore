@@ -80,3 +80,5 @@ Thumbs.db
 /rp6_sysfs_diag.png
 
 /.ci_pending/
+/.relnotes.txt
+/CalibrateSoC-0.1.0-alpha.apk

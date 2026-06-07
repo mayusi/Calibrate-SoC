@@ -9,14 +9,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -69,9 +74,10 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
 
         if (store.profiles.isEmpty()) {
             item {
-                Text(
-                    "No saved profiles yet. On the Tune screen, use Save current state to create one.",
-                    style = MaterialTheme.typography.bodyMedium,
+                EmptyState(
+                    icon = Icons.Outlined.Tune,
+                    title = "No profiles yet",
+                    body = "Tune your clocks, then tap Save as profile.",
                 )
             }
         } else {
@@ -93,6 +99,16 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+
+        if (store.perAppOverrides.isEmpty()) {
+            item {
+                EmptyState(
+                    icon = Icons.Outlined.Apps,
+                    title = "No per-app profiles",
+                    body = "Add an override below to auto-apply a profile when an app opens.",
+                )
+            }
         }
 
         items(store.perAppOverrides.entries.toList(), key = { it.key }) { (pkg, profileId) ->
@@ -127,6 +143,39 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                 editingApp = null
             },
             onDismiss = { editingApp = null },
+        )
+    }
+}
+
+@Composable
+private fun EmptyState(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    body: String,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        )
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            body,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
     }
 }

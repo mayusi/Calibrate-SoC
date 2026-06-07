@@ -1,0 +1,81 @@
+name: Device compatibility report
+description: Report how Calibrate SoC runs on your handheld or phone — the single most valuable contribution right now.
+title: "[Device] <device model> — <SoC>"
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping map device support! The Hardware tab's **Report unknown device**
+        button generates most of this for you — paste it in and fill the rest.
+  - type: input
+    id: device-model
+    attributes:
+      label: Device model
+      description: Marketing name and/or `ro.product.model`.
+      placeholder: "e.g. AYN Odin 3 / Retroid Pocket 6 / Pixel 8 Pro"
+    validations:
+      required: true
+  - type: input
+    id: soc
+    attributes:
+      label: SoC (chip)
+      description: Friendly name and/or `ro.soc.model`.
+      placeholder: "e.g. Snapdragon 8 Gen 2 (SM8550)"
+    validations:
+      required: true
+  - type: input
+    id: android-version
+    attributes:
+      label: Android version
+      placeholder: "e.g. Android 14 (API 34)"
+    validations:
+      required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: Shown in Settings → About.
+      placeholder: "e.g. 0.1.0-alpha"
+    validations:
+      required: true
+  - type: checkboxes
+    id: features-work
+    attributes:
+      label: Which features work
+      description: Tick everything that works correctly on your device.
+      options:
+        - label: Dashboard (live monitoring)
+        - label: Floating HUD overlay
+        - label: Benchmark
+        - label: Stability test
+        - label: Tune (apply presets)
+        - label: Preset generation from OPP table
+        - label: Script unlock / "Run script as Root" path
+  - type: textarea
+    id: not-working
+    attributes:
+      label: What doesn't work
+      description: Anything missing, wrong, or crashing. Note which tab/feature.
+      placeholder: "e.g. HUD shows FPS but per-core MHz reads 0; Tune script applies but verify-readback fails."
+    validations:
+      required: true
+  - type: textarea
+    id: getprop
+    attributes:
+      label: Device properties
+      description: Output of the commands below (run over adb or a terminal app).
+      render: shell
+      value: |
+        $ adb shell getprop ro.soc.model
+        $ adb shell getprop ro.product.model
+    validations:
+      required: false
+  - type: textarea
+    id: logcat
+    attributes:
+      label: Logcat (optional)
+      description: Relevant logcat around the failure, if you have it.
+      render: shell
+    validations:
+      required: false

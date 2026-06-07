@@ -4,7 +4,7 @@
 
 - **TheOldTaylor** — [Odin3-CPU-Underclock](https://github.com/TheOldTaylor/Odin3-CPU-Underclock). The Odin 3 "Community Tuned" presets ship the exact frequency values from that repo, with attribution. Original discoverers also credited there: u/twoohfive205 and u/JoaozaoS.
 - **langerhans / OdinTools** — [github.com/langerhans/OdinTools](https://github.com/langerhans/OdinTools) (MIT). No code is copied; Calibrate SoC follows the same general pattern of an Accessibility service for per-app profile switching and vendor Settings-key flips for AYN preset modes.
-- **SmartPack-Kernel-Manager** — [github.com/SmartPack/SmartPack-Kernel-Manager](https://github.com/SmartPack/SmartPack-Kernel-Manager) (GPLv3). Read for reference only — **no code copied**. Calibrate SoC is MIT-licensed and deliberately stays GPL-free.
+- **SmartPack-Kernel-Manager** — [github.com/SmartPack/SmartPack-Kernel-Manager](https://github.com/SmartPack/SmartPack-Kernel-Manager) (GPLv3). Read for reference only — **no code copied**. Calibrate SoC is Apache-2.0-licensed and deliberately stays GPL-free.
 
 ## Third-party libraries
 

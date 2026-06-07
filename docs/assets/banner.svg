@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" fill="none">
+  <title>Calibrate SoC</title>
+
+  <!-- Background: dark slate with subtle vertical gradient to surface. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" fill="url(#bg)"/>
+
+  <!-- ===== Logo mark (chip + S+C monogram + crosshair) =====
+       Native coords are 108x108; scaled by 2.18 (~235px) and placed
+       with left padding, vertically centered. translate(70,42). -->
+  <g transform="translate(70,42) scale(2.18)">
+    <!-- Chip body -->
+    <path d="M 34 25 L 74 25 Q 83 25 83 34 L 83 74 Q 83 83 74 83 L 34 83 Q 25 83 25 74 L 25 34 Q 25 25 34 25 Z"
+          fill="none" stroke="#60A5FA" stroke-width="3"/>
+    <!-- Pins -->
+    <g fill="#60A5FA">
+      <path d="M 44 19 L 44 25 L 48 25 L 48 19 Z"/>
+      <path d="M 60 19 L 60 25 L 64 25 L 64 19 Z"/>
+      <path d="M 44 83 L 44 89 L 48 89 L 48 83 Z"/>
+      <path d="M 60 83 L 60 89 L 64 89 L 64 83 Z"/>
+      <path d="M 19 44 L 25 44 L 25 48 L 19 48 Z"/>
+      <path d="M 19 60 L 25 60 L 25 64 L 19 64 Z"/>
+      <path d="M 83 44 L 89 44 L 89 48 L 83 48 Z"/>
+      <path d="M 83 60 L 89 60 L 89 64 L 83 64 Z"/>
+    </g>
+    <!-- Letter C -->
+    <path d="M 60 41 A 14 14 0 1 0 60 67"
+          fill="none" stroke="#E2E8F0" stroke-width="5" stroke-linecap="round"/>
+    <!-- Letter S -->
+    <path d="M 70 43 Q 56 43 56 50 Q 56 57 70 57 Q 84 57 84 64 Q 84 71 70 71"
+          fill="none" stroke="#60A5FA" stroke-width="5" stroke-linecap="round"/>
+    <!-- Calibration crosshair -->
+    <path d="M 73 31 L 78 31 M 75.5 28.5 L 75.5 33.5"
+          fill="none" stroke="#34D399" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="75.5" cy="31" r="4" fill="none" stroke="#34D399" stroke-width="1.5"/>
+  </g>
+
+  <!-- ===== Wordmark + tagline ===== -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, system-ui, sans-serif">
+    <!-- Wordmark -->
+    <text x="335" y="155" font-size="72" font-weight="700" fill="#E2E8F0"
+          letter-spacing="-1">Calibrate<tspan dx="20" fill="#60A5FA">SoC</tspan></text>
+
+    <!-- Tagline -->
+    <text x="338" y="205" font-size="28" font-weight="400" fill="#60A5FA">Universal performance tuner for Android handhelds</text>
+
+    <!-- Pre-alpha pill -->
+    <g transform="translate(338,232)">
+      <rect x="0" y="0" width="132" height="34" rx="17" fill="none" stroke="#34D399" stroke-width="1.5"/>
+      <circle cx="20" cy="17" r="4" fill="#34D399"/>
+      <text x="34" y="23" font-size="16" font-weight="600" letter-spacing="1" fill="#34D399">PRE-ALPHA</text>
+    </g>
+  </g>
+</svg>

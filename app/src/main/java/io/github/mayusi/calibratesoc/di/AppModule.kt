@@ -9,6 +9,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchDatabase
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchRunDao
+import io.github.mayusi.calibratesoc.data.benchmark.db.StabilityRunDao
 import kotlinx.serialization.json.Json
 import okio.FileSystem
 import javax.inject.Singleton
@@ -52,4 +53,7 @@ object AppModule {
 
     @Provides
     fun provideBenchRunDao(db: BenchDatabase): BenchRunDao = db.benchRunDao()
+
+    @Provides
+    fun provideStabilityRunDao(db: BenchDatabase): StabilityRunDao = db.stabilityRunDao()
 }

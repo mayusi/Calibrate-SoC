@@ -1,13 +1,13 @@
-<div align="center">
+<p align="center"><img src="docs/assets/banner.png" alt="Calibrate SoC" width="100%"></p>
 
-# Calibrate SoC
+<div align="center">
 
 **A universal performance tuner, monitor, and benchmark suite for Android gaming handhelds.**
 
 Real-time SoC monitoring · in-game floating HUD · CPU/GPU benchmark + stability testing · clock presets · hardware inspector.
 
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#project-status)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%2010%2B-green.svg)](#requirements)
 [![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](#contributing)
 
@@ -30,6 +30,55 @@ It's designed to be **honest about what each device can and can't do**: where a 
 **Works on:** any Android 10+ device for monitoring and benchmarking.
 
 No telemetry. No accounts. No ads. Fully open source.
+
+---
+
+## Why it helps
+
+- **Cooler, longer sessions** — underclock your handheld's SoC for less heat and more battery during long emulation sessions, with presets built from your own chip's frequency table.
+- **See what's really happening** — a floating in-game HUD shows real FPS, per-core clocks, and temps over any game.
+- **Prove your tune worked** — benchmark before/after a change; the honest self-relative score shows if you're at your chip's ceiling or tuned down.
+- **Check sustained performance** — a 3DMark-style stability test loops the GPU under load and reports how much it throttles.
+- **Know your hardware** — full SoC/memory/storage/battery inspector with one-tap speed tests.
+
+---
+
+## Screenshots
+
+<!-- Screenshot PNGs are added by the screenshot step. Until then these
+     paths render as broken images in a local preview; they resolve once
+     docs/assets/{dashboard,tune,benchmark,stability,hardware,hud-ingame}.png land. -->
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/assets/dashboard.png" width="250" alt="Live dashboard"><br>
+      <sub><b>Dashboard</b> — per-core clocks, thermals, battery watts</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/tune.png" width="250" alt="Tune"><br>
+      <sub><b>Tune</b> — presets from your own OPP table</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/benchmark.png" width="250" alt="Benchmark"><br>
+      <sub><b>Benchmark</b> — honest self-relative scoring</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/assets/stability.png" width="250" alt="Stability test"><br>
+      <sub><b>Stability</b> — sustained GPU throttle curve</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/hardware.png" width="250" alt="Hardware inspector"><br>
+      <sub><b>Hardware</b> — SoC, memory, storage, battery</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/hud-ingame.png" width="250" alt="In-game HUD overlay"><br>
+      <sub><b>HUD in-game</b> — live FPS &amp; clocks over any game</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -173,7 +222,7 @@ There's no CLA and no bureaucracy. If it makes the app better and more honest, i
 
 ## License
 
-[MIT](LICENSE) — do what you like, no warranty.
+[Apache-2.0](LICENSE) — permissive, with an explicit patent grant. No warranty.
 
 ## Credits
 

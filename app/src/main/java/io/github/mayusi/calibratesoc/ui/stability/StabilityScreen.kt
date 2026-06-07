@@ -37,9 +37,18 @@ import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import io.github.mayusi.calibratesoc.data.benchmark.BenchOutcome
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityResult
+import io.github.mayusi.calibratesoc.data.benchmark.StabilityRun
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityTestRunner
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleSample
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Stability Test sub-screen — sustained GPU stress (Wild Life Extreme
@@ -50,6 +59,7 @@ import io.github.mayusi.calibratesoc.ui.components.SectionCard
 fun StabilityScreen(viewModel: StabilityViewModel = hiltViewModel()) {
     val state by viewModel.runnerState.collectAsStateWithLifecycle()
     val result by viewModel.result.collectAsStateWithLifecycle()
+    val history by viewModel.history.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -61,6 +71,59 @@ fun StabilityScreen(viewModel: StabilityViewModel = hiltViewModel()) {
         StabilityHeader()
         RunControls(state = state, onStart = viewModel::start)
         result?.let { StabilityResultCard(it) }
+        if (history.isNotEmpty()) {
+            PastRunsCard(history = history, onDelete = viewModel::deleteRun)
+        }
+    }
+}
+
+private val historyDateFormat = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
+
+@Composable
+private fun PastRunsCard(history: List<StabilityRun>, onDelete: (Long) -> Unit) {
+    SectionCard("Past runs") {
+        history.forEachIndexed { index, run ->
+            if (index > 0) HorizontalDivider()
+            PastRunRow(run = run, onDelete = { onDelete(run.id) })
+        }
+    }
+}
+
+@Composable
+private fun PastRunRow(run: StabilityRun, onDelete: () -> Unit) {
+    val (color, _) = stabilityVerdict(run.stabilityPct)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "${run.stabilityPct}%",
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = color,
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                historyDateFormat.format(Date(run.startedAtMs)),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Min %.1f · Max %.1f FPS · Peak %.1f°C".format(
+                    run.minFps, run.maxFps, run.peakTempC,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = onDelete) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "Delete run",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

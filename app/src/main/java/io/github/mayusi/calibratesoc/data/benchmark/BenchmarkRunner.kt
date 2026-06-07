@@ -132,7 +132,7 @@ class BenchmarkRunner @Inject constructor(
     }
 
     private fun defaultName(flavor: BenchFlavor): String {
-        val ts = java.text.SimpleDateFormat("MMM d • HH:mm", java.util.Locale.US)
+        val ts = java.text.SimpleDateFormat("MMM d • HH:mm", java.util.Locale.getDefault())
             .format(java.util.Date())
         return "${flavor.name.lowercase().replaceFirstChar { it.uppercase() }} run — $ts"
     }

@@ -48,9 +48,16 @@ class HardwareViewModel @Inject constructor(
 
     fun runStorageTest() {
         viewModelScope.launch {
-            _testState.update { it.copy(storageRunning = true) }
-            val result = runCatching { storageTester.run() }.getOrNull()
-            _testState.update { it.copy(storageRunning = false) }
+            _testState.update { it.copy(storageRunning = true, storageError = null) }
+            val outcome = runCatching { storageTester.run() }
+            val result = outcome.getOrNull()
+            _testState.update {
+                it.copy(
+                    storageRunning = false,
+                    storageError = outcome.exceptionOrNull()
+                        ?.let { e -> e.message ?: "Permission denied" },
+                )
+            }
             // Merge speed numbers back into the first storage volume.
             _report.update { current ->
                 val r = current ?: return@update current
@@ -68,9 +75,16 @@ class HardwareViewModel @Inject constructor(
 
     fun runMemoryTest() {
         viewModelScope.launch {
-            _testState.update { it.copy(memoryRunning = true) }
-            val mbps = runCatching { memoryTester.run() }.getOrDefault(0.0)
-            _testState.update { it.copy(memoryRunning = false) }
+            _testState.update { it.copy(memoryRunning = true, memoryError = null) }
+            val outcome = runCatching { memoryTester.run() }
+            val mbps = outcome.getOrDefault(0.0)
+            _testState.update {
+                it.copy(
+                    memoryRunning = false,
+                    memoryError = outcome.exceptionOrNull()
+                        ?.let { e -> e.message ?: "Permission denied" },
+                )
+            }
             _report.update { current ->
                 val r = current ?: return@update current
                 r.copy(memory = r.memory.copy(measuredBandwidthMBps = mbps))
@@ -80,9 +94,17 @@ class HardwareViewModel @Inject constructor(
 
     fun runNetworkTest() {
         viewModelScope.launch {
-            _testState.update { it.copy(networkRunning = true) }
-            val result = runCatching { networkTester.run() }.getOrNull()
-            _testState.update { it.copy(networkRunning = false, networkResult = result) }
+            _testState.update { it.copy(networkRunning = true, networkError = null) }
+            val outcome = runCatching { networkTester.run() }
+            val result = outcome.getOrNull()
+            _testState.update {
+                it.copy(
+                    networkRunning = false,
+                    networkResult = result,
+                    networkError = outcome.exceptionOrNull()
+                        ?.let { e -> e.message ?: "Permission denied" },
+                )
+            }
         }
     }
 
@@ -91,5 +113,8 @@ class HardwareViewModel @Inject constructor(
         val memoryRunning: Boolean = false,
         val networkRunning: Boolean = false,
         val networkResult: NetworkTestResult? = null,
+        val storageError: String? = null,
+        val networkError: String? = null,
+        val memoryError: String? = null,
     )
 }

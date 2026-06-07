@@ -20,6 +20,7 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -79,6 +80,7 @@ fun TuneScreen(
     val capability by viewModel.capability.collectAsStateWithLifecycle()
     val pending by viewModel.pending.collectAsStateWithLifecycle()
     val results by viewModel.lastResults.collectAsStateWithLifecycle()
+    val gpuPending by viewModel.gpuPending.collectAsStateWithLifecycle()
     val presets by viewModel.presets.collectAsStateWithLifecycle()
     val ocAck by viewModel.oneTimeOcAcknowledged.collectAsStateWithLifecycle()
     val adapter by viewModel.adapter.collectAsStateWithLifecycle()
@@ -93,6 +95,7 @@ fun TuneScreen(
     //   pendingUnknownDeviceConfirm — fires every time for GENERIC_UNKNOWN_FAMILY
     var pendingFirstOcConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingUnknownDeviceConfirm by remember { mutableStateOf<Pair<Preset, () -> Unit>?>(null) }
+    var showSaveProfileDialog by remember { mutableStateOf(false) }
 
     val report = capability
     if (report == null) {
@@ -203,12 +206,24 @@ fun TuneScreen(
         // usable GPU surface. Mali kernels without devfreq fall out
         // silently rather than render a slider that does nothing.
         report.gpu?.let { gpu ->
-            item { GpuCard(gpu, presets) }
+            item {
+                GpuCard(
+                    gpu = gpu,
+                    presets = presets,
+                    edit = gpuPending,
+                    onChange = { viewModel.setGpuEdit(it) },
+                )
+            }
         }
 
         item {
+            val gpuPendingCount = gpuPending?.let {
+                (if (it.minHz != null) 1 else 0) +
+                    (if (it.maxHz != null) 1 else 0) +
+                    (if (it.powerLevel != null) 1 else 0)
+            } ?: 0
             ApplyBar(
-                pendingCount = pending.values.count { it.minKhz != null || it.maxKhz != null || it.governor != null },
+                pendingCount = pending.values.count { it.minKhz != null || it.maxKhz != null || it.governor != null } + gpuPendingCount,
                 canApply = canWriteSysfs,
                 onApply = {
                     val apply = { viewModel.apply() }
@@ -218,7 +233,26 @@ fun TuneScreen(
             )
         }
 
+        // Save-as-profile: snapshots the current Tune state (pending
+        // slider edits + live kernel values) into a reusable UserProfile.
+        item {
+            OutlinedButton(
+                onClick = { showSaveProfileDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Save as profile") }
+        }
+
         if (results.isNotEmpty()) item { ResultsCard(results) }
+    }
+
+    if (showSaveProfileDialog) {
+        SaveProfileDialog(
+            onSave = { name, description, applyOnBoot ->
+                viewModel.saveAsProfile(name, description, applyOnBoot)
+                showSaveProfileDialog = false
+            },
+            onDismiss = { showSaveProfileDialog = false },
+        )
     }
 
     if (pendingFirstOcConfirm != null) {
@@ -728,18 +762,21 @@ private fun VerificationBadge(tier: VerificationTier) {
     )
 }
 
-// --- GPU card (full info) ------------------------------------------
+// --- GPU card (full info + sliders) --------------------------------
 //
-// Sliders for the GPU are deferred to a later round — the slider
-// machinery currently keys on CpuPolicyProbe.policyId and would need
-// extension. For now the card surfaces everything readable so the
-// user can verify what the kernel reports + see exactly what each
-// built-in preset would do, without writing anything.
+// Interactive min/max freq sliders mirror the per-CPU-policy pattern:
+// both snap to the GPU's own OPP table (availableFreqsHz), and Apply
+// commits them through the SAME TunableWriter path as CPU edits, so
+// the snapshot-before-write / boot-revert invariant holds. The Adreno
+// power-level picker appears only when the probe exposes a
+// powerLevelRange (null on Mali).
 
 @Composable
 private fun GpuCard(
     gpu: io.github.mayusi.calibratesoc.data.capability.GpuProbe,
     presets: List<Preset>,
+    edit: TuneViewModel.GpuEdit?,
+    onChange: (TuneViewModel.GpuEdit) -> Unit,
 ) = SectionCard("GPU — ${gpu.family}") {
     if (gpu.availableFreqsHz.isEmpty()) {
         Text(
@@ -759,6 +796,37 @@ private fun GpuCard(
         fontFamily = FontFamily.Monospace,
         style = MaterialTheme.typography.bodyLarge,
     )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+
+    // Editable sliders — snap to the GPU OPP table (Hz). Staged in the
+    // VM's gpuPending; nothing hits sysfs until the user taps Apply.
+    val currentMin = edit?.minHz ?: gpu.currentMinHz
+    val currentMax = edit?.maxHz ?: gpu.currentMaxHz
+    GpuLabeledSlider(
+        label = "Min freq",
+        valueHz = currentMin,
+        stepsHz = sorted,
+        onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(minHz = snapped)) },
+    )
+    GpuLabeledSlider(
+        label = "Max freq",
+        valueHz = currentMax,
+        stepsHz = sorted,
+        onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(maxHz = snapped)) },
+    )
+
+    // Adreno power-level clamp (0 = fastest). Mali kernels report no
+    // range, so this whole block is skipped there.
+    gpu.powerLevelRange?.let { range ->
+        val currentLevel = edit?.powerLevel ?: range.low
+        GpuPowerLevelSlider(
+            low = range.low,
+            high = range.high,
+            value = currentLevel,
+            onChange = { lvl -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(powerLevel = lvl)) },
+        )
+    }
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
 
@@ -825,10 +893,91 @@ private fun GpuCard(
         }
     }
     Text(
-        "Apply a preset above to write these. A direct GPU slider is on the roadmap.",
+        "Adjust the sliders above and tap Apply to write a custom GPU cap, " +
+            "or apply a preset to use one of these.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/**
+ * GPU freq slider. Same OPP-snapping behaviour as the CPU [LabeledSlider]
+ * but works in Hz (the GpuProbe's native unit) and displays MHz.
+ */
+@Composable
+private fun GpuLabeledSlider(
+    label: String,
+    valueHz: Long,
+    stepsHz: List<Long>,
+    onChange: (Long) -> Unit,
+) {
+    val low = stepsHz.first().toFloat()
+    val high = stepsHz.last().toFloat()
+    val sliderRange = (high - low).coerceAtLeast(1f)
+    val pos = ((valueHz.toFloat() - low) / sliderRange).coerceIn(0f, 1f)
+
+    Column {
+        Row {
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "${valueHz / 1_000_000L} MHz",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        Slider(
+            value = pos,
+            steps = (stepsHz.size - 2).coerceAtLeast(0),
+            valueRange = 0f..1f,
+            onValueChange = { fraction ->
+                val rawHz = low + fraction * sliderRange
+                val snapped = stepsHz.minByOrNull { kotlin.math.abs(it - rawHz) } ?: valueHz
+                if (snapped != valueHz) onChange(snapped)
+            },
+        )
+    }
+}
+
+/**
+ * Adreno power-level picker. Integer range low..high where 0 is the
+ * fastest level. Rendered as a discrete slider; one stop per level.
+ */
+@Composable
+private fun GpuPowerLevelSlider(
+    low: Int,
+    high: Int,
+    value: Int,
+    onChange: (Int) -> Unit,
+) {
+    val span = (high - low).coerceAtLeast(1)
+    Column {
+        Row {
+            Text(
+                "Max power level",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "$value ${if (value == low) "(fastest)" else if (value == high) "(slowest)" else ""}",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        Slider(
+            value = (value - low).toFloat(),
+            steps = (span - 1).coerceAtLeast(0),
+            valueRange = 0f..span.toFloat(),
+            onValueChange = { f ->
+                val lvl = low + f.toInt().coerceIn(0, span)
+                if (lvl != value) onChange(lvl)
+            },
+        )
+        Text(
+            "0 = fastest. Higher numbers cap the GPU at a slower power level (cooler / less battery).",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 // --- Per-policy card ------------------------------------------------
@@ -1093,6 +1242,59 @@ private fun UnknownDeviceConfirmDialog(
         },
         confirmButton = { Button(onClick = onConfirm) { Text("Apply anyway") } },
         dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// --- Save-as-profile dialog ----------------------------------------
+
+@Composable
+private fun SaveProfileDialog(
+    onSave: (name: String, description: String, applyOnBoot: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var applyOnBoot by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save as profile") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Captures the current CPU (and GPU) clock caps and governors " +
+                        "shown above — including any pending slider edits — as a " +
+                        "reusable profile you can re-apply from the Profiles tab.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Description (optional)") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = applyOnBoot, onCheckedChange = { applyOnBoot = it })
+                    Text("Re-apply on boot", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name.trim(), description.trim(), applyOnBoot) },
+                enabled = name.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) { Text("Cancel") }
+        },
     )
 }
 

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 108 108" fill="none">
+  <!-- Calibrate SoC mark: SoC chip + S+C monogram + calibration crosshair.
+       Ported from app/src/main/res/drawable/ic_launcher_foreground.xml -->
+
+  <!-- Chip body. Rounded square, ~58 across, centered. -->
+  <path d="M 34 25 L 74 25 Q 83 25 83 34 L 83 74 Q 83 83 74 83 L 34 83 Q 25 83 25 74 L 25 34 Q 25 25 34 25 Z"
+        fill="none" stroke="#60A5FA" stroke-width="3"/>
+
+  <!-- Eight chip pins (two per side). -->
+  <g fill="#60A5FA">
+    <path d="M 44 19 L 44 25 L 48 25 L 48 19 Z"/>
+    <path d="M 60 19 L 60 25 L 64 25 L 64 19 Z"/>
+    <path d="M 44 83 L 44 89 L 48 89 L 48 83 Z"/>
+    <path d="M 60 83 L 60 89 L 64 89 L 64 83 Z"/>
+    <path d="M 19 44 L 25 44 L 25 48 L 19 48 Z"/>
+    <path d="M 19 60 L 25 60 L 25 64 L 19 64 Z"/>
+    <path d="M 83 44 L 89 44 L 89 48 L 83 48 Z"/>
+    <path d="M 83 60 L 89 60 L 89 64 L 83 64 Z"/>
+  </g>
+
+  <!-- Letter C: 270deg arc opening right. -->
+  <path d="M 60 41 A 14 14 0 1 0 60 67"
+        fill="none" stroke="#E2E8F0" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Letter S: threaded through the C's opening. -->
+  <path d="M 70 43 Q 56 43 56 50 Q 56 57 70 57 Q 84 57 84 64 Q 84 71 70 71"
+        fill="none" stroke="#60A5FA" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Calibration crosshair, upper-right corner of the chip. -->
+  <path d="M 73 31 L 78 31 M 75.5 28.5 L 75.5 33.5"
+        fill="none" stroke="#34D399" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="75.5" cy="31" r="4" fill="none" stroke="#34D399" stroke-width="1.5"/>
+</svg>

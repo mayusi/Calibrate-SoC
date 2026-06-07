@@ -79,6 +79,7 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
             MemoryCard(
                 memory = r.memory,
                 running = tests.memoryRunning,
+                error = tests.memoryError,
                 onRun = { viewModel.runMemoryTest() },
             )
         }
@@ -86,6 +87,7 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
             StorageCard(
                 volume = vol,
                 running = tests.storageRunning,
+                error = tests.storageError,
                 onRun = { viewModel.runStorageTest() },
                 isPrimary = vol == r.storage.firstOrNull(),
             )
@@ -94,6 +96,7 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
             NetworkCard(
                 running = tests.networkRunning,
                 result = tests.networkResult,
+                error = tests.networkError,
                 onRun = { viewModel.runNetworkTest() },
             )
         }
@@ -114,7 +117,7 @@ private fun SocCard(soc: SocInfo) = SectionCard("SoC") {
 }
 
 @Composable
-private fun MemoryCard(memory: MemoryInfo, running: Boolean, onRun: () -> Unit) =
+private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onRun: () -> Unit) =
     SectionCard("Memory") {
         KV("Total", "${advertisedGb(memory.totalMb)} GB (${memory.totalMb} MB kernel-visible)")
         KV("Available", "%.1f GB".format(memory.availableMb / 1024f))
@@ -133,10 +136,11 @@ private fun MemoryCard(memory: MemoryInfo, running: Boolean, onRun: () -> Unit) 
                 )
             }
         }
+        TestError("RAM bandwidth test failed", error)
     }
 
 @Composable
-private fun StorageCard(volume: StorageVolume, running: Boolean, onRun: () -> Unit, isPrimary: Boolean) =
+private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?, onRun: () -> Unit, isPrimary: Boolean) =
     SectionCard("Storage — ${volume.label}") {
         KV("Capacity", "%.1f GB total · %.1f GB free".format(volume.totalGb, volume.freeGb))
         KV("Class (inferred)", volume.inferredClass, volume.inferredConfidence)
@@ -165,11 +169,12 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, onRun: () -> Un
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            TestError("Storage test failed", error)
         }
     }
 
 @Composable
-private fun NetworkCard(running: Boolean, result: NetworkTestResult?, onRun: () -> Unit) =
+private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: String?, onRun: () -> Unit) =
     SectionCard("Network") {
         if (result != null) {
             result.downloadMbps?.let { KV("Download", "%.1f Mbps".format(it)) }
@@ -193,6 +198,7 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, onRun: () 
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        TestError("Network test failed", error)
     }
 
 @Composable
@@ -258,6 +264,20 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+/**
+ * Inline error row shown under a speed-test card when the test threw.
+ * Renders nothing when [error] is null so the success path is untouched.
+ */
+@Composable
+private fun TestError(prefix: String, error: String?) {
+    if (error == null) return
+    Text(
+        "$prefix: $error",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.error,
+    )
 }
 
 @Composable

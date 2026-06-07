@@ -96,6 +96,18 @@ class TuneViewModel @Inject constructor(
     private val _lastResults = MutableStateFlow<List<WriteResult>>(emptyList())
     val lastResults: StateFlow<List<WriteResult>> = _lastResults.asStateFlow()
 
+    /** Pending GPU slider/power-level edit. Null until the user scrubs a
+     *  GPU control. Mirrors the per-policy [PolicyEdit] flow: scrubbing
+     *  stages a value here, only [apply] commits it through the writer. */
+    private val _gpuPending = MutableStateFlow<GpuEdit?>(null)
+    val gpuPending: StateFlow<GpuEdit?> = _gpuPending.asStateFlow()
+
+    fun setGpuEdit(edit: GpuEdit) {
+        // Collapse a fully-empty edit back to null so the Apply counter
+        // doesn't treat a no-op as a pending change.
+        _gpuPending.value = edit.takeIf { it.minHz != null || it.maxHz != null || it.powerLevel != null }
+    }
+
     /** Full preset list — community + generic algorithmic — as produced
      *  by [PresetGenerator]. Re-derived on each refresh because the OPP
      *  table can change if the user enables core-online tuning (Phase 4
@@ -114,6 +126,7 @@ class TuneViewModel @Inject constructor(
 
     fun clearPending() {
         _pending.value = emptyMap()
+        _gpuPending.value = null
     }
 
     fun acknowledgeOc() {
@@ -152,8 +165,44 @@ class TuneViewModel @Inject constructor(
                     )
                 }
             }
+            // GPU edit, if any. Routes through the SAME writer as the CPU
+            // policies above so the snapshot-before-write/boot-revert
+            // invariant holds for GPU clocks too. The freq nodes live
+            // under <rootPath>/devfreq; the Adreno power-level clamp under
+            // <rootPath>/max_pwrlevel (Mali has no equivalent — gated on
+            // the probe exposing a powerLevelRange).
+            val gpu = report.gpu
+            val gpuEdit = _gpuPending.value
+            if (gpu != null && gpuEdit != null) {
+                if (gpuEdit.minHz != null) {
+                    results += tunableWriter.write(
+                        id = Tunables.gpuMinFreq(gpu.rootPath),
+                        value = gpuEdit.minHz.toString(),
+                        report = report,
+                        reason = "Tune UI (GPU)",
+                    )
+                }
+                if (gpuEdit.maxHz != null) {
+                    results += tunableWriter.write(
+                        id = Tunables.gpuMaxFreq(gpu.rootPath),
+                        value = gpuEdit.maxHz.toString(),
+                        report = report,
+                        reason = "Tune UI (GPU)",
+                    )
+                }
+                if (gpuEdit.powerLevel != null) {
+                    results += tunableWriter.write(
+                        id = Tunables.adrenoMaxPowerLevel(gpu.rootPath),
+                        value = gpuEdit.powerLevel.toString(),
+                        report = report,
+                        reason = "Tune UI (GPU)",
+                    )
+                }
+            }
+
             _lastResults.value = results
             _pending.value = emptyMap()
+            _gpuPending.value = null
             // Refresh probe so the slider min/max move to reflect what
             // the kernel actually accepted (some writes clamp).
             capabilityProbe.refresh()
@@ -358,5 +407,14 @@ class TuneViewModel @Inject constructor(
         val minKhz: Int? = null,
         val maxKhz: Int? = null,
         val governor: String? = null,
+    )
+
+    /** Staged GPU edit. [minHz]/[maxHz] are in Hz to match the GpuProbe's
+     *  availableFreqsHz units; [powerLevel] is the Adreno max-power-level
+     *  clamp (0 = fastest), null on Mali. */
+    data class GpuEdit(
+        val minHz: Long? = null,
+        val maxHz: Long? = null,
+        val powerLevel: Int? = null,
     )
 }

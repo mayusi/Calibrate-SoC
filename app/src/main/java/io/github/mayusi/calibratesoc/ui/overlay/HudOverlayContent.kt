@@ -35,6 +35,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -413,7 +415,12 @@ private fun Stat(label: String, value: String, unit: String, color: Color = Colo
 @Composable
 private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, maxMhz: Int) {
     val frac = if (maxMhz > 0) (mhz.toFloat() / maxMhz).coerceIn(0f, 1f) else 0f
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "Core $idx — $mhz MHz, $loadPct percent" },
+    ) {
         Text(
             "c$idx",
             color = Color(0xBBFFFFFF),

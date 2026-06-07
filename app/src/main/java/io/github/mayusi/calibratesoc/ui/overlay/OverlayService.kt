@@ -487,8 +487,19 @@ class OverlayService :
             //      root. No Odin Settings UI, no script-per-tap.
             //   3. Root via libsu (if Magisk/KernelSU active).
             //   4. Script-per-tap fallback (no PServer / no root).
-            val directOk = tryDirectSysfsWrite(perPolicyNewKhz)
-            val pserverOk = !directOk && tryPServerWrite(perPolicyNewKhz, report, summary)
+            lastWriteFailureReason = null
+            val directOk = runCatching { tryDirectSysfsWrite(perPolicyNewKhz) }.getOrElse {
+                hudEventLog.add(HudEventLog.Level.ERROR, "sysfs write threw: ${it.message}")
+                lastWriteFailureReason = it.message ?: "sysfs write threw an exception"
+                false
+            }
+            val pserverOk = !directOk && runCatching {
+                tryPServerWrite(perPolicyNewKhz, report, summary)
+            }.getOrElse {
+                hudEventLog.add(HudEventLog.Level.ERROR, "PServer write threw: ${it.message}")
+                lastWriteFailureReason = it.message ?: "PServer write threw an exception"
+                false
+            }
             if (directOk) {
                 hudEventLog.add(HudEventLog.Level.ACTION, "direct write OK ($summary)")
                 flashActionMessage("Applied: $summary MHz")
@@ -531,7 +542,14 @@ class OverlayService :
                 val body = scriptGenerator.generate(preset, report, adapter)
                 scriptDeployer.deploy(preset, body)
                 hudEventLog.add(HudEventLog.Level.WARN, "no root — script written ($summary)")
-                flashActionMessage("No root — need to run setup script. See Settings → Unlock HUD.")
+                val reason = lastWriteFailureReason
+                flashActionMessage(
+                    if (reason != null) {
+                        "Write failed — $reason. Need root or run setup script (Settings → Unlock HUD)."
+                    } else {
+                        "No root — need to run setup script. See Settings → Unlock HUD."
+                    }
+                )
             }
 
             // Update HUD's notion of current freqs.
@@ -629,6 +647,7 @@ class OverlayService :
         val command = parts.joinToString(" ; ")
         val result = pServerWriter.executeShell(command) ?: run {
             hudEventLog.add(HudEventLog.Level.WARN, "PServer binder not reachable")
+            lastWriteFailureReason = "PServer unreachable (need root or Force SELinux)"
             return false
         }
         val (status, stdout) = result
@@ -636,7 +655,8 @@ class OverlayService :
             true
         } else {
             hudEventLog.add(HudEventLog.Level.WARN, "PServer status=$status stdout=$stdout")
-            false
+            lastWriteFailureReason = "PServer rejected write (status=$status)"
+            return false
         }
     }
 
@@ -653,11 +673,16 @@ class OverlayService :
         if (perPolicyKhz.isEmpty()) return false
         for ((policyId, khz) in perPolicyKhz) {
             val path = java.io.File("/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq")
-            val ok = runCatching {
+            val outcome = runCatching {
                 path.bufferedWriter().use { it.write(khz.toString()) }
-                true
-            }.getOrElse { false }
-            if (!ok) return false
+            }
+            if (outcome.isFailure) {
+                val cause = outcome.exceptionOrNull()
+                val reason = cause?.message ?: "permission denied"
+                hudEventLog.add(HudEventLog.Level.WARN, "sysfs write policy$policyId failed: $reason")
+                lastWriteFailureReason = "sysfs write denied on policy$policyId ($reason)"
+                return false
+            }
         }
         return true
     }
@@ -702,6 +727,14 @@ class OverlayService :
         hudEventLog.add(HudEventLog.Level.ACTION, "apply ${next.first} (${next.second})")
         applyProfileViaScript(next.first)
     }
+
+    /**
+     * Last low-level write failure reason recorded by [tryDirectSysfsWrite]
+     * / [tryPServerWrite]. Surfaced on the HUD via [flashActionMessage] when
+     * a stepper tap can't write anywhere, so the user isn't left tapping a
+     * dead button with no explanation.
+     */
+    private var lastWriteFailureReason: String? = null
 
     private fun flashActionMessage(msg: String) {
         hudState.value = hudState.value.copy(lastActionMessage = msg)
