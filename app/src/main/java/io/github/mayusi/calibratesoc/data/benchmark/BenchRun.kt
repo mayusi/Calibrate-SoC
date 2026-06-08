@@ -101,4 +101,5 @@ data class ThrottleSample(
     val gpuTempC: Float?,
     val batteryTempC: Float,
     val batteryDrawMw: Long?,
+    val gpuMaxMhz: Int? = null,  // GPU frequency in MHz; gpuFreqHz from Telemetry / 1_000_000
 )

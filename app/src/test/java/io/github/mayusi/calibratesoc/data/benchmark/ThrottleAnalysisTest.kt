@@ -38,21 +38,72 @@ class ThrottleAnalysisTest {
     }
 
     @Test
-    fun `time to throttle returns elapsed of first sub-threshold sample`() {
-        // startMhz=3000, threshold = 0.95*3000 = 2850. 2800 sample crosses it.
+    fun `ramp-up then hold reads zero drop not negative`() {
+        // First sample is idle at 1017 MHz, then clocks ramp to 3187 MHz and hold.
+        // peakMhz=3187, sustainedMhz≈3187 → dropPct must be 0.0, never negative.
         val samples = listOf(
-            sample(0, 3000),
+            sample(0,    1017),   // idle / ramp-up
+            sample(500,  3187),
+            sample(1000, 3187),
+            sample(1500, 3187),
+            sample(2000, 3187),
+        )
+        val a = ThrottleAnalysis.from(samples)!!
+        assertThat(a.peakMhz).isEqualTo(3187)
+        assertThat(a.sustainedMhz).isEqualTo(3187)
+        assertThat(a.dropPct).isWithin(0.001).of(0.0)
+        // No throttle after ramp-up (all post-ramp samples are at peak).
+        assertThat(a.timeToThrottleMs).isNull()
+    }
+
+    @Test
+    fun `real throttle case uses peak as reference`() {
+        // Peak 3187 MHz, sustained drops to 2200 MHz → ~31% drop.
+        val samples = listOf(
+            sample(0,    3187),
+            sample(500,  3187),
+            sample(1000, 3187),
+            sample(1500, 2200),
+            sample(2000, 2200),
+        )
+        val a = ThrottleAnalysis.from(samples)!!
+        assertThat(a.peakMhz).isEqualTo(3187)
+        val expectedDrop = (3187 - 2200) * 100.0 / 3187
+        assertThat(a.dropPct).isWithin(0.5).of(expectedDrop)
+        assertThat(a.dropPct).isAtLeast(0.0)
+    }
+
+    @Test
+    fun `flat run reads zero drop`() {
+        val samples = listOf(
+            sample(0,    3000),
+            sample(500,  3000),
+            sample(1000, 3000),
+            sample(1500, 3000),
+        )
+        val a = ThrottleAnalysis.from(samples)!!
+        assertThat(a.dropPct).isWithin(0.001).of(0.0)
+    }
+
+    @Test
+    fun `time to throttle returns elapsed of first sub-threshold sample after ramp-up`() {
+        // peakMhz=3000, rampThreshold=2700, throttleThreshold=2850.
+        // Sample at 500ms is first to reach >=90% of peak (3000≥2700 → rampedIndex=0).
+        // After that, sample at 500ms drops to 2800 which is <=2850 → throttle at 500ms.
+        val samples = listOf(
+            sample(0,   3000),
             sample(250, 3000),
             sample(500, 2800),
         )
         val a = ThrottleAnalysis.from(samples)!!
+        // rampedIndex=0 (3000>=2700), look in drop(1)=[250ms:3000, 500ms:2800], first <=2850 is 2800→500ms
         assertThat(a.timeToThrottleMs).isEqualTo(500L)
     }
 
     @Test
     fun `never throttle yields null time and ~zero drop`() {
         val samples = listOf(
-            sample(0, 3000),
+            sample(0,   3000),
             sample(250, 3000),
             sample(500, 3000),
             sample(750, 3000),

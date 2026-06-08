@@ -14,10 +14,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Offscreen GLES 2.0 fragment-shader-heavy benchmark. Renders an
- * 800x800 pixel-buffer with a fragment shader that does ~80 iterations
- * of trig + sqrt per pixel for a fixed wall-clock window, counts the
- * frames drawn, returns FPS.
+ * Offscreen GLES 2.0 fragment-shader-heavy benchmark. Baseline [run] and
+ * [runDetailed] render at 800×800 with ~80 shader iterations per pixel.
+ * Stress variant [runStress] can render at higher resolution (e.g. 1440×1440)
+ * with more iterations (e.g. 256) to achieve sustained peak GPU load for
+ * thermal stability testing.
  *
  * Why this and not Vulkan compute: Vulkan needs vkSDK + glslang to
  * pre-compile shaders, more setup; GLES 2.0 is universal and the
@@ -46,6 +47,19 @@ class GpuTriangleStorm @Inject constructor() {
         withEglContext { renderLoopFrames(durationMs) }
 
     /**
+     * Heavier stress variant: renders at a higher resolution (surfacePx×surfacePx)
+     * with more fragment shader iterations (shaderIterations) to achieve sustained
+     * peak GPU load. Used by the stability test when CPU is already pinned to create
+     * a truly combined CPU+GPU thermal saturation test.
+     * Returns avg FPS or null if GLES setup fails.
+     */
+    suspend fun runStress(
+        durationMs: Long,
+        surfacePx: Int = 1440,
+        shaderIterations: Int = 256,
+    ): Double? = withEglContext(surfaceWidth = surfacePx, surfaceHeight = surfacePx) { renderLoopFramesStress(durationMs, surfacePx, shaderIterations) }?.avgFps
+
+    /**
      * Draw-call ceiling: count how many trivial draw calls the CPU can
      * submit per second when the fragment shader does nothing. The pixel
      * pipeline is starved by the geometry pipeline / driver call overhead
@@ -56,7 +70,11 @@ class GpuTriangleStorm @Inject constructor() {
     suspend fun runDrawCallCeiling(durationMs: Long = 2_000L): Double? =
         withEglContext { renderLoopDrawCallCeiling(durationMs) }
 
-    private suspend fun <T> withEglContext(block: () -> T?): T? = withContext(Dispatchers.Default) {
+    private suspend fun <T> withEglContext(
+        surfaceWidth: Int = WIDTH,
+        surfaceHeight: Int = HEIGHT,
+        block: () -> T?
+    ): T? = withContext(Dispatchers.Default) {
         var display: EGLDisplay? = null
         var context: EGLContext? = null
         var surface: EGLSurface? = null
@@ -85,8 +103,19 @@ class GpuTriangleStorm @Inject constructor() {
             context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, contextAttrs, 0)
             if (context == EGL14.EGL_NO_CONTEXT) return@withContext null
 
-            val surfAttrs = intArrayOf(EGL14.EGL_WIDTH, WIDTH, EGL14.EGL_HEIGHT, HEIGHT, EGL14.EGL_NONE)
+            // Clamp pbuffer dimensions to a safe range. Some GLES drivers have lower limits.
+            val clampedWidth = surfaceWidth.coerceIn(800, 2048)
+            val clampedHeight = surfaceHeight.coerceIn(800, 2048)
+
+            var surfAttrs = intArrayOf(EGL14.EGL_WIDTH, clampedWidth, EGL14.EGL_HEIGHT, clampedHeight, EGL14.EGL_NONE)
             surface = EGL14.eglCreatePbufferSurface(display, configs[0], surfAttrs, 0)
+
+            // Fallback to 800×800 if the requested size fails (driver limitation).
+            if (surface == EGL14.EGL_NO_SURFACE && (clampedWidth != WIDTH || clampedHeight != HEIGHT)) {
+                android.util.Log.w("GpuTriangleStorm", "pbuffer at ${clampedWidth}×${clampedHeight} failed, falling back to ${WIDTH}×${HEIGHT}")
+                surfAttrs = intArrayOf(EGL14.EGL_WIDTH, WIDTH, EGL14.EGL_HEIGHT, HEIGHT, EGL14.EGL_NONE)
+                surface = EGL14.eglCreatePbufferSurface(display, configs[0], surfAttrs, 0)
+            }
             if (surface == EGL14.EGL_NO_SURFACE) return@withContext null
 
             if (!EGL14.eglMakeCurrent(display, surface, surface, context)) return@withContext null
@@ -193,7 +222,63 @@ class GpuTriangleStorm @Inject constructor() {
         )
     }
 
-    private fun buildProgram(): Int {
+    private fun renderLoopFramesStress(
+        durationMs: Long,
+        surfacePx: Int,
+        shaderIterations: Int,
+    ): GpuFrameResult {
+        // Stress variant: EGL pbuffer surface is already created at surfacePx×surfacePx
+        // by withEglContext. Set the viewport to match so the fragment shader actually
+        // operates on the higher-resolution buffer. Combined with increased shader
+        // iterations, this achieves genuine sustained GPU thermal load.
+        // Clamp surfacePx the same way as withEglContext does, to handle fallback.
+        val surfaceDim = surfacePx.coerceIn(800, 2048)
+        GLES20.glViewport(0, 0, surfaceDim, surfaceDim)
+        val program = buildProgramStress(shaderIterations)
+        GLES20.glUseProgram(program)
+
+        val vertexData = floatArrayOf(
+            -1f, -1f,
+             3f, -1f,
+            -1f,  3f,
+        )
+        val buf = ByteBuffer.allocateDirect(vertexData.size * 4)
+            .order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(vertexData).position(0)
+
+        val posLoc = GLES20.glGetAttribLocation(program, "a_pos")
+        val timeLoc = GLES20.glGetUniformLocation(program, "u_time")
+        GLES20.glEnableVertexAttribArray(posLoc)
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, buf)
+
+        val frameTimes = ArrayList<Float>(4096)
+        var prev = System.nanoTime()
+        val start = prev
+        val deadline = start + durationMs * 1_000_000L
+        var frames = 0
+        while (System.nanoTime() < deadline) {
+            val t = (System.nanoTime() - start) / 1_000_000_000.0f
+            GLES20.glUniform1f(timeLoc, t)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3)
+            GLES20.glFinish()
+            val now = System.nanoTime()
+            frameTimes.add(((now - prev) / 1_000_000.0).toFloat())  // ms
+            prev = now
+            frames++
+        }
+        val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
+        val deltas = if (frameTimes.size > 1) frameTimes.drop(1) else frameTimes
+        return GpuFrameResult(
+            avgFps = if (elapsedSec > 0) frames / elapsedSec else 0.0,
+            frameTimesMs = deltas.toFloatArray(),
+        )
+    }
+
+    private fun buildProgram(): Int = buildProgramWithIterations(80)
+
+    private fun buildProgramStress(iterations: Int): Int = buildProgramWithIterations(iterations)
+
+    private fun buildProgramWithIterations(iterations: Int): Int {
         val vsh = """
             attribute vec2 a_pos;
             varying vec2 v_uv;
@@ -209,8 +294,8 @@ class GpuTriangleStorm @Inject constructor() {
             void main() {
                 vec2 p = v_uv * 2.0 - 1.0;
                 float a = 0.0;
-                // Fragment-heavy: ~80 trig+sqrt ops per pixel.
-                for (int i = 0; i < 80; i++) {
+                // Fragment-heavy: ~$iterations trig+sqrt ops per pixel.
+                for (int i = 0; i < $iterations; i++) {
                     float fi = float(i);
                     a += sin(p.x * (fi + 1.0) + u_time) *
                          cos(p.y * (fi + 1.0) - u_time);

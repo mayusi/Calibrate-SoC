@@ -86,3 +86,20 @@ Thumbs.db
 /.relnotes.txt
 /sc.png
 /*.tmp.png
+/CalibrateSoC-0.1.2-alpha.apk
+/CalibrateSoC-0.1.3-alpha.apk
+
+## Session screenshot artifacts (adb/verification PNGs at repo root)
+/benchmark_screen.png
+/final_result.png
+/result_screen.png
+/stability_results.png
+/stability_results_page.png
+/stability_scroll.png
+/stability_tab.png
+/temp_screen.png
+/test_final.png
+/test_progress_*.png
+/test_running.png
+/screen_*.png
+/docs/assets/sc_*.png

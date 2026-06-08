@@ -326,6 +326,7 @@ class BenchmarkRunner @Inject constructor(
         val gpuTempC = t.zoneTempsMilliC
             .filter { it.label.contains("gpu", ignoreCase = true) || it.label.contains("kgsl", ignoreCase = true) }
             .maxOfOrNull { it.tempMilliC / 1000f }
+        val gpuMaxMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
         val batteryTempC = (t.batteryTempDeciC ?: 0) / 10f
         return ThrottleSample(
             elapsedMs = System.currentTimeMillis() - runStartedAt,
@@ -334,6 +335,7 @@ class BenchmarkRunner @Inject constructor(
             gpuTempC = gpuTempC,
             batteryTempC = batteryTempC,
             batteryDrawMw = t.batteryDrawMilliW,
+            gpuMaxMhz = gpuMaxMhz,
         )
     }
 

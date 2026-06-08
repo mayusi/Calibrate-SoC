@@ -622,7 +622,7 @@ private fun PowerThermalCard(run: BenchRun) {
     val throttleAnnotation = if (a.dropPct < 5.0) {
         "Held ${a.sustainedMhz} MHz — no throttling detected."
     } else {
-        "Dropped %.0f%% under sustained load (peak ${a.startMhz} → sustained ${a.sustainedMhz} MHz).".format(a.dropPct)
+        "Dropped %.0f%% under sustained load (peak ${a.peakMhz} → sustained ${a.sustainedMhz} MHz).".format(a.dropPct)
     }
 
     SectionCard("Power & thermals") {
@@ -639,7 +639,7 @@ private fun PowerThermalCard(run: BenchRun) {
         )
         KvRow(
             label = "Sustained vs peak clock",
-            value = "${a.sustainedMhz} / ${a.startMhz} MHz",
+            value = "${a.sustainedMhz} / ${a.peakMhz} MHz",
             explainer = "Sustained (last 25%) vs peak. Sustained is what you actually get in long sessions.",
         )
         KvRow(

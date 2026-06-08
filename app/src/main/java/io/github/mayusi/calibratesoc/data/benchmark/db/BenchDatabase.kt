@@ -16,9 +16,12 @@ import androidx.room.RoomDatabase
 // gpuFrameTimesMs). These ride inside the existing `kernelsJson` column
 // (no structural entity change). Bumped for hygiene; destructive
 // fallback wipes old bench + stability history on first launch under v5.
+// v6 added gpuMaxMhz field to ThrottleSample (nullable default). Rides
+// inside the serialized throttleSamplesJson/samplesJson; backwards-compatible
+// via ignoreUnknownKeys + defaults in Json config.
 @Database(
     entities = [BenchRunEntity::class, StabilityRunEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class BenchDatabase : RoomDatabase() {

@@ -8,7 +8,9 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,9 +37,9 @@ class StabilityTestRunner @Inject constructor(
     val state: StateFlow<State> = _state.asStateFlow()
 
     suspend fun run(
-        loopCount: Int = 20,
-        loopMs: Long = 30_000L,
-        killTempC: Float = 90f,
+        loopCount: Int = 6,
+        loopMs: Long = 20_000L,
+        killTempC: Float = 95f,
     ): StabilityResult = coroutineScope {
         check(_state.value is State.Idle) { "Stability test already in progress" }
 
@@ -45,6 +47,21 @@ class StabilityTestRunner @Inject constructor(
         val samples = mutableListOf<ThrottleSample>()
         val loopFps = mutableListOf<Double>()
         var outcome = BenchOutcome.COMPLETED
+
+        // CPU work jobs — peg N-1 cores on a dedicated pool so Dispatchers.Default
+        // (used by the GPU storm + orchestration loop) is never starved.
+        val cpuThreads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 8)
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        val cpuDispatcher = kotlinx.coroutines.newFixedThreadPoolContext(cpuThreads, "stability-cpu")
+        val cpuJobs = (0 until cpuThreads).map {
+            launch(cpuDispatcher) {
+                val iterations = 2000  // inner iterations for NativeBench.runCpu
+                while (isActive) {
+                    runCatching { NativeBench.runCpu(iterations) }
+                    yield()  // cooperative: let cancellation propagate + free the thread briefly
+                }
+            }
+        }
 
         // Concurrent telemetry sampler — collects until cancelled.
         val samplerJob = launch(Dispatchers.IO) {
@@ -60,7 +77,8 @@ class StabilityTestRunner @Inject constructor(
                     loopCount = loopCount,
                     progress = i.toFloat() / loopCount,
                 )
-                val fps = gpuStorm.run(loopMs) ?: 0.0
+                // Use heavier GPU stress variant (256 iterations vs baseline 80)
+                val fps = gpuStorm.runStress(loopMs, shaderIterations = 256) ?: 0.0
                 loopFps += fps
 
                 // After each loop, honor the thermal kill switch.
@@ -71,7 +89,9 @@ class StabilityTestRunner @Inject constructor(
                 }
             }
         } finally {
+            cpuJobs.forEach { it.cancel() }
             samplerJob.cancel()
+            runCatching { cpuDispatcher.close() }  // release the dedicated thread pool
             _state.value = State.Idle
         }
 
@@ -96,6 +116,7 @@ class StabilityTestRunner @Inject constructor(
         val gpuTempC = t.zoneTempsMilliC
             .filter { it.label.contains("gpu", ignoreCase = true) || it.label.contains("kgsl", ignoreCase = true) }
             .maxOfOrNull { it.tempMilliC / 1000f }
+        val gpuMaxMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
         val batteryTempC = (t.batteryTempDeciC ?: 0) / 10f
         return ThrottleSample(
             elapsedMs = System.currentTimeMillis() - runStartedAt,
@@ -104,6 +125,7 @@ class StabilityTestRunner @Inject constructor(
             gpuTempC = gpuTempC,
             batteryTempC = batteryTempC,
             batteryDrawMw = t.batteryDrawMilliW,
+            gpuMaxMhz = gpuMaxMhz,
         )
     }
 

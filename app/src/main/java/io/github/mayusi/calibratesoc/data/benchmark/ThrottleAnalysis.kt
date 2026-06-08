@@ -7,11 +7,12 @@ package io.github.mayusi.calibratesoc.data.benchmark
  *  monitor extension `Telemetry.batteryDrawMilliW` already normalizes to
  *  "positive = discharging", which is exactly the benchmark case. */
 data class ThrottleAnalysis(
-    val startMhz: Int,
+    val startMhz: Int,            // first sample clock (kept for compatibility; use peakMhz for throttle math)
     val sustainedMhz: Int,        // avg of last 25% of samples
     val endMhz: Int,
-    val dropPct: Double,          // 100 * (startMhz - sustainedMhz)/startMhz
-    val timeToThrottleMs: Long?,  // first elapsed where cpuMaxMhz <= 95% of startMhz; null if never
+    val peakMhz: Int,             // max cpuMaxMhz across all samples — true reference for throttle math
+    val dropPct: Double,          // 100 * (peakMhz - sustainedMhz)/peakMhz, clamped >= 0
+    val timeToThrottleMs: Long?,  // first elapsed after ramp-up where cpuMaxMhz <= 95% of peakMhz; null if never
     val peakCpuTempC: Float,
     val peakGpuTempC: Float?,
     val thermalHeadroomC: Float?, // killTempC - peakCpuTempC
@@ -23,12 +24,25 @@ data class ThrottleAnalysis(
             if (samples.isEmpty()) return null
             val startMhz = samples.first().cpuMaxMhz
             val endMhz = samples.last().cpuMaxMhz
+
+            // Peak = highest clock the device actually reached under load (not the idle first sample).
+            val peakMhz = samples.maxOf { it.cpuMaxMhz }
+
             val tailFrom = (samples.size * 0.75).toInt().coerceAtMost(samples.size - 1)
             val sustainedMhz = samples.drop(tailFrom).map { it.cpuMaxMhz }.average().toInt()
-            val dropPct = if (startMhz > 0) (startMhz - sustainedMhz) * 100.0 / startMhz else 0.0
 
-            val throttleThreshold = startMhz * 0.95
-            val timeToThrottleMs = samples.firstOrNull { it.cpuMaxMhz <= throttleThreshold }?.elapsedMs
+            // Drop is peak → sustained, clamped to 0 so a ramp-up-then-hold reads 0%, never negative.
+            val dropPct = if (peakMhz > 0) ((peakMhz - sustainedMhz) * 100.0 / peakMhz).coerceAtLeast(0.0) else 0.0
+
+            // Time-to-throttle: find when clocks first reach ≥90% of peak (ramp-up complete),
+            // then find the first sample after that point where clocks drop to ≤95% of peak.
+            // This prevents the idle ramp-up from being misread as a throttle event.
+            val rampThreshold = peakMhz * 0.90
+            val throttleThreshold = peakMhz * 0.95
+            val rampedIndex = samples.indexOfFirst { it.cpuMaxMhz >= rampThreshold }
+            val timeToThrottleMs = if (rampedIndex >= 0) {
+                samples.drop(rampedIndex + 1).firstOrNull { it.cpuMaxMhz <= throttleThreshold }?.elapsedMs
+            } else null
 
             val peakCpuTempC = samples.maxOf { it.cpuMaxTempC }
             val peakGpuTempC = samples.mapNotNull { it.gpuTempC }.maxOrNull()
@@ -53,7 +67,7 @@ data class ThrottleAnalysis(
             }
 
             return ThrottleAnalysis(
-                startMhz, sustainedMhz, endMhz, dropPct, timeToThrottleMs,
+                startMhz, sustainedMhz, endMhz, peakMhz, dropPct, timeToThrottleMs,
                 peakCpuTempC, peakGpuTempC, headroom, avgPowerMw, energyMwh,
             )
         }

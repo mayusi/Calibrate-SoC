@@ -6,14 +6,23 @@ import org.junit.Test
 class StabilityResultTest {
 
     @Test
-    fun `stability is min over max times 100`() {
-        // min 60, max 120 -> 50%
-        assertThat(StabilityResult.compute(listOf(120.0, 90.0, 60.0))).isEqualTo(50)
+    fun `sustained over peak is avg of last 25 percent over max times 100`() {
+        // 4 loops: [60, 55, 45, 40]. Last 25% is [40]. 40/60 = 66%
+        val loopFps = listOf(60.0, 55.0, 45.0, 40.0)
+        assertThat(StabilityResult.compute(loopFps)).isEqualTo(66)
     }
 
     @Test
-    fun `flat curve is 100 percent`() {
-        assertThat(StabilityResult.compute(listOf(60.0, 60.0, 60.0))).isEqualTo(100)
+    fun `held flat across run is 100 percent`() {
+        // All same FPS: avg of last 25% = 60, max = 60 -> 100%
+        assertThat(StabilityResult.compute(listOf(60.0, 60.0, 60.0, 60.0))).isEqualTo(100)
+    }
+
+    @Test
+    fun `sagging run shows drop in sustained metric`() {
+        // Start 120, drop to 60 over 8 loops. Last 25% (2 loops at end) = [65, 60]. Avg 62.5 / max 120 ≈ 52%
+        val loopFps = listOf(120.0, 115.0, 100.0, 90.0, 80.0, 70.0, 65.0, 60.0)
+        assertThat(StabilityResult.compute(loopFps)).isEqualTo(52)
     }
 
     @Test
@@ -28,8 +37,8 @@ class StabilityResultTest {
 
     @Test
     fun `result is clamped to 0 to 100`() {
-        val pct = StabilityResult.compute(listOf(30.0, 90.0))
+        val pct = StabilityResult.compute(listOf(120.0, 30.0))
         assertThat(pct).isIn(0..100)
-        assertThat(pct).isEqualTo(33)
+        assertThat(pct).isEqualTo(25)
     }
 }

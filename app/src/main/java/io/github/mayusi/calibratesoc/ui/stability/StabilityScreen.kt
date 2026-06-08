@@ -27,7 +27,12 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchOutcome
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityResult
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityRun
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityTestRunner
+import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
+import io.github.mayusi.calibratesoc.data.benchmark.makeThrottleVerdict
+import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChartCard
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
@@ -79,7 +84,7 @@ private fun PastRunsCard(history: List<StabilityRun>, onDelete: (Long) -> Unit) 
 
 @Composable
 private fun PastRunRow(run: StabilityRun, onDelete: () -> Unit) {
-    val (color, _) = stabilityVerdict(run.stabilityPct)
+    val color = stabilityVerdictColor(run.stabilityPct)
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -124,8 +129,9 @@ private fun StabilityHeader() {
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            "Runs the GPU flat-out, back-to-back, and checks if performance holds. " +
-                "100% = no throttling under sustained load.",
+            "Runs the CPU and GPU flat-out together and checks how well your device " +
+                "holds peak under sustained load. 100% = no throttling. Expect it to " +
+                "get hot and the fans to spin.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -141,19 +147,19 @@ private fun RunControls(
         when (state) {
             StabilityTestRunner.State.Idle -> {
                 Text(
-                    "Pick a length. Keep the screen on and the device unplugged for honest numbers.",
+                    "Runs the CPU and GPU flat-out together to find real sustained performance — expect it to get hot and the fans to spin. Keep the screen on and the device unplugged for honest numbers.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 RunButton(
-                    title = "Quick  (10 loops · ~5 min)",
+                    title = "Quick  (6 loops · ~2 min)",
                     subtitle = "Shorter sustained stress — catches early throttling.",
-                    onClick = { onStart(10, 30_000L) },
+                    onClick = { onStart(6, 20_000L) },
                 )
                 RunButton(
-                    title = "Full  (20 loops · ~10 min)",
-                    subtitle = "Full sustained stress — surfaces the deep thermal throttle floor.",
-                    onClick = { onStart(20, 30_000L) },
+                    title = "Full  (9 loops · ~3 min)",
+                    subtitle = "Full sustained stress with CPU+GPU hammering — surfaces the thermal throttle floor.",
+                    onClick = { onStart(9, 20_000L) },
                 )
             }
             is StabilityTestRunner.State.Running -> {
@@ -167,7 +173,7 @@ private fun RunControls(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    "Keep screen on + device unplugged.",
+                    "Keep screen on + device unplugged. CPU and GPU are pegged.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -188,10 +194,17 @@ private fun RunButton(title: String, subtitle: String, onClick: () -> Unit) {
 
 @Composable
 private fun StabilityResultCard(result: StabilityResult) {
-    val (color, word) = stabilityVerdict(result.stabilityPct)
+    val analysis = ThrottleAnalysis.from(result.samples, killTempC = 95f)
+    val verdict = makeThrottleVerdict(analysis, result.peakTempC, killTempC = 95f, sustainedPct = result.stabilityPct)
+    val verdictColor = when (verdict.colorHint) {
+        "tertiary" -> MaterialTheme.colorScheme.tertiary
+        "secondary" -> MaterialTheme.colorScheme.secondary
+        "error" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.primary
+    }
 
     SectionCard("Result") {
-        // Headline stability %.
+        // Headline sustained/peak % + verdict.
         Row(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -201,30 +214,25 @@ private fun StabilityResultCard(result: StabilityResult) {
                 fontFamily = FontFamily.Monospace,
                 fontSize = 40.sp,
                 fontWeight = FontWeight.Bold,
-                color = color,
+                color = verdictColor,
             )
             Column {
                 Text(
-                    "Stability",
+                    "Sustained/Peak",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    word,
+                    verdict.word,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = color,
+                    color = verdictColor,
                 )
             }
         }
 
         Text(
-            "Min loop: %.1f FPS   ·   Max loop: %.1f FPS".format(result.minFps, result.maxFps),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            "Peak CPU temp: %.1f°C".format(result.peakTempC),
+            verdict.explanation,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -238,26 +246,122 @@ private fun StabilityResultCard(result: StabilityResult) {
             )
         }
 
-        // Per-loop FPS curve.
-        Text(
-            "Per-loop FPS — flat = stable, sloping down = throttling",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        MetricLineChart(result.loopFps.map { it.toFloat() })
+        // Summary row: sustained vs peak FPS, CPU MHz, temps, power.
+        SectionCard("Summary") {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                KvRow(
+                    label = "Sustained FPS",
+                    value = "%.1f".format(result.avgSustainedFps),
+                    explainer = "Average of last 25% of loops"
+                )
+                KvRow(
+                    label = "Peak FPS",
+                    value = "%.1f".format(result.maxFps),
+                    explainer = "Highest single loop"
+                )
+                if (analysis != null) {
+                    KvRow(
+                        label = "Sustained MHz",
+                        value = "${analysis.sustainedMhz}",
+                        explainer = "CPU clock in last 25%"
+                    )
+                    KvRow(
+                        label = "Peak MHz",
+                        value = "${analysis.peakMhz}",
+                    )
+                }
+                KvRow(
+                    label = "Peak CPU temp",
+                    value = "%.1f°C".format(result.peakTempC),
+                )
+                result.peakGpuTempC?.let {
+                    KvRow(
+                        label = "Peak GPU temp",
+                        value = "%.1f°C".format(it),
+                    )
+                }
+                if (analysis != null) {
+                    KvRow(
+                        label = "Thermal headroom",
+                        value = "%.1f°C".format(analysis.thermalHeadroomC ?: 0f),
+                        explainer = "Buffer before 95°C kill"
+                    )
+                    analysis.avgPowerMw?.let {
+                        KvRow(
+                            label = "Avg power",
+                            value = "%.0f W".format(it / 1000.0),
+                        )
+                    }
+                    analysis.timeToThrottleMs?.let {
+                        KvRow(
+                            label = "Time to throttle",
+                            value = "${it / 1000}s",
+                        )
+                    }
+                }
+            }
+        }
 
-        // Thermal curve from telemetry samples.
+        // Four charts: FPS, Temperature, Clocks, Power.
+        MetricLineChartCard(
+            title = "FPS",
+            caption = "Per-loop FPS — flat = stable, dropping = throttling",
+            points = result.loopFps.map { it.toFloat() },
+        )
+
         if (result.samples.size >= 2) {
-            Text(
-                "CPU temperature over time",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            MetricLineChart(result.samples.map { it.cpuMaxTempC })
+            val cpuTempSeries = result.samples.map { it.cpuMaxTempC }
+            val gpuTempSeries = result.samples.mapNotNull { it.gpuTempC }
+            SectionCard("Temperature") {
+                Text(
+                    if (gpuTempSeries.isNotEmpty())
+                        "CPU and GPU temperature over time — hotter = closer to throttling"
+                    else
+                        "CPU temperature over time — hotter = closer to throttling",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (gpuTempSeries.isNotEmpty()) {
+                    MetricLineChartOverlay(cpuTempSeries, gpuTempSeries)
+                } else {
+                    MetricLineChart(cpuTempSeries)
+                }
+            }
+        }
+
+        if (result.samples.size >= 2) {
+            val cpuMhzSeries = result.samples.map { it.cpuMaxMhz.toFloat() }
+            val gpuMhzSeries = result.samples.mapNotNull { it.gpuMaxMhz?.toFloat() }
+            SectionCard("Clocks") {
+                Text(
+                    if (gpuMhzSeries.isNotEmpty())
+                        "CPU and GPU clock frequencies — flat = stable, dropping = throttling"
+                    else
+                        "CPU clock frequency — flat = stable, dropping = throttling",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (gpuMhzSeries.isNotEmpty()) {
+                    MetricLineChartOverlay(cpuMhzSeries, gpuMhzSeries)
+                } else {
+                    MetricLineChart(cpuMhzSeries)
+                }
+            }
+        }
+
+        if (result.samples.size >= 2) {
+            val powerSeries = result.samples.mapNotNull { (it.batteryDrawMw?.toFloat() ?: 0f).takeIf { p -> p > 0f } }
+            if (powerSeries.size >= 2) {
+                MetricLineChartCard(
+                    title = "Power",
+                    caption = "Battery draw in watts over time",
+                    points = powerSeries.map { it / 1000f },  // mW to W
+                )
+            }
         }
 
         Text(
-            "FPS here is from this app's own GPU test — compare YOUR device's runs, " +
+            "FPS, clocks, and temps are from this app's own tests — compare YOUR device's runs, " +
                 "not against other phones.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -266,10 +370,10 @@ private fun StabilityResultCard(result: StabilityResult) {
 }
 
 @Composable
-private fun stabilityVerdict(pct: Int): Pair<Color, String> = when {
-    pct >= 97 -> MaterialTheme.colorScheme.tertiary to "Rock solid"
-    pct in 90..96 -> MaterialTheme.colorScheme.primary to "Stable"
-    pct in 80..89 -> MaterialTheme.colorScheme.secondary to "Some throttling"
-    else -> MaterialTheme.colorScheme.error to "Heavy throttling"
+private fun stabilityVerdictColor(pct: Int): Color = when {
+    pct >= 95 -> MaterialTheme.colorScheme.tertiary
+    pct in 85..94 -> MaterialTheme.colorScheme.primary
+    pct in 75..84 -> MaterialTheme.colorScheme.secondary
+    else -> MaterialTheme.colorScheme.error
 }
 

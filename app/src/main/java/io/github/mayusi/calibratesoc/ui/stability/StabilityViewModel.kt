@@ -41,7 +41,7 @@ class StabilityViewModel @Inject constructor(
 
     fun start(loopCount: Int, loopMs: Long) {
         viewModelScope.launch {
-            val result = runner.run(loopCount, loopMs)
+            val result = runner.run(loopCount = loopCount, loopMs = loopMs, killTempC = 95f)
             _result.value = result
             repository.saveStability(result, loopMs)
         }
