@@ -82,3 +82,7 @@ Thumbs.db
 /.ci_pending/
 /.relnotes.txt
 /CalibrateSoC-0.1.0-alpha.apk
+/CalibrateSoC-0.1.1-alpha.apk
+/.relnotes.txt
+/sc.png
+/*.tmp.png

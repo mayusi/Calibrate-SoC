@@ -13,8 +13,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -109,7 +107,7 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
 // --- Cards --------------------------------------------------------
 
 @Composable
-private fun SocCard(soc: SocInfo) = SectionCard("SoC") {
+private fun SocCard(soc: SocInfo) = SectionCard("SoC", "The chip, its GPU, and core layout.") {
     KV("Model", "${soc.friendlyName}  ", soc.confidence)
     KV("Vendor codename", "${soc.manufacturer} ${soc.model}")
     soc.gpuName?.let { KV("GPU", it) }
@@ -118,7 +116,7 @@ private fun SocCard(soc: SocInfo) = SectionCard("SoC") {
 
 @Composable
 private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onRun: () -> Unit) =
-    SectionCard("Memory") {
+    SectionCard("Memory", "RAM type and measured bandwidth.") {
         KV("Total", "${advertisedGb(memory.totalMb)} GB (${memory.totalMb} MB kernel-visible)")
         KV("Available", "%.1f GB".format(memory.availableMb / 1024f))
         KV("Type (inferred)", memory.inferredType, memory.inferredConfidence)
@@ -141,7 +139,7 @@ private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onR
 
 @Composable
 private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?, onRun: () -> Unit, isPrimary: Boolean) =
-    SectionCard("Storage — ${volume.label}") {
+    SectionCard("Storage — ${volume.label}", "Storage class and real read/write speeds.") {
         KV("Capacity", "%.1f GB total · %.1f GB free".format(volume.totalGb, volume.freeGb))
         KV("Class (inferred)", volume.inferredClass, volume.inferredConfidence)
         volume.vendorModel?.let { KV("Vendor model", it) }
@@ -175,7 +173,7 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
 
 @Composable
 private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: String?, onRun: () -> Unit) =
-    SectionCard("Network") {
+    SectionCard("Network", "Real-world download, upload, and latency.") {
         if (result != null) {
             result.downloadMbps?.let { KV("Download", "%.1f Mbps".format(it)) }
             result.uploadMbps?.let { KV("Upload", "%.1f Mbps".format(it)) }
@@ -202,7 +200,7 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: Str
     }
 
 @Composable
-private fun DisplayCard(d: DisplayInfo) = SectionCard("Display") {
+private fun DisplayCard(d: DisplayInfo) = SectionCard("Display", "Panel resolution, refresh rates, and HDR.") {
     KV("Resolution", "${d.widthPx} × ${d.heightPx}")
     KV("Density", "${d.densityDpi} dpi")
     KV("Refresh", "%.0f Hz".format(d.refreshHz))
@@ -213,7 +211,7 @@ private fun DisplayCard(d: DisplayInfo) = SectionCard("Display") {
 }
 
 @Composable
-private fun BatteryCard(b: BatteryInfo) = SectionCard("Battery") {
+private fun BatteryCard(b: BatteryInfo) = SectionCard("Battery", "Capacity, health, and live draw.") {
     // Technology and health status come from the BatteryManager framework
     // API and are available on every device regardless of SELinux policy.
     b.technology?.let { KV("Technology", it) }
@@ -242,7 +240,7 @@ private fun BatteryCard(b: BatteryInfo) = SectionCard("Battery") {
 }
 
 @Composable
-private fun RadioCard(r: RadioInfo) = SectionCard("Radios") {
+private fun RadioCard(r: RadioInfo) = SectionCard("Radios", "Wireless connectivity and positioning.") {
     KV("Wi-Fi", r.wifiStandard)
     KV("Bluetooth", r.bluetoothVersion)
     KV("NFC", if (r.nfcPresent) "present" else "not present")
@@ -253,16 +251,22 @@ private fun RadioCard(r: RadioInfo) = SectionCard("Radios") {
 
 // --- Shared helpers ----------------------------------------------
 
+/**
+ * Local section card that wraps the shared [SectionCard] and adds an
+ * optional one-line explainer under the title (onSurfaceVariant /
+ * labelSmall), matching the benchmark cards' "what is this" subtitle.
+ */
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            content()
+private fun SectionCard(title: String, explainer: String? = null, content: @Composable () -> Unit) {
+    io.github.mayusi.calibratesoc.ui.components.SectionCard(title) {
+        if (explainer != null) {
+            Text(
+                explainer,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+        content()
     }
 }
 

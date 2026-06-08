@@ -65,6 +65,15 @@ data class KernelScores(
      *  empty GLES draws at. Compare against gpuFps to see whether your
      *  workload would be CPU- or GPU-limited. */
     val cpuDrawCallFps: Double? = null,
+    // NEW GPU frame-time detail (nullable + default-null so old rows
+    // deserialize fine under ignoreUnknownKeys + defaults):
+    val gpuAvgFrameMs: Double? = null,
+    val gpuP50Fps: Double? = null,
+    val gpuP1LowFps: Double? = null,
+    val gpuP99FrameMs: Double? = null,
+    val gpuFrameConsistencyPct: Double? = null,
+    /** Downsampled (<=600) per-frame time series in ms, for the chart. */
+    val gpuFrameTimesMs: List<Float>? = null,
 )
 
 @Serializable

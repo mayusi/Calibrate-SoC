@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -14,9 +13,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -26,20 +23,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
-import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
-import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
-import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import io.github.mayusi.calibratesoc.data.benchmark.BenchOutcome
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityResult
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityRun
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityTestRunner
-import io.github.mayusi.calibratesoc.data.benchmark.ThrottleSample
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
@@ -256,7 +244,7 @@ private fun StabilityResultCard(result: StabilityResult) {
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        FpsChart(result.loopFps)
+        MetricLineChart(result.loopFps.map { it.toFloat() })
 
         // Thermal curve from telemetry samples.
         if (result.samples.size >= 2) {
@@ -265,7 +253,7 @@ private fun StabilityResultCard(result: StabilityResult) {
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            ThermalChart(result.samples)
+            MetricLineChart(result.samples.map { it.cpuMaxTempC })
         }
 
         Text(
@@ -285,48 +273,3 @@ private fun stabilityVerdict(pct: Int): Pair<Color, String> = when {
     else -> MaterialTheme.colorScheme.error to "Heavy throttling"
 }
 
-// ─── Charts (local equivalents — BenchmarkScreen's are private) ───────
-
-@Composable
-private fun FpsChart(loopFps: List<Double>) {
-    if (loopFps.size < 2) return
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(loopFps) {
-        producer.runTransaction {
-            lineSeries { series(loopFps.map { it.toFloat() }) }
-        }
-    }
-    CartesianChartHost(
-        chart = rememberCartesianChart(
-            rememberLineCartesianLayer(),
-            startAxis = VerticalAxis.rememberStart(),
-            bottomAxis = HorizontalAxis.rememberBottom(),
-        ),
-        modelProducer = producer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(160.dp),
-    )
-}
-
-@Composable
-private fun ThermalChart(samples: List<ThrottleSample>) {
-    if (samples.size < 2) return
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(samples) {
-        producer.runTransaction {
-            lineSeries { series(samples.map { it.cpuMaxTempC }) }
-        }
-    }
-    CartesianChartHost(
-        chart = rememberCartesianChart(
-            rememberLineCartesianLayer(),
-            startAxis = VerticalAxis.rememberStart(),
-            bottomAxis = HorizontalAxis.rememberBottom(),
-        ),
-        modelProducer = producer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(160.dp),
-    )
-}

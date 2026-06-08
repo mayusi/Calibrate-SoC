@@ -16,8 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -44,6 +42,7 @@ import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
 import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
 import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
 import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
+import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.capability.ThermalRole
@@ -80,6 +79,7 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
         }
         val current = latest!!
 
+        item { AtAGlanceCard(current) }
         item { PerCoreFreqCard(current) }
         item { CpuLoadCard(history) }
         item { GpuCard(history, current) }
@@ -259,6 +259,103 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
     )
 }
 
+// --- At a glance summary ----------------------------------------------
+
+/**
+ * Compact top-of-screen summary: the four numbers that answer "is my
+ * device OK right now" at a glance — peak SoC temp (hottest of any
+ * thermal zone), total power draw, peak CPU clock, and GPU load. Each
+ * is a tight stat tile in one row; the temp tile is colored by severity
+ * so a hot device is obvious without reading the number.
+ */
+@Composable
+private fun AtAGlanceCard(t: Telemetry) = SectionCard("At a glance") {
+    // Peak SoC temp: hottest reading across all reachable zones (CPU,
+    // GPU, etc.), filtered to a sane range so a bogus 0/250 °C sensor
+    // doesn't dominate.
+    val peakTempC = t.zoneTempsMilliC
+        .filter { it.tempMilliC in 1_000..150_000 }
+        .maxOfOrNull { it.tempMilliC / 1000.0 }
+    val totalW = t.batteryDrawMilliW?.let { it / 1000.0 }
+    val peakCpuMhz = t.perCoreCpuFreqKhz.maxOrNull()?.let { it / 1000 }
+    val gpuLoad = t.gpuLoadPct
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        GlanceStat(
+            label = "SoC temp",
+            value = peakTempC?.let { "%.0f°".format(it) } ?: "—",
+            color = peakTempC?.let { glanceTempColor(it) } ?: MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        GlanceStat(
+            label = "Power",
+            value = totalW?.let { "%.1f W".format(it) } ?: "—",
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        GlanceStat(
+            label = "CPU peak",
+            value = peakCpuMhz?.let { "$it" } ?: "—",
+            unit = if (peakCpuMhz != null) "MHz" else null,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        GlanceStat(
+            label = "GPU load",
+            value = gpuLoad?.let { "$it%" } ?: "—",
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun GlanceStat(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    unit: String? = null,
+    color: Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Column(modifier = modifier) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = androidx.compose.ui.Alignment.Bottom) {
+            Text(
+                value,
+                style = MaterialTheme.typography.titleLarge,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+            )
+            if (unit != null) {
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    unit,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 3.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Severity bands for the at-a-glance SoC temp tile: emerald < 60,
+ *  purple 60–75, red > 75 °C. */
+@Composable
+private fun glanceTempColor(c: Double): Color = when {
+    c > 75 -> MaterialTheme.colorScheme.error
+    c >= 60 -> MaterialTheme.colorScheme.secondary
+    else -> MaterialTheme.colorScheme.tertiary
+}
+
 // --- Per-core CPU frequency (current values, bar-ish display) ----------
 
 @Composable
@@ -407,19 +504,6 @@ private fun StatColumn(label: String, value: String) {
     Column {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
-    }
-}
-
-@Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            content()
-        }
     }
 }
 

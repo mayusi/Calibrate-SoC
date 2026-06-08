@@ -11,9 +11,14 @@ import androidx.room.RoomDatabase
 // benchmark history (convenience data, not load-bearing).
 // v4 added the stability_runs table (StabilityRunEntity). Still
 // destructive — stability history is convenience data too.
+// v5 added GPU frame-time detail fields to KernelScores (gpuAvgFrameMs,
+// gpuP50Fps, gpuP1LowFps, gpuP99FrameMs, gpuFrameConsistencyPct,
+// gpuFrameTimesMs). These ride inside the existing `kernelsJson` column
+// (no structural entity change). Bumped for hygiene; destructive
+// fallback wipes old bench + stability history on first launch under v5.
 @Database(
     entities = [BenchRunEntity::class, StabilityRunEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class BenchDatabase : RoomDatabase() {

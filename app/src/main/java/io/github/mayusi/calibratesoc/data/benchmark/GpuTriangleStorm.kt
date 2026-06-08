@@ -33,8 +33,17 @@ import javax.inject.Singleton
 @Singleton
 class GpuTriangleStorm @Inject constructor() {
 
-    suspend fun run(durationMs: Long = 5_000L): Double? =
-        withEglContext { renderLoopFps(durationMs) }
+    suspend fun run(durationMs: Long = 5_000L): Double? =        // keep: stability uses this
+        runDetailed(durationMs)?.avgFps
+
+    /**
+     * Rich variant: captures per-frame wall-clock deltas (glFinish makes
+     * them honest, not pipelined) so the runner can compute percentiles,
+     * 1% low, and frame-pacing consistency. The bare [run] above delegates
+     * here and just keeps the avgFps.
+     */
+    suspend fun runDetailed(durationMs: Long = 8_000L): GpuFrameResult? =
+        withEglContext { renderLoopFrames(durationMs) }
 
     /**
      * Draw-call ceiling: count how many trivial draw calls the CPU can
@@ -134,7 +143,7 @@ class GpuTriangleStorm @Inject constructor() {
         return calls / elapsedSec
     }
 
-    private fun renderLoopFps(durationMs: Long): Double {
+    private fun renderLoopFrames(durationMs: Long): GpuFrameResult {
         GLES20.glViewport(0, 0, WIDTH, HEIGHT)
         val program = buildProgram()
         GLES20.glUseProgram(program)
@@ -155,7 +164,9 @@ class GpuTriangleStorm @Inject constructor() {
         GLES20.glEnableVertexAttribArray(posLoc)
         GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, buf)
 
-        val start = System.nanoTime()
+        val frameTimes = ArrayList<Float>(4096)
+        var prev = System.nanoTime()
+        val start = prev
         val deadline = start + durationMs * 1_000_000L
         var frames = 0
         while (System.nanoTime() < deadline) {
@@ -164,11 +175,22 @@ class GpuTriangleStorm @Inject constructor() {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 3)
             // Force the GPU to actually complete so we don't just queue
             // commands without rendering — vendors batch aggressively.
+            // This also makes the per-frame delta an honest wall-clock
+            // frame time, so percentiles/1%-low are meaningful.
             GLES20.glFinish()
+            val now = System.nanoTime()
+            frameTimes.add(((now - prev) / 1_000_000.0).toFloat())  // ms
+            prev = now
             frames++
         }
         val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
-        return frames / elapsedSec
+        // Drop the first frame delta — shader warm-up / first-draw compile
+        // spike would skew the slow-tail percentiles.
+        val deltas = if (frameTimes.size > 1) frameTimes.drop(1) else frameTimes
+        return GpuFrameResult(
+            avgFps = if (elapsedSec > 0) frames / elapsedSec else 0.0,
+            frameTimesMs = deltas.toFloatArray(),
+        )
     }
 
     private fun buildProgram(): Int {

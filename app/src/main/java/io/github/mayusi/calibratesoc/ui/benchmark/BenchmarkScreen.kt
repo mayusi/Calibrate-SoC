@@ -1,8 +1,6 @@
 package io.github.mayusi.calibratesoc.ui.benchmark
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -32,7 +30,6 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,24 +41,19 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.Color
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
-import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
-import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
-import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
 import io.github.mayusi.calibratesoc.data.benchmark.BenchFlavor
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRating
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
+import io.github.mayusi.calibratesoc.data.benchmark.BenchScores
 import io.github.mayusi.calibratesoc.data.benchmark.BenchmarkRunner
-import io.github.mayusi.calibratesoc.data.benchmark.ThrottleSample
+import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.ui.components.KvRow
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.ui.stability.StabilityScreen
 import java.text.SimpleDateFormat
@@ -322,11 +314,14 @@ private fun RunCard(
                 HeadlineScoreCard(score, rating)
             }
 
+            // ── Category sub-scores (CPU / GPU / Memory) ─────────
+            CategoryScoreRow(remember(run) { BenchScores.from(run) })
+
             // ── Category cards ───────────────────────────────────
             CpuCard(run)
             if (run.kernels.memoryBandwidthMBps != null) MemoryCard(run)
-            if (run.kernels.gpuFps != null || run.kernels.cpuDrawCallFps != null) GpuCard(run)
-            if (run.throttleSamples.isNotEmpty()) ThrottleCard(run)
+            if (run.kernels.gpuFps != null || run.kernels.cpuDrawCallFps != null) GpuDetailCard(run)
+            if (run.throttleSamples.isNotEmpty()) PowerThermalCard(run)
 
             // ── Snapshot context ─────────────────────────────────
             SnapshotContext(run)
@@ -409,6 +404,73 @@ private fun HeadlineScoreCard(
     }
 }
 
+// ─── Category sub-scores row ──────────────────────────────────────────
+
+@Composable
+private fun CategoryScoreRow(scores: BenchScores) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CategoryMiniCard(
+                "CPU",
+                scores.cpu,
+                Color(0xFF60A5FA),
+                Modifier.weight(1f),
+            )
+            CategoryMiniCard(
+                "GPU",
+                scores.gpu,
+                Color(0xFFA78BFA),
+                Modifier.weight(1f),
+            )
+            CategoryMiniCard(
+                "Memory",
+                scores.memory,
+                Color(0xFF34D399),
+                Modifier.weight(1f),
+            )
+        }
+        Text(
+            BenchScores.HONESTY,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun CategoryMiniCard(
+    label: String,
+    value: Long?,
+    accent: Color,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp, horizontal = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                value?.toString() ?: "—",
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium,
+                color = accent,
+            )
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 // ─── Category cards ───────────────────────────────────────────────────
 
 @Composable
@@ -474,22 +536,50 @@ private fun MemoryCard(run: BenchRun) {
 }
 
 @Composable
-private fun GpuCard(run: BenchRun) {
+private fun GpuDetailCard(run: BenchRun) {
     val k = run.kernels
     if (k.gpuFps == null && k.cpuDrawCallFps == null) return
-    SectionCard("GPU") {
+    SectionCard("GPU detail") {
         Text(
-            "Graphics rendering speed. GPU FPS = triangle rendering throughput. " +
-                "CPU draw-call ceiling = how fast the CPU can issue draw commands — " +
-                "if this is lower than GPU FPS, the CPU is the bottleneck.",
+            "Graphics rendering speed and frame pacing. Averages hide stutter — " +
+                "the 1% low and consistency show how even the frames actually are.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         k.gpuFps?.let {
             KvRow(
-                label = "GPU (triangle storm)",
+                label = "Avg FPS (triangle storm)",
                 value = "%.1f FPS".format(it),
                 explainer = "Raw GPU fill rate. Higher = better graphics headroom.",
+            )
+        }
+        k.gpuP50Fps?.let {
+            KvRow(
+                label = "Median FPS",
+                value = "%.1f FPS".format(it),
+                explainer = "The typical frame's speed — less skewed by outliers than the average.",
+            )
+        }
+        k.gpuP1LowFps?.let {
+            KvRow(
+                label = "1% low FPS",
+                value = "%.1f FPS".format(it),
+                explainer = "FPS you sustain 99% of the time — derived from the 99th-percentile slowest frame.",
+            )
+        }
+        k.gpuP99FrameMs?.let {
+            KvRow(
+                label = "p99 frame time",
+                value = "%.2f ms".format(it),
+                explainer = "The slowest 1% of frames take this long — high = visible stutter.",
+            )
+        }
+        k.gpuFrameConsistencyPct?.let { pct ->
+            MetricBarRow(
+                label = "Consistency",
+                value = "%.0f%%".format(pct),
+                explainer = "100% = perfectly even frame pacing.",
+                fraction = (pct / 100.0).toFloat().coerceIn(0f, 1f),
             )
         }
         k.cpuDrawCallFps?.let {
@@ -511,25 +601,31 @@ private fun GpuCard(run: BenchRun) {
                 explainer = hint,
             )
         }
+        val frameCurve = k.gpuFrameTimesMs
+        if (frameCurve != null && frameCurve.size >= 2) {
+            Text(
+                "Per-frame time (ms) — flat = smooth, spikes = stutter.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MetricLineChart(frameCurve)
+        }
     }
 }
 
 @Composable
-private fun ThrottleCard(run: BenchRun) {
-    if (run.throttleSamples.isEmpty()) return
+private fun PowerThermalCard(run: BenchRun) {
     val samples = run.throttleSamples
-    val startMhz = samples.first().cpuMaxMhz
-    val endMhz = samples.last().cpuMaxMhz
-    val maxTempC = samples.maxOf { it.cpuMaxTempC }
-    val dropPct = if (startMhz > 0) (startMhz - endMhz).toFloat() * 100f / startMhz else 0f
+    if (samples.isEmpty()) return
+    val a = remember(run) { ThrottleAnalysis.from(samples, killTempC = 85f) } ?: return
 
-    val throttleAnnotation = if (dropPct < 5f) {
-        "Held $endMhz MHz — no throttling detected."
+    val throttleAnnotation = if (a.dropPct < 5.0) {
+        "Held ${a.sustainedMhz} MHz — no throttling detected."
     } else {
-        "Dropped %.0f%% under sustained load (peak $startMhz → $endMhz MHz).".format(dropPct)
+        "Dropped %.0f%% under sustained load (peak ${a.startMhz} → sustained ${a.sustainedMhz} MHz).".format(a.dropPct)
     }
 
-    SectionCard("Throttle (10-min sustained)") {
+    SectionCard("Power & thermals") {
         Text(
             "Shows how the chip behaves under continuous load — peak is easy, " +
                 "sustained is what matters in long gaming sessions.",
@@ -541,35 +637,88 @@ private fun ThrottleCard(run: BenchRun) {
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
         )
+        KvRow(
+            label = "Sustained vs peak clock",
+            value = "${a.sustainedMhz} / ${a.startMhz} MHz",
+            explainer = "Sustained (last 25%) vs peak. Sustained is what you actually get in long sessions.",
+        )
+        KvRow(
+            label = "Time to throttle",
+            value = a.timeToThrottleMs?.let { "%.1f s".format(it / 1000.0) } ?: "no throttle",
+            explainer = "How long the chip held ≥95% of peak clock before dropping.",
+        )
+        KvRow(
+            label = "Peak CPU temp",
+            value = "%.1f°C".format(a.peakCpuTempC),
+            explainer = "Hottest CPU reading during the sustained test.",
+        )
+        a.peakGpuTempC?.let {
+            KvRow(
+                label = "Peak GPU temp",
+                value = "%.1f°C".format(it),
+                explainer = "Hottest GPU reading during the sustained test.",
+            )
+        }
+        a.thermalHeadroomC?.let { headroom ->
+            MetricBarRow(
+                label = "Thermal headroom",
+                value = "%.1f°C".format(headroom),
+                explainer = "Margin below the 85°C kill threshold. More = more sustained clock available.",
+                fraction = (headroom / 85f).coerceIn(0f, 1f),
+            )
+        }
+        a.avgPowerMw?.let {
+            KvRow(
+                label = "Avg power",
+                value = "%.2f W".format(it / 1000.0),
+                explainer = "Mean battery draw under sustained load.",
+            )
+        }
+        a.energyMwh?.let {
+            KvRow(
+                label = "Energy used",
+                value = "%.1f mWh".format(it),
+                explainer = "Total energy drawn over the throttle test.",
+            )
+        }
+
         Text(
-            "Peak CPU temp: %.1f°C".format(maxTempC),
-            style = MaterialTheme.typography.bodySmall,
+            "Sustained CPU MHz over time — flat = no throttle, sloping down = throttling.",
+            style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        ThrottleChart(samples)
+        MetricLineChart(samples.map { it.cpuMaxMhz.toFloat() })
+
+        Text(
+            "CPU temperature over time.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        MetricLineChart(samples.map { it.cpuMaxTempC })
     }
 }
 
+/** KvRow plus a thin progress bar where a true 0..1 fraction is meaningful
+ *  (consistency %, thermal headroom). Not used on raw CPU/mem rows to avoid
+ *  fake precision. */
 @Composable
-private fun ThrottleChart(samples: List<ThrottleSample>) {
-    if (samples.size < 2) return
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(samples) {
-        producer.runTransaction {
-            lineSeries { series(samples.map { it.cpuMaxMhz.toFloat() }) }
+private fun MetricBarRow(
+    label: String,
+    value: String,
+    explainer: String?,
+    fraction: Float?,
+) {
+    Column {
+        KvRow(label = label, value = value, explainer = explainer)
+        if (fraction != null) {
+            LinearProgressIndicator(
+                progress = { fraction.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp),
+            )
         }
     }
-    CartesianChartHost(
-        chart = rememberCartesianChart(
-            rememberLineCartesianLayer(),
-            startAxis = VerticalAxis.rememberStart(),
-            bottomAxis = HorizontalAxis.rememberBottom(),
-        ),
-        modelProducer = producer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(160.dp),
-    )
 }
 
 @Composable
@@ -649,6 +798,10 @@ private fun CompareCard(
 
 @Composable
 private fun ScoreDeltaCard(a: BenchRun, b: BenchRun) {
+    val sa = remember(a) { BenchScores.from(a) }
+    val sb = remember(b) { BenchScores.from(b) }
+    val ta = remember(a) { ThrottleAnalysis.from(a.throttleSamples) }
+    val tb = remember(b) { ThrottleAnalysis.from(b.throttleSamples) }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             "Score deltas (B vs A) — green = improvement",
@@ -665,6 +818,16 @@ private fun ScoreDeltaCard(a: BenchRun, b: BenchRun) {
         deltaRow("GPU FPS", a.kernels.gpuFps, b.kernels.gpuFps, "%.1f")
         deltaRow("Draw calls", a.kernels.cpuDrawCallFps, b.kernels.cpuDrawCallFps, "%.0f")
         deltaRow("CPU% GPU", a.kernels.cpuUsageDuringGpuPct?.toDouble(), b.kernels.cpuUsageDuringGpuPct?.toDouble(), "%.0f")
+        // ── Category sub-scores ──────────────────────────────────
+        deltaRow("CPU score", sa.cpu?.toDouble(), sb.cpu?.toDouble(), "%.0f")
+        deltaRow("GPU score", sa.gpu?.toDouble(), sb.gpu?.toDouble(), "%.0f")
+        deltaRow("Memory score", sa.memory?.toDouble(), sb.memory?.toDouble(), "%.0f")
+        // ── Frame pacing ─────────────────────────────────────────
+        deltaRow("1% low FPS", a.kernels.gpuP1LowFps, b.kernels.gpuP1LowFps, "%.1f")
+        deltaRow("Consistency %", a.kernels.gpuFrameConsistencyPct, b.kernels.gpuFrameConsistencyPct, "%.0f")
+        // ── Power & energy (FULL vs FULL only) ───────────────────
+        deltaRow("Energy mWh", ta?.energyMwh, tb?.energyMwh, "%.1f")
+        deltaRow("Avg W", ta?.avgPowerMw?.let { it / 1000.0 }, tb?.avgPowerMw?.let { it / 1000.0 }, "%.2f")
     }
 }
 
@@ -717,38 +880,5 @@ private fun ThrottleOverlay(a: BenchRun, b: BenchRun) {
     )
     val seriesA = a.throttleSamples.map { it.cpuMaxMhz.toFloat() }
     val seriesB = b.throttleSamples.map { it.cpuMaxMhz.toFloat() }
-    OverlayChart(seriesA, seriesB)
-}
-
-@Composable
-private fun OverlayChart(a: List<Float>, b: List<Float>) {
-    if (a.size < 2 && b.size < 2) {
-        Box(
-            Modifier
-                .height(120.dp)
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface),
-        )
-        return
-    }
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(a, b) {
-        producer.runTransaction {
-            lineSeries {
-                if (a.size >= 2) series(a)
-                if (b.size >= 2) series(b)
-            }
-        }
-    }
-    CartesianChartHost(
-        chart = rememberCartesianChart(
-            rememberLineCartesianLayer(),
-            startAxis = VerticalAxis.rememberStart(),
-            bottomAxis = HorizontalAxis.rememberBottom(),
-        ),
-        modelProducer = producer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(160.dp),
-    )
+    MetricLineChartOverlay(seriesA, seriesB)
 }

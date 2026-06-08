@@ -207,7 +207,8 @@ class BenchmarkRunner @Inject constructor(
             // bench was CPU-limited rather than truly GPU-bound.
             val cpuDuringGpu = CpuBusySampler()
             val samplerJob = launch(Dispatchers.IO) { cpuDuringGpu.sampleWhileActive() }
-            val gpuFps = gpuStorm.run(config.gpuDurationMs)
+            val gpuResult = runCatching { gpuStorm.runDetailed(config.gpuDurationMs) }.getOrNull()
+            val gpuSummary = gpuResult?.summarize(downsampleTo = 600)
             samplerJob.cancel()
             val cpuUsageDuringGpuPct = cpuDuringGpu.averagePct()
 
@@ -222,9 +223,15 @@ class BenchmarkRunner @Inject constructor(
                 cpuFloat = cpuFloat,
                 cpuAes = cpuAes,
                 memoryBandwidthMBps = memBw,
-                gpuFps = gpuFps,
+                gpuFps = gpuSummary?.avgFps,
                 cpuUsageDuringGpuPct = cpuUsageDuringGpuPct,
                 cpuDrawCallFps = drawCallFps,
+                gpuAvgFrameMs = gpuSummary?.avgFrameMs,
+                gpuP50Fps = gpuSummary?.p50Fps,
+                gpuP1LowFps = gpuSummary?.p1LowFps,
+                gpuP99FrameMs = gpuSummary?.p99FrameMs,
+                gpuFrameConsistencyPct = gpuSummary?.consistencyPct,
+                gpuFrameTimesMs = gpuSummary?.frameTimesMsDownsampled,
             )
         }
 
@@ -299,9 +306,13 @@ class BenchmarkRunner @Inject constructor(
                 }
             }
         }
-        if (watchdog == null && outcome == BenchOutcome.COMPLETED) {
-            outcome = BenchOutcome.ABORTED_DURATION
-        }
+        // watchdog == null is the NORMAL case: withTimeoutOrNull returns null
+        // when throttleDurationMs elapses, which is exactly when the sustained
+        // test is meant to finish. The inner loop only ever *returns* early to
+        // signal a temp/battery kill (which already set `outcome`). So a null
+        // watchdog with no kill set means the test ran its full duration =
+        // COMPLETED. (Previously this was mislabeled ABORTED_DURATION, making
+        // every healthy Full run read as "Aborted — time limit".)
         workJob.cancel()
         samplerJob.cancel()
         ThrottleResult(samples = samples.toList(), outcome = outcome)

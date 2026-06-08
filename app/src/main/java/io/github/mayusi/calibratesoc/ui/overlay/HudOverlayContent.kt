@@ -99,7 +99,12 @@ fun HudOverlayContent(
             }
             state.lastActionMessage?.let {
                 Spacer(Modifier.height(4.dp))
-                Text(it, color = Color(0xCCFFFFFF), fontSize = 9.sp)
+                Text(
+                    it,
+                    color = Color(0xFFFFE0A0),
+                    fontSize = 10.sp,
+                    lineHeight = 13.sp,
+                )
             }
         }
     }
@@ -240,9 +245,14 @@ private fun HudVerbose(state: HudUiState) {
         HudCompactRows(state)
 
         if (state.perCoreMhz.isNotEmpty()) {
-            Spacer(Modifier.height(2.dp))
-            Text("Per-core (MHz · load%)", color = Color(0x99FFFFFF), fontSize = 9.sp)
-            Column {
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "Per-core (MHz · load%)",
+                color = Color(0xB3FFFFFF),
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 state.perCoreMhz.forEachIndexed { idx, mhz ->
                     val loadPct = state.perCoreLoadPct.getOrNull(idx) ?: 0
                     PerCoreBar(idx, mhz, loadPct, state.cpuMaxMhz)
@@ -251,14 +261,19 @@ private fun HudVerbose(state: HudUiState) {
         }
 
         if (state.zones.isNotEmpty()) {
-            Spacer(Modifier.height(2.dp))
-            Text("Thermal zones (all)", color = Color(0x99FFFFFF), fontSize = 9.sp)
-            Column {
+            Spacer(Modifier.height(3.dp))
+            Text(
+                "Thermal zones (all)",
+                color = Color(0xB3FFFFFF),
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 state.zones.forEach { (label, c) ->
                     Row(modifier = Modifier.fillMaxWidth()) {
                         Text(
                             label.take(28),
-                            color = Color(0xBBFFFFFF),
+                            color = Color(0xCCFFFFFF),
                             fontSize = 9.sp,
                             modifier = Modifier.weight(1f),
                         )
@@ -267,6 +282,7 @@ private fun HudVerbose(state: HudUiState) {
                             color = tempColor(c),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
                         )
                     }
                 }
@@ -397,17 +413,28 @@ private fun HudProfileChips(
 @Composable
 private fun Stat(label: String, value: String, unit: String, color: Color = Color.White) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = Color(0x99FFFFFF), fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            label,
+            color = Color(0xB3FFFFFF),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.5.sp,
+        )
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
                 value,
                 color = color,
-                fontSize = 13.sp,
+                fontSize = 15.sp,
                 fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.width(2.dp))
-            Text(unit, color = Color(0x99FFFFFF), fontSize = 8.sp)
+            Text(
+                unit,
+                color = Color(0x99FFFFFF),
+                fontSize = 8.sp,
+                modifier = Modifier.padding(bottom = 1.dp),
+            )
         }
     }
 }
@@ -423,22 +450,22 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, maxMhz: Int) {
     ) {
         Text(
             "c$idx",
-            color = Color(0xBBFFFFFF),
-            fontSize = 8.sp,
+            color = Color(0xCCFFFFFF),
+            fontSize = 9.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier.width(20.dp),
         )
         Box(
             modifier = Modifier
                 .weight(1f)
-                .height(6.dp)
+                .height(7.dp)
                 .clip(RoundedCornerShape(2.dp))
                 .background(Color(0x22FFFFFF)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(frac)
-                    .height(6.dp)
+                    .height(7.dp)
                     .background(loadColor(loadPct)),
             )
         }
@@ -446,9 +473,9 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, maxMhz: Int) {
         Text(
             "$mhz · $loadPct%",
             color = Color.White,
-            fontSize = 8.sp,
+            fontSize = 9.sp,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(72.dp),
+            modifier = Modifier.width(76.dp),
         )
     }
 }
