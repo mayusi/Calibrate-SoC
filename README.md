@@ -108,6 +108,14 @@ See [CHANGELOG.md](CHANGELOG.md) for what's new in each release.
       <sub><b>HUD in-game</b> — live FPS &amp; clocks over any game</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/assets/settings.png" width="250" alt="Settings — appearance &amp; units"><br>
+      <sub><b>Settings</b> — accent colours, units, backup &amp; updates</sub>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
 </table>
 
 ### Detailed benchmark output
