@@ -10,6 +10,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BatteryChargingFull
+import androidx.compose.material.icons.outlined.Brightness6
+import androidx.compose.material.icons.outlined.DeveloperBoard
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.SettingsInputAntenna
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -36,6 +44,7 @@ import io.github.mayusi.calibratesoc.data.hardware.NetworkTestResult
 import io.github.mayusi.calibratesoc.data.hardware.RadioInfo
 import io.github.mayusi.calibratesoc.data.hardware.SocInfo
 import io.github.mayusi.calibratesoc.data.hardware.StorageVolume
+import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
  * Hardware tab: identifies what's in the device + speed-tests
@@ -58,8 +67,8 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item {
             Column {
@@ -107,7 +116,11 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
 // --- Cards --------------------------------------------------------
 
 @Composable
-private fun SocCard(soc: SocInfo) = SectionCard("SoC", "The chip, its GPU, and core layout.") {
+private fun SocCard(soc: SocInfo) = SectionCard(
+    title = "SoC",
+    explainer = "The chip, its GPU, and core layout.",
+    icon = Icons.Outlined.DeveloperBoard,
+) {
     KV("Model", "${soc.friendlyName}  ", soc.confidence)
     KV("Vendor codename", "${soc.manufacturer} ${soc.model}")
     soc.gpuName?.let { KV("GPU", it) }
@@ -116,20 +129,24 @@ private fun SocCard(soc: SocInfo) = SectionCard("SoC", "The chip, its GPU, and c
 
 @Composable
 private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onRun: () -> Unit) =
-    SectionCard("Memory", "RAM type and measured bandwidth.") {
+    SectionCard(
+        title = "Memory",
+        explainer = "RAM type and measured bandwidth.",
+        icon = Icons.Outlined.Memory,
+    ) {
         KV("Total", "${advertisedGb(memory.totalMb)} GB (${memory.totalMb} MB kernel-visible)")
         KV("Available", "%.1f GB".format(memory.availableMb / 1024f))
         KV("Type (inferred)", memory.inferredType, memory.inferredConfidence)
         if (memory.measuredBandwidthMBps != null) {
             KV("Measured bandwidth", "%.1f MB/s".format(memory.measuredBandwidthMBps))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             Button(onClick = onRun, enabled = !running) {
                 Text(if (running) "Testing…" else "Measure RAM bandwidth")
             }
             if (running) {
                 CircularProgressIndicator(
-                    modifier = Modifier.padding(start = 4.dp),
+                    modifier = Modifier.padding(start = Spacing.dense),
                     strokeWidth = 2.dp,
                 )
             }
@@ -139,7 +156,11 @@ private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onR
 
 @Composable
 private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?, onRun: () -> Unit, isPrimary: Boolean) =
-    SectionCard("Storage — ${volume.label}", "Storage class and real read/write speeds.") {
+    SectionCard(
+        title = "Storage — ${volume.label}",
+        explainer = "Storage class and real read/write speeds.",
+        icon = Icons.Outlined.Storage,
+    ) {
         KV("Capacity", "%.1f GB total · %.1f GB free".format(volume.totalGb, volume.freeGb))
         KV("Class (inferred)", volume.inferredClass, volume.inferredConfidence)
         volume.vendorModel?.let { KV("Vendor model", it) }
@@ -151,13 +172,13 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
             KV("Random 4K write", "${volume.randomWriteIOPS ?: 0} IOPS")
         }
         if (isPrimary) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
                 Button(onClick = onRun, enabled = !running) {
                     Text(if (running) "Testing…" else "Run storage test")
                 }
                 if (running) {
                     CircularProgressIndicator(
-                        modifier = Modifier.padding(start = 4.dp),
+                        modifier = Modifier.padding(start = Spacing.dense),
                         strokeWidth = 2.dp,
                     )
                 }
@@ -173,20 +194,24 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
 
 @Composable
 private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: String?, onRun: () -> Unit) =
-    SectionCard("Network", "Real-world download, upload, and latency.") {
+    SectionCard(
+        title = "Network",
+        explainer = "Real-world download, upload, and latency.",
+        icon = Icons.Outlined.Wifi,
+    ) {
         if (result != null) {
             result.downloadMbps?.let { KV("Download", "%.1f Mbps".format(it)) }
             result.uploadMbps?.let { KV("Upload", "%.1f Mbps".format(it)) }
             result.latencyCloudflareMs?.let { KV("Latency · Cloudflare", "$it ms") }
             result.latencyGoogleMs?.let { KV("Latency · Google", "$it ms") }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             Button(onClick = onRun, enabled = !running) {
                 Text(if (running) "Testing…" else "Run network test")
             }
             if (running) {
                 CircularProgressIndicator(
-                    modifier = Modifier.padding(start = 4.dp),
+                    modifier = Modifier.padding(start = Spacing.dense),
                     strokeWidth = 2.dp,
                 )
             }
@@ -200,7 +225,11 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: Str
     }
 
 @Composable
-private fun DisplayCard(d: DisplayInfo) = SectionCard("Display", "Panel resolution, refresh rates, and HDR.") {
+private fun DisplayCard(d: DisplayInfo) = SectionCard(
+    title = "Display",
+    explainer = "Panel resolution, refresh rates, and HDR.",
+    icon = Icons.Outlined.Brightness6,
+) {
     KV("Resolution", "${d.widthPx} × ${d.heightPx}")
     KV("Density", "${d.densityDpi} dpi")
     KV("Refresh", "%.0f Hz".format(d.refreshHz))
@@ -211,7 +240,11 @@ private fun DisplayCard(d: DisplayInfo) = SectionCard("Display", "Panel resoluti
 }
 
 @Composable
-private fun BatteryCard(b: BatteryInfo) = SectionCard("Battery", "Capacity, health, and live draw.") {
+private fun BatteryCard(b: BatteryInfo) = SectionCard(
+    title = "Battery",
+    explainer = "Capacity, health, and live draw.",
+    icon = Icons.Outlined.BatteryChargingFull,
+) {
     // Technology and health status come from the BatteryManager framework
     // API and are available on every device regardless of SELinux policy.
     b.technology?.let { KV("Technology", it) }
@@ -240,7 +273,11 @@ private fun BatteryCard(b: BatteryInfo) = SectionCard("Battery", "Capacity, heal
 }
 
 @Composable
-private fun RadioCard(r: RadioInfo) = SectionCard("Radios", "Wireless connectivity and positioning.") {
+private fun RadioCard(r: RadioInfo) = SectionCard(
+    title = "Radios",
+    explainer = "Wireless connectivity and positioning.",
+    icon = Icons.Outlined.SettingsInputAntenna,
+) {
     KV("Wi-Fi", r.wifiStandard)
     KV("Bluetooth", r.bluetoothVersion)
     KV("NFC", if (r.nfcPresent) "present" else "not present")
@@ -255,10 +292,16 @@ private fun RadioCard(r: RadioInfo) = SectionCard("Radios", "Wireless connectivi
  * Local section card that wraps the shared [SectionCard] and adds an
  * optional one-line explainer under the title (onSurfaceVariant /
  * labelSmall), matching the benchmark cards' "what is this" subtitle.
+ * Also threads through the optional [icon] param to the shared component.
  */
 @Composable
-private fun SectionCard(title: String, explainer: String? = null, content: @Composable () -> Unit) {
-    io.github.mayusi.calibratesoc.ui.components.SectionCard(title) {
+private fun SectionCard(
+    title: String,
+    explainer: String? = null,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    content: @Composable () -> Unit,
+) {
+    io.github.mayusi.calibratesoc.ui.components.SectionCard(title = title, icon = icon) {
         if (explainer != null) {
             Text(
                 explainer,
@@ -289,13 +332,13 @@ private fun KV(label: String, value: String, confidence: Confidence? = null) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             label,
-            modifier = Modifier.padding(end = 12.dp),
+            modifier = Modifier.padding(end = Spacing.item),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             value,
-            modifier = Modifier.padding(end = 6.dp),
+            modifier = Modifier.padding(end = Spacing.group),
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium,
         )

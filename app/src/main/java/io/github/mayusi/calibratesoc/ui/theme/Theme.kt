@@ -22,10 +22,31 @@ import androidx.core.view.WindowCompat
  * Palette intentionally mirrors EmuTran so the two apps look like siblings
  * to a user who has both installed.
  */
-private val CalibrateSocColors = darkColorScheme(
-    primary = Color(0xFF60A5FA),
+
+/**
+ * User-selectable accent colors for the dark theme. The SETTINGS agent
+ * persists the chosen value in DataStore and passes it to
+ * [CalibrateSocTheme]; the theme recolors [primary] (and [primaryContainer])
+ * accordingly. Default is [BLUE] which matches the original hand-tuned
+ * palette — nothing changes visually until the user picks a different accent.
+ */
+enum class AccentColor(
+    val color: Color,
+    /** Tinted container (≈ deep saturated dark of the hue). */
+    val containerColor: Color,
+) {
+    BLUE(Color(0xFF60A5FA), Color(0xFF1E3A8A)),
+    PURPLE(Color(0xFFA78BFA), Color(0xFF2E1B6B)),
+    EMERALD(Color(0xFF34D399), Color(0xFF064E3B)),
+    AMBER(Color(0xFFF59E0B), Color(0xFF451A03)),
+    ROSE(Color(0xFFFB7185), Color(0xFF4C0519)),
+}
+
+private fun buildColorScheme(accent: AccentColor) = darkColorScheme(
+    primary = accent.color,
+    // onPrimary should remain legible on any accent — deep near-black works for all.
     onPrimary = Color(0xFF0A1424),
-    primaryContainer = Color(0xFF1E3A8A),
+    primaryContainer = accent.containerColor,
     onPrimaryContainer = Color(0xFFDBEAFE),
 
     secondary = Color(0xFFA78BFA),
@@ -50,8 +71,31 @@ private val CalibrateSocColors = darkColorScheme(
 
 private val CalibrateSocTypography = Typography()
 
+/**
+ * Root theme composable for the app. Pass an [accent] to recolor
+ * [primary] / [primaryContainer] across the entire screen hierarchy.
+ *
+ * **SETTINGS agent TODO:** read the persisted accent from DataStore
+ * (add a `stringPreferencesKey("accent_color")` in [UserPrefs], map
+ * the string to [AccentColor] via `AccentColor.valueOf(...)`, expose it
+ * as a Flow, then collect it in [MainActivity] via
+ * `collectAsStateWithLifecycle()` and pass it here):
+ *
+ * ```kotlin
+ * // In MainActivity.setContent { … }
+ * val accent by userPrefs.accentColor.collectAsStateWithLifecycle(AccentColor.BLUE)
+ * CalibrateSocTheme(accent = accent) { … }
+ * ```
+ *
+ * Until the SETTINGS agent wires this, the default [AccentColor.BLUE]
+ * keeps the app looking exactly as before.
+ */
 @Composable
-fun CalibrateSocTheme(content: @Composable () -> Unit) {
+fun CalibrateSocTheme(
+    accent: AccentColor = AccentColor.BLUE,
+    content: @Composable () -> Unit,
+) {
+    val colorScheme = buildColorScheme(accent)
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
@@ -70,7 +114,7 @@ fun CalibrateSocTheme(content: @Composable () -> Unit) {
     }
 
     MaterialTheme(
-        colorScheme = CalibrateSocColors,
+        colorScheme = colorScheme,
         typography = CalibrateSocTypography,
         content = content,
     )

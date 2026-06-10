@@ -53,6 +53,16 @@ class TuneHistoryStore @Inject constructor(
         withContext(Dispatchers.IO) { persist(emptyList()) }
     }
 
+    /** Remove a single entry by identity (appliedAtMs + presetName uniqueness). */
+    suspend fun remove(entry: TuneHistoryEntry) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val next = _entries.value.filter {
+                it.appliedAtMs != entry.appliedAtMs || it.presetName != entry.presetName
+            }
+            persist(next)
+        }
+    }
+
     private fun persist(next: List<TuneHistoryEntry>) {
         val tmp = File(context.filesDir, "$FILE_NAME.tmp")
         tmp.writeText(json.encodeToString(TuneHistory(entries = next)))

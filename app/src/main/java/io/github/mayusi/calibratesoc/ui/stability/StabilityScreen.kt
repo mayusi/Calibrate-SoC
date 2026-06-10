@@ -1,22 +1,39 @@
 package io.github.mayusi.calibratesoc.ui.stability
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -28,17 +45,15 @@ import io.github.mayusi.calibratesoc.data.benchmark.StabilityResult
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityRun
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityTestRunner
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
+import io.github.mayusi.calibratesoc.data.benchmark.StabilityVerdict
 import io.github.mayusi.calibratesoc.data.benchmark.makeThrottleVerdict
+import io.github.mayusi.calibratesoc.ui.components.EmptyState
 import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartCard
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -54,30 +69,66 @@ fun StabilityScreen(viewModel: StabilityViewModel = hiltViewModel()) {
     val result by viewModel.result.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        StabilityHeader()
-        RunControls(state = state, onStart = viewModel::start)
-        result?.let { StabilityResultCard(it) }
-        if (history.isNotEmpty()) {
-            PastRunsCard(history = history, onDelete = viewModel::deleteRun)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(paddingValues)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            StabilityHeader()
+            RunControls(state = state, onStart = viewModel::start)
+            result?.let { StabilityResultCard(it) }
+            if (history.isEmpty() && result == null && state == StabilityTestRunner.State.Idle) {
+                StabilityEmptyState()
+            } else if (history.isNotEmpty()) {
+                PastRunsCard(
+                    history = history,
+                    onDelete = { run ->
+                        viewModel.deleteRun(run.id)
+                        coroutineScope.launch {
+                            val snackResult = snackbarHostState.showSnackbar(
+                                message = "Deleted",
+                                actionLabel = "Undo",
+                                withDismissAction = false,
+                            )
+                            if (snackResult == SnackbarResult.ActionPerformed) {
+                                viewModel.reinsertRun(run)
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun StabilityEmptyState() {
+    EmptyState(
+        icon = Icons.Outlined.Speed,
+        title = "No stability runs yet",
+        body = "Run a stability test to see how your device holds up under sustained load. Results appear here.",
+        modifier = Modifier.padding(vertical = 16.dp),
+    )
 }
 
 private val historyDateFormat = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
 
 @Composable
-private fun PastRunsCard(history: List<StabilityRun>, onDelete: (Long) -> Unit) {
+private fun PastRunsCard(history: List<StabilityRun>, onDelete: (StabilityRun) -> Unit) {
     SectionCard("Past runs") {
         history.forEachIndexed { index, run ->
             if (index > 0) HorizontalDivider()
-            PastRunRow(run = run, onDelete = { onDelete(run.id) })
+            PastRunRow(run = run, onDelete = { onDelete(run) })
         }
     }
 }
@@ -85,6 +136,7 @@ private fun PastRunsCard(history: List<StabilityRun>, onDelete: (Long) -> Unit) 
 @Composable
 private fun PastRunRow(run: StabilityRun, onDelete: () -> Unit) {
     val color = stabilityVerdictColor(run.stabilityPct)
+    val context = LocalContext.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -108,6 +160,21 @@ private fun PastRunRow(run: StabilityRun, onDelete: () -> Unit) {
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = {
+            val text = stabilityRunShareText(run)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            context.startActivity(Intent.createChooser(intent, "Share stability result"))
+        }) {
+            Icon(
+                Icons.Outlined.Share,
+                contentDescription = "Share run",
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         IconButton(onClick = onDelete) {
@@ -202,10 +269,12 @@ private fun StabilityResultCard(result: StabilityResult) {
         "error" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.primary
     }
+    val context = LocalContext.current
 
     SectionCard("Result") {
         // Headline sustained/peak % + verdict.
         Row(
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -216,7 +285,7 @@ private fun StabilityResultCard(result: StabilityResult) {
                 fontWeight = FontWeight.Bold,
                 color = verdictColor,
             )
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     "Sustained/Peak",
                     style = MaterialTheme.typography.labelMedium,
@@ -227,6 +296,21 @@ private fun StabilityResultCard(result: StabilityResult) {
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = verdictColor,
+                )
+            }
+            IconButton(onClick = {
+                val text = stabilityShareText(result, analysis, verdict)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                context.startActivity(Intent.createChooser(intent, "Share stability result"))
+            }) {
+                Icon(
+                    imageVector = Icons.Outlined.Share,
+                    contentDescription = "Share stability result",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -375,5 +459,70 @@ private fun stabilityVerdictColor(pct: Int): Color = when {
     pct in 85..94 -> MaterialTheme.colorScheme.primary
     pct in 75..84 -> MaterialTheme.colorScheme.secondary
     else -> MaterialTheme.colorScheme.error
+}
+
+// ─── Share helpers ────────────────────────────────────────────────────
+
+/**
+ * Build a plain-text share summary for a live [StabilityResult] + its
+ * analysis and verdict.
+ */
+internal fun stabilityShareText(
+    result: StabilityResult,
+    analysis: ThrottleAnalysis?,
+    verdict: StabilityVerdict,
+): String = buildString {
+    appendLine("Calibrate SoC — Stability Result")
+    appendLine()
+    appendLine("Stability: ${result.stabilityPct}%  •  ${verdict.word}")
+    appendLine(verdict.explanation)
+    appendLine()
+    appendLine("Sustained FPS:  %.1f".format(result.avgSustainedFps))
+    appendLine("Peak FPS:       %.1f".format(result.maxFps))
+    if (analysis != null) {
+        appendLine("Sustained MHz:  ${analysis.sustainedMhz}")
+        appendLine("Peak MHz:       ${analysis.peakMhz}")
+    }
+    appendLine("Peak CPU temp:  %.1f°C".format(result.peakTempC))
+    result.peakGpuTempC?.let { appendLine("Peak GPU temp:  %.1f°C".format(it)) }
+    if (analysis != null) {
+        analysis.thermalHeadroomC?.let { appendLine("Thermal headroom: %.1f°C".format(it)) }
+        analysis.avgPowerMw?.let { appendLine("Avg power:      %.2f W".format(it / 1000.0)) }
+    }
+    appendLine("Duration:       %.0f s".format(result.durationMs / 1000.0))
+    appendLine()
+    append("— via Calibrate SoC")
+}
+
+/**
+ * Build a plain-text share summary from a persisted [StabilityRun]
+ * (history list rows).
+ */
+internal fun stabilityRunShareText(run: StabilityRun): String {
+    val analysis = ThrottleAnalysis.from(run.samples, killTempC = 95f)
+    val verdict = makeThrottleVerdict(
+        analysis,
+        peakTempC = run.peakTempC,
+        killTempC = 95f,
+        sustainedPct = run.stabilityPct,
+    )
+    val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    return buildString {
+        appendLine("Calibrate SoC — Stability Result")
+        appendLine("Date: ${dateFmt.format(Date(run.startedAtMs))}")
+        appendLine()
+        appendLine("Stability: ${run.stabilityPct}%  •  ${verdict.word}")
+        appendLine(verdict.explanation)
+        appendLine()
+        appendLine("Min FPS: %.1f   Max FPS: %.1f".format(run.minFps, run.maxFps))
+        appendLine("Peak temp: %.1f°C".format(run.peakTempC))
+        if (analysis != null) {
+            appendLine("Sustained MHz: ${analysis.sustainedMhz}  Peak MHz: ${analysis.peakMhz}")
+            analysis.thermalHeadroomC?.let { appendLine("Thermal headroom: %.1f°C".format(it)) }
+            analysis.avgPowerMw?.let { appendLine("Avg power: %.2f W".format(it / 1000.0)) }
+        }
+        appendLine()
+        append("— via Calibrate SoC")
+    }
 }
 

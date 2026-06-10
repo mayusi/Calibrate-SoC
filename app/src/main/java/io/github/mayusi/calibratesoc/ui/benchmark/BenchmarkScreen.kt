@@ -1,5 +1,7 @@
 package io.github.mayusi.calibratesoc.ui.benchmark
 
+import android.content.Intent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,13 +15,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -27,6 +33,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,6 +45,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -107,6 +118,14 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
     val runnerState by viewModel.runnerState.collectAsStateWithLifecycle()
     val selection by viewModel.compareSelection.collectAsStateWithLifecycle()
     val capability by viewModel.capability.collectAsStateWithLifecycle()
+    val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
+
+    val sortedHistory = remember(history, sortOrder) {
+        when (sortOrder) {
+            BenchSortOrder.NEWEST -> history // already newest-first from DB
+            BenchSortOrder.HIGHEST_SCORE -> history.sortedByDescending { it.overallScore }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -129,7 +148,8 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
         if (history.isEmpty()) {
             item { BenchEmptyState() }
         } else {
-            items(history, key = { it.id }) { run ->
+            item { SortChipRow(sortOrder, onSort = viewModel::setSortOrder) }
+            items(sortedHistory, key = { it.id }) { run ->
                 RunCard(
                     run = run,
                     report = capability,
@@ -139,6 +159,25 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SortChipRow(
+    current: BenchSortOrder,
+    onSort: (BenchSortOrder) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = current == BenchSortOrder.NEWEST,
+            onClick = { onSort(BenchSortOrder.NEWEST) },
+            label = { Text("Newest") },
+        )
+        FilterChip(
+            selected = current == BenchSortOrder.HIGHEST_SCORE,
+            onClick = { onSort(BenchSortOrder.HIGHEST_SCORE) },
+            label = { Text("Highest score") },
+        )
     }
 }
 
@@ -327,11 +366,31 @@ private fun RunCard(
             SnapshotContext(run)
 
             // ── Actions ──────────────────────────────────────────
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val context = LocalContext.current
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(onClick = onToggleSelection) {
                     Text(if (selected) "Unselect" else "Select to compare")
                 }
                 TextButton(onClick = onDelete) { Text("Delete") }
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = {
+                    val text = benchShareText(run, rating)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, text)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share benchmark"))
+                }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Share,
+                        contentDescription = "Share benchmark result",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -353,6 +412,7 @@ private fun HeadlineScoreCard(
         }
     }
 
+    val clipboardManager = LocalClipboardManager.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -362,13 +422,27 @@ private fun HeadlineScoreCard(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    score.toString(),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 36.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
+                Row(
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.clickable {
+                        clipboardManager.setText(AnnotatedString(score.toString()))
+                    },
+                ) {
+                    Text(
+                        score.toString(),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "Copy score",
+                        modifier = Modifier.size(16.dp).padding(bottom = 4.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Column {
                     Text(
                         "Composite score",
@@ -733,22 +807,38 @@ private fun SnapshotContext(run: BenchRun) {
         "NONE" -> "No-root"
         else -> run.snapshot.privilegeTier
     }
+    val clipboardManager = LocalClipboardManager.current
+    val capsLine = run.snapshot.cpuPolicies.joinToString("  ") { p ->
+        "p${p.policyId}=${p.maxKhz / 1000}MHz/${p.governor}"
+    }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             "${run.snapshot.deviceModel} · $tierLabel",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        val capsLine = run.snapshot.cpuPolicies.joinToString("  ") { p ->
-            "p${p.policyId}=${p.maxKhz / 1000}MHz/${p.governor}"
-        }
         if (capsLine.isNotBlank()) {
-            Text(
-                capsLine,
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.clickable {
+                    clipboardManager.setText(AnnotatedString(capsLine))
+                },
+            ) {
+                Text(
+                    capsLine,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    imageVector = Icons.Outlined.ContentCopy,
+                    contentDescription = "Copy policy line",
+                    modifier = Modifier.size(12.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
         }
     }
 }
@@ -881,4 +971,84 @@ private fun ThrottleOverlay(a: BenchRun, b: BenchRun) {
     val seriesA = a.throttleSamples.map { it.cpuMaxMhz.toFloat() }
     val seriesB = b.throttleSamples.map { it.cpuMaxMhz.toFloat() }
     MetricLineChartOverlay(seriesA, seriesB)
+}
+
+// ─── Share helpers ────────────────────────────────────────────────────
+
+/**
+ * Build a plain-text share summary for a BenchRun + its optional rating.
+ */
+private fun benchShareText(run: BenchRun, rating: BenchRating.Rating?): String {
+    val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    val scores = BenchScores.from(run)
+    val k = run.kernels
+    val a = ThrottleAnalysis.from(run.throttleSamples)
+
+    return buildString {
+        appendLine("Calibrate SoC — Benchmark Result")
+        appendLine()
+
+        appendLine("Run: ${run.name}")
+        appendLine("Flavor: ${run.flavor.name.lowercase().replaceFirstChar { it.uppercase() }}")
+        appendLine("Date: ${dateFmt.format(Date(run.startedAtMs))}")
+        appendLine()
+
+        run.overallScore?.let { score ->
+            appendLine("Composite score: $score")
+            rating?.word?.let { appendLine("Rating: $it") }
+            rating?.let { r ->
+                val sentence = r.abortReason ?: r.oneSentence
+                appendLine(sentence)
+            }
+            appendLine()
+        }
+
+        // Category scores
+        if (scores.cpu != null || scores.gpu != null || scores.memory != null) {
+            appendLine("Category scores:")
+            scores.cpu?.let { appendLine("  CPU:    $it") }
+            scores.gpu?.let { appendLine("  GPU:    $it") }
+            scores.memory?.let { appendLine("  Memory: $it") }
+            appendLine()
+        }
+
+        // Key kernel numbers
+        appendLine("Key numbers:")
+        k.cpuIntegerSingle?.let { appendLine("  CPU 1T int:   $it") }
+        k.cpuIntegerMulti?.let { appendLine("  CPU MT int:   $it") }
+        k.cpuFloat?.let { appendLine("  CPU float:    $it") }
+        k.cpuAes?.let { appendLine("  AES-128:      $it") }
+        k.memoryBandwidthMBps?.let { appendLine("  RAM BW:       %.1f MB/s".format(it)) }
+        k.gpuFps?.let { appendLine("  GPU avg FPS:  %.1f".format(it)) }
+        k.gpuP1LowFps?.let { appendLine("  GPU 1% low:   %.1f FPS".format(it)) }
+        k.gpuFrameConsistencyPct?.let { appendLine("  GPU consist.: %.0f%%".format(it)) }
+        appendLine()
+
+        // Device context
+        val tierLabel = when (run.snapshot.privilegeTier) {
+            "AYN_SETTINGS" -> "Vendor settings"
+            "ROOT" -> "Root"
+            "SHIZUKU" -> "Shizuku"
+            "NONE" -> "No-root"
+            else -> run.snapshot.privilegeTier
+        }
+        appendLine("Device: ${run.snapshot.deviceModel}")
+        appendLine("SoC: ${run.snapshot.socModel}")
+        appendLine("Privilege: $tierLabel")
+        appendLine()
+
+        // Throttle summary (FULL runs only)
+        if (a != null) {
+            appendLine("Throttle summary:")
+            appendLine("  Sustained clock: ${a.sustainedMhz} MHz")
+            appendLine("  Peak clock:      ${a.peakMhz} MHz")
+            appendLine("  Drop:            %.0f%%".format(a.dropPct))
+            appendLine("  Peak CPU temp:   %.1f°C".format(a.peakCpuTempC))
+            a.peakGpuTempC?.let { appendLine("  Peak GPU temp:   %.1f°C".format(it)) }
+            a.avgPowerMw?.let { appendLine("  Avg power:       %.2f W".format(it / 1000.0)) }
+            appendLine()
+        }
+
+        append("— via Calibrate SoC")
+    }
 }

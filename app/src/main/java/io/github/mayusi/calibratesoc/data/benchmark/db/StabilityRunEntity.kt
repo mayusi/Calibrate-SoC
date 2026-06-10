@@ -63,5 +63,21 @@ data class StabilityRunEntity(
                 loopFpsJson = json.encodeToString<List<Double>>(result.loopFps),
                 samplesJson = json.encodeToString<List<ThrottleSample>>(result.samples),
             )
+
+        /** Re-create a row from a domain StabilityRun (for undo-delete). */
+        fun fromDomain(run: StabilityRun, json: Json): StabilityRunEntity =
+            StabilityRunEntity(
+                id = run.id,
+                startedAtMs = run.startedAtMs,
+                loopCount = run.loopCount,
+                loopMs = run.loopMs,
+                stabilityPct = run.stabilityPct,
+                minFps = run.minFps,
+                maxFps = run.maxFps,
+                peakTempC = run.peakTempC,
+                outcome = run.outcome.name,
+                loopFpsJson = json.encodeToString<List<Double>>(run.loopFps),
+                samplesJson = json.encodeToString<List<ThrottleSample>>(run.samples),
+            )
     }
 }

@@ -20,6 +20,11 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
+ * Sort order for the benchmark history list.
+ */
+enum class BenchSortOrder { NEWEST, HIGHEST_SCORE }
+
+/**
  * State for the Benchmark screen. Backs the run list, in-flight run
  * status, and the side-by-side compare selection.
  */
@@ -41,6 +46,14 @@ class BenchmarkViewModel @Inject constructor(
     /** Up to two selected runs for the compare drawer. */
     private val _compareSelection = MutableStateFlow<List<Long>>(emptyList())
     val compareSelection: StateFlow<List<Long>> = _compareSelection.asStateFlow()
+
+    /** Sort order for the history list. */
+    private val _sortOrder = MutableStateFlow(BenchSortOrder.NEWEST)
+    val sortOrder: StateFlow<BenchSortOrder> = _sortOrder.asStateFlow()
+
+    fun setSortOrder(order: BenchSortOrder) {
+        _sortOrder.value = order
+    }
 
     fun toggleSelection(id: Long) {
         val current = _compareSelection.value

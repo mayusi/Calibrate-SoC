@@ -40,4 +40,8 @@ class BenchRepository @Inject constructor(
         stabilityDao.insert(StabilityRunEntity.fromResult(result, loopMs, json))
 
     suspend fun deleteStability(id: Long) = stabilityDao.delete(id)
+
+    /** Re-insert a previously-deleted stability run (for undo-delete). */
+    suspend fun reinsertStability(run: StabilityRun): Long =
+        stabilityDao.insert(StabilityRunEntity.fromDomain(run, json))
 }

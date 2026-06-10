@@ -7,6 +7,7 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
+import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,9 +32,18 @@ import javax.inject.Inject
 class DashboardViewModel @Inject constructor(
     capabilityProbe: CapabilityProbe,
     monitorService: MonitorService,
+    tuneHistoryStore: TuneHistoryStore,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /**
+     * Name of the most recently applied tune preset, or null when the
+     * history is empty (= stock / factory state).
+     */
+    val lastAppliedPreset: StateFlow<String?> = tuneHistoryStore.entries
+        .map { entries -> entries.firstOrNull()?.presetName }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** Rolling history of recent samples; head = oldest, tail = newest. */
     private val _history = MutableStateFlow<List<Telemetry>>(emptyList())

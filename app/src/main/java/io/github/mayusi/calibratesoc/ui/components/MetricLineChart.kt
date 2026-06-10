@@ -9,6 +9,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
@@ -25,7 +26,8 @@ import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
  * Shared single-series Vico line chart. Extracted from the previously
  * duplicated private charts in BenchmarkScreen (ThrottleChart) and
  * StabilityScreen (FpsChart / ThermalChart). Renders only when there are
- * >=2 points; otherwise an empty Box of the same height (placeholder).
+ * >=2 points; otherwise a centered "Warming up…" placeholder of the same
+ * height so the layout never collapses to zero.
  */
 @Composable
 fun MetricLineChart(
@@ -34,11 +36,10 @@ fun MetricLineChart(
     heightDp: Int = 160,
 ) {
     if (points.size < 2) {
-        Box(
-            modifier
+        ChartPlaceholder(
+            modifier = modifier
                 .fillMaxWidth()
-                .height(heightDp.dp)
-                .background(MaterialTheme.colorScheme.surface),
+                .height(heightDp.dp),
         )
         return
     }
@@ -64,7 +65,8 @@ fun MetricLineChart(
 /**
  * Shared two-series overlay line chart (replaces the private OverlayChart
  * in BenchmarkScreen). Each non-trivial series is drawn in one lineSeries
- * block. Renders only when at least one series has >=2 points.
+ * block. Renders only when at least one series has >=2 points; otherwise
+ * a "Warming up…" placeholder of the same height.
  */
 @Composable
 fun MetricLineChartOverlay(
@@ -74,11 +76,10 @@ fun MetricLineChartOverlay(
     heightDp: Int = 160,
 ) {
     if (seriesA.size < 2 && seriesB.size < 2) {
-        Box(
-            modifier
+        ChartPlaceholder(
+            modifier = modifier
                 .fillMaxWidth()
-                .height(heightDp.dp)
-                .background(MaterialTheme.colorScheme.surface),
+                .height(heightDp.dp),
         )
         return
     }
@@ -120,5 +121,24 @@ fun MetricLineChartCard(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         MetricLineChart(points)
+    }
+}
+
+/**
+ * Internal placeholder shown when a chart has insufficient data. Renders
+ * a surface-colored box with centred muted text so the host card never
+ * collapses and the user knows data is coming.
+ */
+@Composable
+private fun ChartPlaceholder(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Warming up…",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

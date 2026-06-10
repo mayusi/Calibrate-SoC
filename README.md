@@ -6,12 +6,34 @@
 
 Real-time SoC monitoring · in-game floating HUD · CPU/GPU benchmark + stability testing · clock presets · hardware inspector.
 
-[![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#project-status)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Android%2010%2B-green.svg)](#requirements)
-[![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](#contributing)
+[![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg?style=flat-square)](#project-status)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Android%2010%2B-green.svg?style=flat-square)](#requirements)
+[![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](#contributing)
+[![Release](https://img.shields.io/github/v/release/mayusi/Calibrate-SoC?include_prereleases&style=flat-square)](https://github.com/mayusi/Calibrate-SoC/releases)
+[![Downloads](https://img.shields.io/github/downloads/mayusi/Calibrate-SoC/total?style=flat-square)](https://github.com/mayusi/Calibrate-SoC/releases)
+[![Last commit](https://img.shields.io/github/last-commit/mayusi/Calibrate-SoC?style=flat-square)](https://github.com/mayusi/Calibrate-SoC/commits/main)
 
 </div>
+
+---
+
+## Table of Contents
+
+- [What it is](#what-it-is)
+- [Why it helps](#why-it-helps)
+- [Download](#download)
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [Project status](#project-status)
+- [Setup](#setup-first-launch)
+- [Privilege tiers](#privilege-tiers)
+- [Safety](#safety)
+- [Requirements](#requirements)
+- [Building](#building)
+- [Contributing](#contributing)
+- [Changelog](#changelog)
+- [License](#license)
 
 ---
 
@@ -40,6 +62,14 @@ No telemetry. No accounts. No ads. Fully open source.
 - **Prove your tune worked** — benchmark before/after a change; the honest self-relative score shows if you're at your chip's ceiling or tuned down.
 - **Check sustained performance** — a 3DMark-style stability test loops the GPU under load and reports how much it throttles.
 - **Know your hardware** — full SoC/memory/storage/battery inspector with one-tap speed tests.
+
+---
+
+## Download
+
+Grab the latest APK from [Releases](https://github.com/mayusi/Calibrate-SoC/releases/latest), sideload it with `adb install -r`, and you're done.
+
+See [CHANGELOG.md](CHANGELOG.md) for what's new in each release.
 
 ---
 
@@ -76,6 +106,21 @@ No telemetry. No accounts. No ads. Fully open source.
     <td align="center" width="33%">
       <img src="docs/assets/hud-ingame.png" width="250" alt="In-game HUD overlay"><br>
       <sub><b>HUD in-game</b> — live FPS &amp; clocks over any game</sub>
+    </td>
+  </tr>
+</table>
+
+### Detailed benchmark output
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/assets/benchmark-gpu.png" width="300" alt="GPU benchmark detail"><br>
+      <sub><b>GPU detail</b> — 1% low FPS, frame-time consistency, per-frame curve</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/assets/benchmark-power.png" width="300" alt="Power and thermals"><br>
+      <sub><b>Power & thermals</b> — sustained clocks, watts, energy, thermal headroom</sub>
     </td>
   </tr>
 </table>
@@ -145,6 +190,19 @@ Calibrate SoC is **pre-alpha**. Here's the honest state of each area:
 | Odin 2 / Retroid Pocket 5 | 🟡 Adapters present, not yet hardware-verified |
 | Broad phone support | 🟡 Monitor + benchmark only until more devices are tested |
 
+### Device support
+
+| Device | SoC | Status |
+|--------|-----|--------|
+| AYN Thor | Snapdragon 8 Gen 2 Leading Version | ✅ Verified |
+| AYN Odin 3 | Snapdragon 8 Gen 1 Leading Version | ✅ Verified |
+| Retroid Pocket 6 | Snapdragon 8+ Gen 1 | ✅ Verified |
+| AYN Odin 2 | Snapdragon 888 | 🟡 Adapter present (untested) |
+| Retroid Pocket 5 | Snapdragon 778G+ | 🟡 Adapter present (untested) |
+| High-end Android phones | Snapdragon 8 / MediaTek | ✅ Monitor + benchmark |
+
+Have a device not listed? [Report it!](https://github.com/mayusi/Calibrate-SoC/issues/new?template=device-compatibility.yml)
+
 ---
 
 ## Setup (first launch)
@@ -209,14 +267,20 @@ Release builds are debug-signed unless a `keystore.properties` is present at the
 
 ## Contributing
 
-Calibrate SoC is pre-alpha and **actively welcomes contributions of every kind**:
+Calibrate SoC is pre-alpha and **actively welcomes contributions of every kind**. See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines:
 
 - 🐛 **Bug reports** — open an issue with your device, Android version, and steps to reproduce.
-- 📱 **Device compatibility** — got a handheld not listed above? Use the **Report unknown device** button in the Hardware tab to generate a pre-filled report, and open an issue with it. This is the single most valuable contribution right now.
+- 📱 **Device compatibility** — got a handheld not listed above? Use the **Report unknown device** button in the Hardware tab to generate a pre-filled report. This is the single most valuable contribution right now.
 - 🔧 **Pull requests** — device adapters, bug fixes, UI polish, and new presets are all great. Please keep PRs focused and describe what you tested on.
 - 💡 **Ideas** — feature requests and design feedback via issues.
 
 There's no CLA and no bureaucracy. If it makes the app better and more honest, it's welcome.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of each release, including what's new, what changed, and what's fixed.
 
 ---
 

@@ -1,8 +1,6 @@
 package io.github.mayusi.calibratesoc.ui.dashboard
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -33,22 +31,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottom
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStart
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
-import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
-import com.patrykandpatrick.vico.core.cartesian.axis.HorizontalAxis
-import com.patrykandpatrick.vico.core.cartesian.axis.VerticalAxis
-import com.patrykandpatrick.vico.core.cartesian.data.CartesianChartModelProducer
-import com.patrykandpatrick.vico.core.cartesian.data.lineSeries
-import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
-import io.github.mayusi.calibratesoc.data.capability.ThermalRole
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
+import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import io.github.mayusi.calibratesoc.ui.components.StatTile
+import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
  * Live monitoring home screen. Reads from [DashboardViewModel]'s rolling
@@ -65,13 +56,14 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
     val capability by viewModel.capability.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val latest by viewModel.latest.collectAsStateWithLifecycle()
+    val lastAppliedPreset by viewModel.lastAppliedPreset.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        item { Header(capability) }
+        item { Header(capability, lastAppliedPreset) }
         item { HudLauncherCard() }
         if (latest == null) {
             item { Text("Sampling…", style = MaterialTheme.typography.bodyMedium) }
@@ -92,15 +84,15 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
 // --- Header -------------------------------------------------------------
 
 @Composable
-private fun Header(capability: CapabilityReport?) {
+private fun Header(capability: CapabilityReport?, lastAppliedPreset: String?) {
     Column {
         Text(
             "Calibrate SoC",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.height(4.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(Spacing.dense))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             val tier = capability?.privilege ?: PrivilegeTier.NONE
             val tierColor = when (tier) {
                 PrivilegeTier.ROOT -> MaterialTheme.colorScheme.tertiary
@@ -119,6 +111,17 @@ private fun Header(capability: CapabilityReport?) {
                 AssistChip(onClick = {}, label = { Text(key) })
             }
         }
+        // Active tune chip: shows last applied preset name or "Stock (factory)"
+        Spacer(Modifier.height(Spacing.dense))
+        val activeTuneLabel = if (lastAppliedPreset != null) {
+            "Active: $lastAppliedPreset"
+        } else {
+            "Stock (factory)"
+        }
+        AssistChip(
+            onClick = {},
+            label = { Text(activeTuneLabel, style = MaterialTheme.typography.labelMedium) },
+        )
         // Tier-mismatch hint: surfaced when the user is on NONE but the
         // device is a vendor handheld (AYN/AYANEO/Retroid) where the
         // vendor-controls tier is one adb command away. We never
@@ -128,7 +131,7 @@ private fun Header(capability: CapabilityReport?) {
             capability.privilege == PrivilegeTier.NONE &&
             capability.vendorApps.anyVendorPerfApp
         ) {
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(Spacing.dense))
             Text(
                 "Tip: grant once via adb to unlock vendor performance + fan controls (no root needed):\n" +
                     "adb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS",
@@ -157,8 +160,8 @@ private fun HudLauncherCard() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(Spacing.group))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             androidx.compose.material3.Button(onClick = {
                 if (!android.provider.Settings.canDrawOverlays(context)) {
                     val intent = android.content.Intent(
@@ -180,7 +183,7 @@ private fun HudLauncherCard() {
                 Text("HUD logs")
             }
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(Spacing.dense))
         Text(
             "Tip: add the \"HUD\" Quick Settings tile to toggle without opening the app.",
             style = MaterialTheme.typography.labelSmall,
@@ -218,7 +221,7 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         items(entries, key = { it.timestampMs }) { entry ->
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
                                 Text(
                                     dateFmt.format(java.util.Date(entry.timestampMs)),
                                     fontFamily = FontFamily.Monospace,
@@ -265,8 +268,8 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
  * Compact top-of-screen summary: the four numbers that answer "is my
  * device OK right now" at a glance — peak SoC temp (hottest of any
  * thermal zone), total power draw, peak CPU clock, and GPU load. Each
- * is a tight stat tile in one row; the temp tile is colored by severity
- * so a hot device is obvious without reading the number.
+ * is a StatTile; the temp tile passes a severity valueColor so a hot
+ * device is obvious without reading the number.
  */
 @Composable
 private fun AtAGlanceCard(t: Telemetry) = SectionCard("At a glance") {
@@ -282,68 +285,31 @@ private fun AtAGlanceCard(t: Telemetry) = SectionCard("At a glance") {
 
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        GlanceStat(
+        StatTile(
             label = "SoC temp",
             value = peakTempC?.let { "%.0f°".format(it) } ?: "—",
-            color = peakTempC?.let { glanceTempColor(it) } ?: MaterialTheme.colorScheme.onSurface,
+            valueColor = peakTempC?.let { glanceTempColor(it) },
             modifier = Modifier.weight(1f),
         )
-        GlanceStat(
+        StatTile(
             label = "Power",
-            value = totalW?.let { "%.1f W".format(it) } ?: "—",
-            color = MaterialTheme.colorScheme.onSurface,
+            value = totalW?.let { "%.1f".format(it) } ?: "—",
+            unit = if (totalW != null) "W" else null,
             modifier = Modifier.weight(1f),
         )
-        GlanceStat(
+        StatTile(
             label = "CPU peak",
             value = peakCpuMhz?.let { "$it" } ?: "—",
             unit = if (peakCpuMhz != null) "MHz" else null,
-            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
         )
-        GlanceStat(
+        StatTile(
             label = "GPU load",
             value = gpuLoad?.let { "$it%" } ?: "—",
-            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
         )
-    }
-}
-
-@Composable
-private fun GlanceStat(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier,
-    unit: String? = null,
-    color: Color = MaterialTheme.colorScheme.onSurface,
-) {
-    Column(modifier = modifier) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(verticalAlignment = androidx.compose.ui.Alignment.Bottom) {
-            Text(
-                value,
-                style = MaterialTheme.typography.titleLarge,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-                color = color,
-            )
-            if (unit != null) {
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    unit,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 3.dp),
-                )
-            }
-        }
     }
 }
 
@@ -368,7 +334,7 @@ private fun PerCoreFreqCard(t: Telemetry) = SectionCard(title = "CPU frequency (
     t.perCoreCpuFreqKhz.forEachIndexed { idx, khz ->
         Row(
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
         ) {
             Text("cpu$idx", modifier = Modifier.width(48.dp), style = MaterialTheme.typography.labelMedium)
             LinearProgressIndicator(
@@ -376,7 +342,7 @@ private fun PerCoreFreqCard(t: Telemetry) = SectionCard(title = "CPU frequency (
                 modifier = Modifier
                     .weight(1f)
                     .height(8.dp)
-                    .clip(RoundedCornerShape(4.dp)),
+                    .clip(RoundedCornerShape(Spacing.dense)),
             )
             Text(
                 "${khz / 1000}",
@@ -402,7 +368,7 @@ private fun CpuLoadCard(history: List<Telemetry>) = SectionCard("CPU load (%)") 
         val loads = t.perCoreLoadPct
         if (loads.isEmpty()) 0f else loads.sum().toFloat() / loads.size
     }
-    LineChartBox(series)
+    MetricLineChart(points = series, heightDp = 120)
 }
 
 // --- GPU chart -------------------------------------------------------
@@ -420,7 +386,7 @@ private fun GpuCard(history: List<Telemetry>, latest: Telemetry) = SectionCard("
     if (series.all { it == 0f } && current == null) {
         Text("GPU load unreadable on this device", style = MaterialTheme.typography.bodySmall)
     } else {
-        LineChartBox(series)
+        MetricLineChart(points = series, heightDp = 120)
     }
 }
 
@@ -466,10 +432,10 @@ private fun BatteryCard(t: Telemetry) = SectionCard("Battery") {
     val tempC = t.batteryTempDeciC?.let { "%.1f °C".format(it / 10.0) } ?: "—"
     val volts = t.batteryVoltageUv?.let { "%.2f V".format(it / 1_000_000.0) } ?: "—"
     val watts = t.batteryDrawMilliW?.let { "%.2f W".format(it / 1000.0) } ?: "—"
-    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        StatColumn("Temp", tempC)
-        StatColumn("Voltage", volts)
-        StatColumn("Draw", watts)
+    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.screen)) {
+        StatTile(label = "Temp", value = tempC)
+        StatTile(label = "Voltage", value = volts)
+        StatTile(label = "Draw", value = watts)
     }
 }
 
@@ -494,42 +460,5 @@ private fun RamCard(t: Telemetry) = SectionCard("RAM") {
         "${usedKb / 1024} / ${t.ramTotalKb / 1024} MB",
         style = MaterialTheme.typography.labelMedium,
         fontFamily = FontFamily.Monospace,
-    )
-}
-
-// --- Shared bits -----------------------------------------------------
-
-@Composable
-private fun StatColumn(label: String, value: String) {
-    Column {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
-    }
-}
-
-/**
- * Minimal Vico line chart wrapped in a fixed-height box. Skips rendering
- * for empty/single-point histories — Vico bombs on a degenerate series.
- */
-@Composable
-private fun LineChartBox(values: List<Float>) {
-    if (values.size < 2) {
-        Box(Modifier.height(80.dp).fillMaxWidth().background(MaterialTheme.colorScheme.surface))
-        return
-    }
-    val producer = remember { CartesianChartModelProducer() }
-    LaunchedEffect(values) {
-        producer.runTransaction { lineSeries { series(values) } }
-    }
-    CartesianChartHost(
-        chart = rememberCartesianChart(
-            rememberLineCartesianLayer(),
-            startAxis = VerticalAxis.rememberStart(),
-            bottomAxis = HorizontalAxis.rememberBottom(),
-        ),
-        modelProducer = producer,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(120.dp),
     )
 }

@@ -56,4 +56,15 @@ class StabilityViewModel @Inject constructor(
             repository.deleteStability(id)
         }
     }
+
+    /**
+     * Re-insert a previously-deleted stability run (for undo-delete).
+     * Re-saves the run using the original [StabilityRun] object captured
+     * by the UI before deletion.
+     */
+    fun reinsertRun(run: StabilityRun) {
+        viewModelScope.launch {
+            repository.reinsertStability(run)
+        }
+    }
 }

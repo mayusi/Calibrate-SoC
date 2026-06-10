@@ -6,6 +6,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
@@ -32,7 +34,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            CalibrateSocTheme {
+            // Collect the user's saved accent so the entire app recolors
+            // immediately when changed in Settings. Default = BLUE which
+            // is visually identical to the original palette (no visible
+            // change until the user picks a different accent).
+            val accent by userPrefs.accentColor.collectAsStateWithLifecycle(AccentColor.BLUE)
+            CalibrateSocTheme(accent = accent) {
                 // Gate: show onboarding wizard until user finishes or
                 // explicitly skips it. State persisted in DataStore so
                 // it appears exactly once per install (or after a wipe).

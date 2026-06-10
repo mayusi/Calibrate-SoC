@@ -14,8 +14,11 @@ import io.github.mayusi.calibratesoc.data.baseline.FactoryRestorer
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.RootKind
+import io.github.mayusi.calibratesoc.data.prefs.ClockUnit
+import io.github.mayusi.calibratesoc.data.prefs.TempUnit
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.profiles.ForegroundAppWatcher
+import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -87,6 +90,7 @@ class SettingsViewModel @Inject constructor(
         }
 
     val appVersion: String = BuildConfig.VERSION_NAME
+    val appVersionCode: Int = BuildConfig.VERSION_CODE
 
     fun setRootModeEnabled(value: Boolean) {
         viewModelScope.launch {
@@ -96,6 +100,59 @@ class SettingsViewModel @Inject constructor(
             capabilityProbe.refresh()
         }
     }
+
+    // ── Accent colour ────────────────────────────────────────────────────────
+
+    val accentColor: StateFlow<AccentColor> = userPrefs.accentColor
+        .stateIn(viewModelScope, SharingStarted.Eagerly, AccentColor.BLUE)
+
+    fun setAccent(accent: AccentColor) {
+        viewModelScope.launch { userPrefs.setAccentColor(accent) }
+    }
+
+    // ── Units ────────────────────────────────────────────────────────────────
+
+    val clockUnit: StateFlow<ClockUnit> = userPrefs.clockUnit
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ClockUnit.MHZ)
+
+    val tempUnit: StateFlow<TempUnit> = userPrefs.tempUnit
+        .stateIn(viewModelScope, SharingStarted.Eagerly, TempUnit.CELSIUS)
+
+    fun setClockUnit(unit: ClockUnit) {
+        viewModelScope.launch { userPrefs.setClockUnit(unit) }
+    }
+
+    fun setTempUnit(unit: TempUnit) {
+        viewModelScope.launch { userPrefs.setTempUnit(unit) }
+    }
+
+    // ── What's New / update banner ────────────────────────────────────────────
+
+    /** True when the current versionCode hasn't been seen yet.
+     *  Shown as a dismissible banner at the top of the Settings screen. */
+    val shouldShowWhatsNew: StateFlow<Boolean> = userPrefs.lastSeenVersion
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+        .let { lastSeenFlow ->
+            MutableStateFlow(false).also { sink ->
+                viewModelScope.launch {
+                    lastSeenFlow.collect { lastSeen ->
+                        sink.value = BuildConfig.VERSION_CODE > lastSeen
+                    }
+                }
+            }
+        }
+
+    fun markWhatsNewSeen() {
+        viewModelScope.launch { userPrefs.setLastSeenVersion(BuildConfig.VERSION_CODE) }
+    }
+
+    // ── Navigation state for What's New overlay ───────────────────────────────
+
+    private val _showWhatsNewScreen = MutableStateFlow(false)
+    val showWhatsNewScreen: StateFlow<Boolean> = _showWhatsNewScreen.asStateFlow()
+
+    fun openWhatsNew() { _showWhatsNewScreen.value = true }
+    fun closeWhatsNew() { _showWhatsNewScreen.value = false }
 
     fun refresh() {
         _accessibilityGranted.value = checkAccessibilityGranted()

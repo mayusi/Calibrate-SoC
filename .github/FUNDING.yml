@@ -1,0 +1,11 @@
+# GitHub funding configuration
+# See https://docs.github.com/en/repositories/administering-your-repository/displaying-a-sponsor-button-in-your-repository
+
+# To enable sponsorship, uncomment and fill in the relevant lines below.
+# Note: remove the leading '#' and space from the line you want to enable.
+
+# github: [username]
+# patreon: username
+# ko_fi: username
+# tidelift: npm/package-name
+# custom: https://example.com/donate
