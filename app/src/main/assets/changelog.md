@@ -1,3 +1,19 @@
+## [0.1.6-alpha] — 2026-06-14
+
+A security-hardening release. No new features — these fixes make the app safer for everyone.
+
+### Security
+- The in-app updater now verifies every downloaded update is signed by the same key as the app you're running before it can install — a tampered or man-in-the-middle'd APK is refused. Updates are also restricted to HTTPS GitHub URLs only and saved to private storage.
+- Generated root tuning scripts now fully escape your profile/governor names, so a profile name can never inject a command into the script that runs as root.
+- Backups that are newer than the app supports, or that contain unsafe values, are now rejected on import instead of being loaded anyway.
+- Tightened a few internal components (boot receivers, debug logging) so other apps can't poke them.
+
+### Fixed
+- Tapping "Download" twice could corrupt the update file — the updater now ignores a second tap while a download is in progress.
+
+### Changed
+- Live monitoring now does all its sysfs reads off the main thread, so the in-game HUD steals fewer frames from your game.
+
 ## [0.1.5-alpha] — 2026-06-11
 
 ### Added

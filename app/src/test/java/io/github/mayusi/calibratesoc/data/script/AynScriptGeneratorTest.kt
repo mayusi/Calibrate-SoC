@@ -121,4 +121,93 @@ class AynScriptGeneratorTest {
         assertThat(maxIdx).isGreaterThan(lowMinIdx)
         assertThat(targetMinIdx).isGreaterThan(maxIdx)
     }
+
+    // ── shellSingleQuote security tests ─────────────────────────────────────
+
+    private val gen = AynScriptGenerator()
+
+    @Test
+    fun `shellSingleQuote wraps a normal name in single quotes`() {
+        assertThat(gen.shellSingleQuote("Performance")).isEqualTo("'Performance'")
+    }
+
+    @Test
+    fun `shellSingleQuote escapes an apostrophe correctly`() {
+        // "Mike's tune" → 'Mike'\''s tune'
+        assertThat(gen.shellSingleQuote("Mike's tune")).isEqualTo("'Mike'\\''s tune'")
+    }
+
+    @Test
+    fun `shellSingleQuote neutralises full shell injection payload`() {
+        val payload = "foo' ; rm -rf /data ; echo '"
+        val quoted = gen.shellSingleQuote(payload)
+        // Must contain the POSIX escaped-quote sequence for the apostrophe.
+        assertThat(quoted).contains("'\\''")
+        // Must start and end with a single-quote so the value is always wrapped.
+        assertThat(quoted).startsWith("'")
+        assertThat(quoted).endsWith("'")
+        // The semicolons must remain inside quoted regions — confirmed by the
+        // fact that the result is a single-quoted expression (no unquoted `;`).
+        // Concretely: the injection sequence '; rm' must not appear unquoted.
+        // After escaping, the original ' is replaced by '\'', so the '; rm'
+        // literal should no longer be a boundary between quoted sections.
+        assertThat(quoted).doesNotContain("'; rm")
+    }
+
+    /**
+     * Every shell command line whose first token is `echo`, `printf`, or
+     * `stop` — i.e. the lines that actually run a command with an embedded
+     * value. We assert these are SAFE: any embedded apostrophe is POSIX-escaped
+     * to `'\''` so the value can never break out of its single-quoted region.
+     *
+     * Note: a substring like `; rm -rf` legitimately appears inside a safely
+     * single-quoted literal (e.g. `echo '... ; rm -rf ...'`), so the right
+     * property to assert is "the apostrophe was escaped", NOT "the substring is
+     * absent" — the latter would flag safe output.
+     */
+    @Test
+    fun `generated script escapes an injection payload in the preset name`() {
+        val malicious = balanced.copy(
+            name = "foo' ; rm -rf /data ; echo '",
+            cpuPolicyGovernor = emptyMap(),
+        )
+        val sh = AynScriptGenerator().generate(malicious, report, adapter)
+        // The apostrophe in the name must be POSIX-escaped on the echo line:
+        // foo'... → 'foo'\''...  (close quote, escaped literal ', reopen quote)
+        assertThat(sh).contains("'foo'\\''")
+        // The name's apostrophe must NEVER appear as a bare quote-then-command
+        // boundary on the echo line, i.e. `foo' ;` (close quote then `;`) must
+        // not exist — it is always `foo'\''` instead.
+        assertThat(sh).doesNotContain("'foo' ;")
+    }
+
+    @Test
+    fun `generated script escapes a malicious governor value`() {
+        val malicious = balanced.copy(
+            cpuPolicyGovernor = mapOf(0 to "schedutil' ; cat /data/data/io.github.mayusi.calibratesoc ; echo '"),
+        )
+        val sh = AynScriptGenerator().generate(malicious, report, adapter)
+        // The apostrophe in the governor must be escaped (schedutil'\'' ...),
+        // never left as a bare `schedutil' ;` quote-break.
+        assertThat(sh).contains("schedutil'\\''")
+        assertThat(sh).doesNotContain("'schedutil' ;")
+    }
+
+    @Test
+    fun `commentSafe strips newlines so a name cannot escape a comment line`() {
+        val gen = AynScriptGenerator()
+        val nasty = "Cool\nrm -rf /data"
+        // commentSafe collapses CR/LF to spaces.
+        assertThat(gen.commentSafe(nasty)).isEqualTo("Cool rm -rf /data")
+        assertThat(gen.commentSafe(nasty)).doesNotContain("\n")
+
+        val malicious = balanced.copy(name = "Cool\nrm -rf /data", cpuPolicyGovernor = emptyMap())
+        val sh = gen.generate(malicious, report, adapter)
+        // The `# Preset:` comment line must stay a single line — the injected
+        // newline must not split it into a real command line.
+        assertThat(sh).contains("# Preset: Cool rm -rf /data")
+        assertThat(sh).doesNotContain("# Preset: Cool\nrm -rf /data")
+        // (The echo line keeps the newline but INSIDE single quotes, which is
+        // harmless — echo just prints a two-line literal; it executes nothing.)
+    }
 }

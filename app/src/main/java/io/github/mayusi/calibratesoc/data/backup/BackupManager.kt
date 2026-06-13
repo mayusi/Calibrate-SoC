@@ -4,6 +4,7 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchRepository
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
+import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryEntry
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.flow.first
@@ -71,7 +72,8 @@ class BackupManager @Inject constructor(
         var tuneEntriesRestored = 0
         var benchRunsRestored = 0
 
-        // Parse the JSON.
+        // Parse the JSON. kotlinx.serialization with ignoreUnknownKeys handles
+        // malformed JSON and missing required fields by throwing, which is caught here.
         val bundle = runCatching {
             this.json.decodeFromString<BackupBundle>(json)
         }.getOrElse { e ->
@@ -85,14 +87,34 @@ class BackupManager @Inject constructor(
             )
         }
 
-        // Check schema version compatibility.
-        if (bundle.schemaVersion > 1) {
-            errors.add("Backup schema version ${bundle.schemaVersion} is newer than supported (1)")
+        // Abort on a schema version we don't understand — continuing would import
+        // fields whose semantics we don't know, which could feed unvalidated data
+        // into the script generator. A crafted newer-version backup is rejected
+        // loudly here rather than silently importing garbage.
+        if (bundle.schemaVersion > SUPPORTED_SCHEMA_VERSION) {
+            errors.add(
+                "Backup schema version ${bundle.schemaVersion} is newer than supported " +
+                    "($SUPPORTED_SCHEMA_VERSION). Upgrade the app to import this backup.",
+            )
+            return ImportResult(
+                profilesRestored = 0,
+                tuneEntriesRestored = 0,
+                benchRunsRestored = 0,
+                stabilityRunsRestored = 0,
+                errors = errors,
+            )
         }
 
-        // Restore profiles.
+        // Restore profiles — validate each one before saving.
+        // Rejection of a single invalid profile is recorded as an error but
+        // does not abort the rest of the import.
         runCatching {
             for (profile in bundle.profiles) {
+                val validationError = validateProfile(profile)
+                if (validationError != null) {
+                    errors.add("Skipping profile '${profile.id}': $validationError")
+                    continue
+                }
                 profileRepo.saveProfile(profile)
                 profilesRestored++
             }
@@ -141,6 +163,69 @@ class BackupManager @Inject constructor(
             stabilityRunsRestored = 0, // Not serializable, excluded.
             errors = errors,
         )
+    }
+
+    /**
+     * Validate a [UserProfile] imported from a backup before it is saved.
+     *
+     * Returns null when the profile is acceptable, or a human-readable error
+     * string describing the first failing constraint. Caller logs/records the
+     * error and skips the profile.
+     *
+     * **Why this exists:** imported profiles feed directly into [AynScriptGenerator],
+     * which interpolates [UserProfile.name], [UserProfile.cpuPolicyGovernor], and
+     * [UserProfile.gpuGovernor] into generated root scripts. Shell injection is
+     * mitigated at the script-generation layer (via shellSingleQuote), but
+     * defence-in-depth means we also reject at import time so malformed data
+     * never reaches the script generator in the first place.
+     *
+     * Validation rules:
+     *  - Free-text fields (name, description): reject if they contain shell
+     *    metacharacters (`'`, `"`, `` ` ``, `$`, `;`, `&`, `|`, `<`, `>`,
+     *    `(`, `)`, `{`, `}`) or ASCII control characters (U+0000–U+001F).
+     *    These characters have no legitimate use in display names and are the
+     *    exact characters that could break single-quote escaping or inject
+     *    commands via other quoting contexts.
+     *  - Governor strings (cpuPolicyGovernor values, gpuGovernor): additionally
+     *    reject values containing whitespace or `/`, since kernel governor names
+     *    are always a single lowercase token (e.g. "schedutil", "performance").
+     */
+    internal fun validateProfile(profile: UserProfile): String? {
+        val shellMetaChars = Regex("""['"`$;&|<>(){}]|\p{Cntrl}""")
+        val governorInvalid = Regex("""['"`$;&|<>(){}]|\p{Cntrl}|[\s/]""")
+
+        if (shellMetaChars.containsMatchIn(profile.name)) {
+            return "name contains disallowed characters"
+        }
+        if (profile.name.isBlank()) {
+            return "name must not be blank"
+        }
+        if (shellMetaChars.containsMatchIn(profile.description)) {
+            return "description contains disallowed characters"
+        }
+        for ((policyId, gov) in profile.cpuPolicyGovernor) {
+            if (governorInvalid.containsMatchIn(gov)) {
+                return "cpuPolicyGovernor[$policyId] '$gov' contains disallowed characters"
+            }
+            if (gov.isBlank()) {
+                return "cpuPolicyGovernor[$policyId] must not be blank"
+            }
+        }
+        profile.gpuGovernor?.let { gov ->
+            if (governorInvalid.containsMatchIn(gov)) {
+                return "gpuGovernor '$gov' contains disallowed characters"
+            }
+            if (gov.isBlank()) {
+                return "gpuGovernor must not be blank"
+            }
+        }
+        return null
+    }
+
+    companion object {
+        /** The only schema version this build understands. Imports with a higher
+         *  version are rejected outright rather than silently importing unknown fields. */
+        const val SUPPORTED_SCHEMA_VERSION = 1
     }
 }
 

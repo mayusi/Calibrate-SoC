@@ -5,6 +5,12 @@
          chooser can hand off to Odin Settings' script runner. -->
     <external-path name="calibratesoc_scripts" path="CalibrateSoC/" />
     <external-files-path name="app_private_scripts" path="" />
-    <!-- Downloaded APK updates live in getExternalFilesDir(null)/updates/ -->
-    <external-files-path name="apk_updates" path="updates/" />
+    <!-- Downloaded APK updates now live in filesDir/updates/ (internal
+         storage) instead of getExternalFilesDir()/updates/ to eliminate
+         the TOCTOU file-swap risk on external storage. The
+         apk_updates_external entry is kept for any in-flight upgrades
+         from an older installed version that may still hold a reference
+         to the old path, but new downloads will use apk_updates_internal. -->
+    <external-files-path name="apk_updates_external" path="updates/" />
+    <files-path name="apk_updates_internal" path="updates/" />
 </paths>

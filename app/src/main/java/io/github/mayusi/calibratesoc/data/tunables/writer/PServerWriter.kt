@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.data.tunables.writer
 import android.os.IBinder
 import android.os.Parcel
 import android.util.Log
+import io.github.mayusi.calibratesoc.BuildConfig
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
@@ -67,7 +68,7 @@ class PServerWriter @Inject constructor() : SysfsWriter {
             return WriteResult.CapabilityDenied(id, "PServerWriter handles SETTINGS_SYSTEM only.")
         }
         return withContext(Dispatchers.IO) {
-            Log.i(TAG, "write(): target=${id.target} value=$value")
+            if (BuildConfig.DEBUG) Log.i(TAG, "write(): target=${id.target} value=$value")
             val binder = binder()
             if (binder == null) {
                 Log.w(TAG, "write(): binder() returned null — PServer not bindable")
@@ -76,7 +77,7 @@ class PServerWriter @Inject constructor() : SysfsWriter {
                     "PServerBinder service not present on this device.",
                 )
             }
-            Log.i(TAG, "write(): got binder=$binder, transacting...")
+            if (BuildConfig.DEBUG) Log.i(TAG, "write(): got binder, transacting...")
 
             val cmd = "settings put system ${id.target} $value"
             val (status, stdout) = try {
@@ -93,7 +94,10 @@ class PServerWriter @Inject constructor() : SysfsWriter {
                 return@withContext WriteResult.Failed(id, t)
             }
 
-            Log.i(TAG, "write(): transact returned status=$status stdout='$stdout'")
+            // Log status in all builds (no sensitive data), but gate stdout behind DEBUG
+            // to prevent root command output from appearing in release logcat.
+            if (BuildConfig.DEBUG) Log.i(TAG, "write(): transact returned status=$status stdout='$stdout'")
+            else Log.i(TAG, "write(): transact returned status=$status")
             if (status == 0) {
                 WriteResult.Success(id, previousValue = null, newValue = value)
             } else {

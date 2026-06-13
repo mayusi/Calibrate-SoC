@@ -3,9 +3,11 @@ package io.github.mayusi.calibratesoc.data.monitor
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
 import io.github.mayusi.calibratesoc.data.capability.SysfsProber
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -74,7 +76,7 @@ class MonitorService @Inject constructor(
 
             delay(intervalMs)
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     companion object {
         const val DEFAULT_INTERVAL_MS = 1_000L

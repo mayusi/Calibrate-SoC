@@ -11,6 +11,42 @@ Nothing yet.
 
 ---
 
+## [0.1.6-alpha] — 2026-06-14
+
+A security-hardening release driven by a full audit of the codebase. No new
+user-facing features — these are correctness and safety fixes that make the app
+safer for everyone.
+
+### Security
+- **Update integrity** — the in-app updater now verifies that a downloaded
+  update is signed by the **same certificate as the currently-installed build**
+  before it will hand the APK to the system installer. A tampered or
+  man-in-the-middle'd APK is refused. Downloads are additionally restricted to
+  `https://` URLs on GitHub hosts only, and the APK is written to app-private
+  internal storage (closing a sdcard swap window).
+- **Root-script injection** — every user-controlled value (profile name,
+  governor) interpolated into a generated "run as root" script is now
+  POSIX-escaped, and comment lines are newline-stripped. A profile named
+  `foo' ; rm -rf /data` can no longer inject a command that runs as root.
+- **Backup import** — imports now **abort** on a newer-than-supported schema
+  version instead of importing anyway, and every imported profile/governor
+  string is validated against shell-metacharacter injection before it is saved.
+- **Component hardening** — the two `BOOT_COMPLETED` receivers are no longer
+  exported (they only need the system broadcast), and verbose root-command
+  logging is gated to debug builds so it never lands in release logcat.
+
+### Fixed
+- Double-tapping **Download** in the updater could start two concurrent
+  downloads writing the same file and corrupt the APK — the updater now guards
+  against re-entry while a download is in flight.
+
+### Changed
+- Live telemetry sampling now runs on `Dispatchers.IO` (`flowOn`), so all the
+  per-tick sysfs reads happen off the main thread — the in-game HUD no longer
+  does file I/O on the UI thread while a game runs underneath it.
+
+---
+
 ## [0.1.5-alpha] — 2026-06-11
 
 ### Added

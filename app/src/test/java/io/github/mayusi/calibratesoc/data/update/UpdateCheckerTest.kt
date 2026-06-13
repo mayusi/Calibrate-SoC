@@ -4,6 +4,124 @@ import com.google.common.truth.Truth.assertThat
 import kotlinx.serialization.json.Json
 import org.junit.Test
 
+// ── URL allowlist ─────────────────────────────────────────────────────────────
+
+/**
+ * Pure-JVM tests for [ApkDownloader.isAllowedUrl].
+ *
+ * Security contract:
+ *  - Only `https://` scheme is accepted.
+ *  - Host must end with `.github.com` or `.githubusercontent.com`.
+ *  - Anything else — http, file, content, arbitrary host — is rejected.
+ *
+ * [isAllowedUrl] lives in the companion object so it can be tested here
+ * without an Android runtime context.
+ */
+class ApkDownloaderUrlTest {
+
+    // ── Accepted URLs ─────────────────────────────────────────────────────────
+
+    @Test
+    fun `github release asset URL is accepted`() {
+        val url = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/" +
+            "123456/CalibrateSoC-0.1.5-alpha.apk?X-Amz-Signature=abc123"
+        assertThat(ApkDownloader.isAllowedUrl(url)).isTrue()
+    }
+
+    @Test
+    fun `github com download URL is accepted`() {
+        val url = "https://github.com/mayusi/Calibrate-SoC/releases/download/" +
+            "v0.1.5-alpha/CalibrateSoC-0.1.5-alpha.apk"
+        assertThat(ApkDownloader.isAllowedUrl(url)).isTrue()
+    }
+
+    @Test
+    fun `api github com URL is accepted`() {
+        // GitHub API redirects sometimes originate from api.github.com
+        assertThat(ApkDownloader.isAllowedUrl("https://api.github.com/some/path")).isTrue()
+    }
+
+    @Test
+    fun `raw githubusercontent com URL is accepted`() {
+        assertThat(
+            ApkDownloader.isAllowedUrl("https://raw.githubusercontent.com/user/repo/main/file.apk")
+        ).isTrue()
+    }
+
+    // ── Rejected: wrong scheme ────────────────────────────────────────────────
+
+    @Test
+    fun `http github URL is rejected`() {
+        assertThat(
+            ApkDownloader.isAllowedUrl("http://objects.githubusercontent.com/file.apk")
+        ).isFalse()
+    }
+
+    @Test
+    fun `file scheme is rejected`() {
+        assertThat(
+            ApkDownloader.isAllowedUrl("file:///sdcard/malicious.apk")
+        ).isFalse()
+    }
+
+    @Test
+    fun `content scheme is rejected`() {
+        assertThat(
+            ApkDownloader.isAllowedUrl("content://com.example/file.apk")
+        ).isFalse()
+    }
+
+    // ── Rejected: wrong host ──────────────────────────────────────────────────
+
+    @Test
+    fun `arbitrary HTTPS host is rejected`() {
+        assertThat(
+            ApkDownloader.isAllowedUrl("https://evil.example.com/CalibrateSoC.apk")
+        ).isFalse()
+    }
+
+    @Test
+    fun `URL that ends with github com but isn't a subdomain is rejected`() {
+        // e.g. "notgithub.com" does NOT end with ".github.com"
+        assertThat(
+            ApkDownloader.isAllowedUrl("https://notgithub.com/file.apk")
+        ).isFalse()
+    }
+
+    @Test
+    fun `homograph lookalike domain is rejected`() {
+        // Attacker registers "github.com.evil.org" — must be rejected.
+        assertThat(
+            ApkDownloader.isAllowedUrl("https://github.com.evil.org/file.apk")
+        ).isFalse()
+    }
+
+    @Test
+    fun `githubusercontent com lookalike is rejected`() {
+        // "githubusercontent.com.attacker.io" must not match the suffix check.
+        assertThat(
+            ApkDownloader.isAllowedUrl("https://githubusercontent.com.attacker.io/file.apk")
+        ).isFalse()
+    }
+
+    // ── Rejected: malformed input ─────────────────────────────────────────────
+
+    @Test
+    fun `empty string is rejected without crashing`() {
+        assertThat(ApkDownloader.isAllowedUrl("")).isFalse()
+    }
+
+    @Test
+    fun `blank string is rejected without crashing`() {
+        assertThat(ApkDownloader.isAllowedUrl("   ")).isFalse()
+    }
+
+    @Test
+    fun `javascript URI is rejected`() {
+        assertThat(ApkDownloader.isAllowedUrl("javascript:alert(1)")).isFalse()
+    }
+}
+
 /**
  * Pure-JVM tests for [UpdateChecker.isNewer] and the GitHub JSON models.
  *
