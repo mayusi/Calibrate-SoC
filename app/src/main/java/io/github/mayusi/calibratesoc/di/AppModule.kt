@@ -10,6 +10,7 @@ import dagger.hilt.components.SingletonComponent
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchDatabase
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchRunDao
 import io.github.mayusi.calibratesoc.data.benchmark.db.StabilityRunDao
+import io.github.mayusi.calibratesoc.data.session.SessionDao
 import kotlinx.serialization.json.Json
 import okio.FileSystem
 import javax.inject.Singleton
@@ -56,4 +57,7 @@ object AppModule {
 
     @Provides
     fun provideStabilityRunDao(db: BenchDatabase): StabilityRunDao = db.stabilityRunDao()
+
+    @Provides
+    fun provideSessionDao(db: BenchDatabase): SessionDao = db.sessionDao()
 }

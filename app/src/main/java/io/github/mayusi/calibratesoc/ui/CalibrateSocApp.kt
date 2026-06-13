@@ -27,6 +27,8 @@ import io.github.mayusi.calibratesoc.ui.capability.CapabilityReportScreen
 import io.github.mayusi.calibratesoc.ui.dashboard.DashboardScreen
 import io.github.mayusi.calibratesoc.ui.hardware.HardwareScreen
 import io.github.mayusi.calibratesoc.ui.profiles.ProfilesScreen
+import io.github.mayusi.calibratesoc.ui.session.SessionDetailScreen
+import io.github.mayusi.calibratesoc.ui.session.SessionsScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneHistoryScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneScreen
@@ -76,6 +78,10 @@ fun CalibrateSocApp() {
                                     Destination.Settings -> Icons.Outlined.Settings
                                     Destination.DeviceInfo -> Icons.Outlined.Info
                                     Destination.TuneHistory -> Icons.Outlined.Bookmarks
+                                    // Sessions/SessionDetail are not in the bottom bar;
+                                    // these arms keep the sealed-class when exhaustive.
+                                    Destination.Sessions -> Icons.Outlined.BarChart
+                                    Destination.SessionDetail -> Icons.Outlined.BarChart
                                 },
                                 contentDescription = dest.label,
                             )
@@ -91,7 +97,11 @@ fun CalibrateSocApp() {
             startDestination = Destination.Dashboard.route,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Destination.Dashboard.route) { DashboardScreen() }
+            composable(Destination.Dashboard.route) {
+                DashboardScreen(
+                    onOpenSessions = { nav.navigate(Destination.Sessions.route) },
+                )
+            }
             composable(Destination.Tune.route) {
                 TuneScreen(onOpenHistory = { nav.navigate(Destination.TuneHistory.route) })
             }
@@ -103,6 +113,19 @@ fun CalibrateSocApp() {
                 SettingsScreen(onOpenDeviceInfo = { nav.navigate(Destination.DeviceInfo.route) })
             }
             composable(Destination.DeviceInfo.route) { CapabilityReportScreen() }
+            composable(Destination.Sessions.route) {
+                SessionsScreen(
+                    onOpenDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                    onBack = { nav.popBackStack() },
+                )
+            }
+            composable(Destination.SessionDetail.route) { backStack ->
+                val sessionId = backStack.arguments?.getString("sessionId")?.toLongOrNull() ?: return@composable
+                SessionDetailScreen(
+                    sessionId = sessionId,
+                    onBack = { nav.popBackStack() },
+                )
+            }
         }
     }
 }

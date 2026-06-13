@@ -1,3 +1,11 @@
+## [0.1.8-alpha] — 2026-06-14
+
+Two new features for seeing how your device performs over time.
+
+### Added
+- **Benchmark trends** — a new "Trends" tab in Benchmark charts your scores over time (Overall / CPU / GPU / Memory) so you can see whether a tune actually improved things. Pick a run type and watch your own history; scores stay same-device-only (never cross-device).
+- **Gaming session recorder** — record a play session and review the timeline afterward: FPS, temperatures, clocks and power over time. Start/stop from a Record button on the floating HUD (real in-game FPS) or from the Dashboard. Keeps your 10 most recent sessions; open any one to see exactly when things got hot or dropped frames.
+
 ## [0.1.7-alpha] — 2026-06-14
 
 Two new features for longer, cooler play sessions.

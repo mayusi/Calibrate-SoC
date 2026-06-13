@@ -13,6 +13,7 @@ import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.computeBatteryEstimate
 import io.github.mayusi.calibratesoc.data.monitor.smoothedPowerMilliW
+import io.github.mayusi.calibratesoc.data.session.SessionRecorder
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -40,9 +41,28 @@ class DashboardViewModel @Inject constructor(
     monitorService: MonitorService,
     tuneHistoryStore: TuneHistoryStore,
     private val batteryChargeReader: BatteryChargeReader,
+    private val sessionRecorder: SessionRecorder,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /** Mirror recorder state for the Dashboard recording card. */
+    val isRecording: StateFlow<Boolean> = sessionRecorder.isRecording
+    val recordingElapsedSeconds: StateFlow<Long> = sessionRecorder.elapsedSeconds
+
+    fun toggleRecording() {
+        viewModelScope.launch {
+            if (sessionRecorder.isRecording.value) {
+                sessionRecorder.stop("dashboard_button")
+            } else {
+                // hudIsRunning = false: the Dashboard can't know if the
+                // HUD is running. The recorder will switch to Mode A
+                // automatically once OverlayService starts calling
+                // feedHudSample(). Mode B (standalone) starts here.
+                sessionRecorder.start(hudIsRunning = false)
+            }
+        }
+    }
 
     /**
      * Name of the most recently applied tune preset, or null when the

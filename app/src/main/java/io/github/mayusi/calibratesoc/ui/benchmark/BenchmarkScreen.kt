@@ -72,7 +72,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Benchmark screen — run / history / compare.
+ * Benchmark screen — run / history / compare / trends.
  *
  * Redesigned for clarity:
  *   - Headline result card: composite score + BenchRating word + one sentence.
@@ -80,10 +80,11 @@ import java.util.Locale
  *   - Per-metric labeled rows with plain-English description.
  *   - Throttle curve annotation (Full runs).
  *   - Compare view: card-based + color-coded deltas.
+ *   - Trends tab: score history over time, per flavor + metric.
  */
 @Composable
 fun BenchmarkScreen(viewModel: BenchmarkViewModel = hiltViewModel()) {
-    // Segmented toggle: 0 = Benchmark (existing), 1 = Stability (new).
+    // Segmented toggle: 0 = Benchmark, 1 = Stability, 2 = Trends.
     // Kept inside this screen instead of a 7th bottom-nav tab — the bar
     // already carries 6 and a 7th is cramped on a landscape handheld.
     var tab by rememberSaveable { mutableStateOf(0) }
@@ -97,17 +98,23 @@ fun BenchmarkScreen(viewModel: BenchmarkViewModel = hiltViewModel()) {
             SegmentedButton(
                 selected = tab == 0,
                 onClick = { tab = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
             ) { Text("Benchmark") }
             SegmentedButton(
                 selected = tab == 1,
                 onClick = { tab = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
             ) { Text("Stability") }
+            SegmentedButton(
+                selected = tab == 2,
+                onClick = { tab = 2 },
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+            ) { Text("Trends") }
         }
         when (tab) {
             0 -> BenchmarkContent(viewModel)
-            else -> StabilityScreen()
+            1 -> StabilityScreen()
+            else -> BenchTrendScreen()
         }
     }
 }

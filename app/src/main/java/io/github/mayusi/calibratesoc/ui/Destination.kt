@@ -15,6 +15,13 @@ sealed class Destination(val route: String, val label: String) {
     data object Settings : Destination("settings", "Settings")
     data object DeviceInfo : Destination("device_info", "Device")
     data object TuneHistory : Destination("tune_history", "History")
+    /** Sessions list — sub-screen reachable from the Dashboard "Sessions" card.
+     *  Not in the bottom bar (7 tabs is too many on a handheld). */
+    data object Sessions : Destination("sessions", "Sessions")
+    /** Session detail / timeline — sub-screen of Sessions. */
+    data object SessionDetail : Destination("session_detail/{sessionId}", "Session") {
+        fun route(id: Long) = "session_detail/$id"
+    }
 
     companion object {
         /** Six-tab bottom bar. Device Info is reachable as a deep-link

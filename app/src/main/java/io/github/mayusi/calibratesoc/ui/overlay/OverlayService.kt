@@ -98,6 +98,7 @@ class OverlayService :
     @Inject lateinit var gameFpsSampler: GameFpsSampler
     @Inject lateinit var refreshRateController: io.github.mayusi.calibratesoc.data.display.RefreshRateController
     @Inject lateinit var userPrefs: io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+    @Inject lateinit var sessionRecorder: io.github.mayusi.calibratesoc.data.session.SessionRecorder
 
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
     override val savedStateRegistry get() = savedStateRegistryController.savedStateRegistry
@@ -135,6 +136,7 @@ class OverlayService :
         observeProfile()
         observeUserProfiles()
         observeBigCorePolicy()
+        observeRecorderState()
         frameRateSampler.start()
         hudEventLog.add(HudEventLog.Level.INFO, "HUD started")
         serviceScope.launch {
@@ -180,6 +182,12 @@ class OverlayService :
     override fun onBind(intent: Intent): IBinder? = null
 
     override fun onDestroy() {
+        // Auto-stop any in-progress session when the HUD closes.
+        if (sessionRecorder.isRecording.value) {
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                runCatching { sessionRecorder.stop("hud_stop") }
+            }
+        }
         frameRateSampler.stop()
         gameFpsSampler.stop()
         runCatching {
@@ -295,6 +303,17 @@ class OverlayService :
                         onPickStepSize = { mhz ->
                             serviceScope.launch { hudPrefs.setStepMhz(mhz) }
                         },
+                        onToggleRecord = {
+                            serviceScope.launch {
+                                if (sessionRecorder.isRecording.value) {
+                                    sessionRecorder.stop("hud_button")
+                                    hudEventLog.add(HudEventLog.Level.INFO, "Session recording stopped")
+                                } else {
+                                    sessionRecorder.start(hudIsRunning = true)
+                                    hudEventLog.add(HudEventLog.Level.INFO, "Session recording started")
+                                }
+                            }
+                        },
                         onClose = { stopSelf() },
                     )
                 }
@@ -366,6 +385,21 @@ class OverlayService :
                     ramUsedPct = ramUsedPct,
                     zones = t.zoneTempsMilliC.map { it.label to it.tempMilliC / 1000f },
                 )
+                // Feed the session recorder (Mode A: HUD-driven). The
+                // recorder converts the absolute timestamp into elapsed
+                // time relative to session start internally.
+                if (sessionRecorder.isRecording.value) {
+                    sessionRecorder.feedHudSample(
+                        absoluteTimestampMs = t.timestampMs,
+                        fps = hudState.value.gameFps,
+                        cpuMaxMhz = cpuMaxKhz / 1000,
+                        gpuMhz = gpuMhz,
+                        cpuTempC = cpuTempC,
+                        gpuTempC = gpuTempC,
+                        batteryW = batteryW,
+                        cpuLoadPct = cpuLoadPct,
+                    )
+                }
             }
         }
     }
@@ -800,6 +834,24 @@ class OverlayService :
         }
     }
 
+    /**
+     * Mirror [SessionRecorder.isRecording] and elapsed seconds into
+     * [hudState] so the HUD button can toggle appearance without re-
+     * composing the whole tree.
+     */
+    private fun observeRecorderState() {
+        serviceScope.launch {
+            sessionRecorder.isRecording.collect { recording ->
+                hudState.value = hudState.value.copy(isRecording = recording)
+            }
+        }
+        serviceScope.launch {
+            sessionRecorder.elapsedSeconds.collect { secs ->
+                hudState.value = hudState.value.copy(recordingElapsedSeconds = secs)
+            }
+        }
+    }
+
     private fun observeProfile() {
         lifecycleScope.launch {
             hudPrefs.profile.collect { p -> hudState.value = hudState.value.copy(profile = p) }
@@ -969,4 +1021,8 @@ data class HudUiState(
      *  one-time setup script. Null = not granted or no foreground app. */
     val gameFps: Int? = null,
     val gameForegroundPkg: String? = null,
+    /** Whether a gaming session is currently being recorded. */
+    val isRecording: Boolean = false,
+    /** Elapsed recording time in seconds, for the HUD badge. */
+    val recordingElapsedSeconds: Long = 0L,
 )

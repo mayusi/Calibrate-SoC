@@ -2,6 +2,8 @@ package io.github.mayusi.calibratesoc.data.benchmark.db
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import io.github.mayusi.calibratesoc.data.session.SessionDao
+import io.github.mayusi.calibratesoc.data.session.SessionEntity
 
 // Bumped to 2 when KernelScores landed: BenchRunEntity gained a new
 // `kernelsJson` column. We're on fallbackToDestructiveMigration so
@@ -19,12 +21,17 @@ import androidx.room.RoomDatabase
 // v6 added gpuMaxMhz field to ThrottleSample (nullable default). Rides
 // inside the serialized throttleSamplesJson/samplesJson; backwards-compatible
 // via ignoreUnknownKeys + defaults in Json config.
+// v7 added the game_sessions table (SessionEntity) for the gaming session
+// recorder feature. Destructive fallback — session history is convenience
+// data, not load-bearing. Pre-alpha; existing bench/stability history is
+// wiped on first launch under v7.
 @Database(
-    entities = [BenchRunEntity::class, StabilityRunEntity::class],
-    version = 6,
+    entities = [BenchRunEntity::class, StabilityRunEntity::class, SessionEntity::class],
+    version = 7,
     exportSchema = false,
 )
 abstract class BenchDatabase : RoomDatabase() {
     abstract fun benchRunDao(): BenchRunDao
     abstract fun stabilityRunDao(): StabilityRunDao
+    abstract fun sessionDao(): SessionDao
 }

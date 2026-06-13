@@ -54,12 +54,17 @@ import io.github.mayusi.calibratesoc.ui.theme.Spacing
  * read-only widgets only; writes land in Phase 5.
  */
 @Composable
-fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
+fun DashboardScreen(
+    viewModel: DashboardViewModel = hiltViewModel(),
+    onOpenSessions: () -> Unit = {},
+) {
     val capability by viewModel.capability.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val latest by viewModel.latest.collectAsStateWithLifecycle()
     val lastAppliedPreset by viewModel.lastAppliedPreset.collectAsStateWithLifecycle()
     val batteryEstimate by viewModel.batteryEstimate.collectAsStateWithLifecycle()
+    val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
+    val recordingElapsed by viewModel.recordingElapsedSeconds.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -68,6 +73,14 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
     ) {
         item { Header(capability, lastAppliedPreset) }
         item { HudLauncherCard() }
+        item {
+            SessionRecordingCard(
+                isRecording = isRecording,
+                elapsedSeconds = recordingElapsed,
+                onToggleRecord = { viewModel.toggleRecording() },
+                onOpenSessions = onOpenSessions,
+            )
+        }
         if (latest == null) {
             item { Text("Sampling…", style = MaterialTheme.typography.bodyMedium) }
             return@LazyColumn
@@ -507,6 +520,68 @@ private fun BatteryEstimateRow(estimate: BatteryEstimate) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+        }
+    }
+}
+
+// --- Session recording card ------------------------------------------
+
+/**
+ * Dashboard fallback: start/stop a recording without needing the HUD.
+ * Note: without the HUD, FPS data is not available — this card says so
+ * explicitly. The "View sessions" button is always visible.
+ */
+@Composable
+private fun SessionRecordingCard(
+    isRecording: Boolean,
+    elapsedSeconds: Long,
+    onToggleRecord: () -> Unit,
+    onOpenSessions: () -> Unit,
+) {
+    SectionCard("Session recorder") {
+        Text(
+            "Record FPS, temps, clocks, and power over a play session, then review " +
+                "the timeline to diagnose drops or throttle events.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (!isRecording) {
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "Note: real in-game FPS is captured only while the HUD is also running. " +
+                    "Without the HUD, a session still records temps, clocks, and power.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (isRecording) {
+            Spacer(Modifier.height(Spacing.dense))
+            val mins = elapsedSeconds / 60
+            val secs = elapsedSeconds % 60
+            Text(
+                "Recording — %d:%02d elapsed".format(mins, secs),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            )
+        }
+        Spacer(Modifier.height(Spacing.group))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+            androidx.compose.material3.Button(
+                onClick = onToggleRecord,
+                colors = if (isRecording) {
+                    androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    androidx.compose.material3.ButtonDefaults.buttonColors()
+                },
+            ) {
+                Text(if (isRecording) "Stop recording" else "Start recording")
+            }
+            androidx.compose.material3.OutlinedButton(onClick = onOpenSessions) {
+                Text("View sessions")
             }
         }
     }

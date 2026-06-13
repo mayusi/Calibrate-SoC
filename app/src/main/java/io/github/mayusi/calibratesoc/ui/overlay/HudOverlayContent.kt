@@ -70,6 +70,7 @@ fun HudOverlayContent(
     onCycleNextProfile: () -> Unit,
     onTogglePolicy: (Int) -> Unit,
     onPickStepSize: (Int) -> Unit,
+    onToggleRecord: () -> Unit,
     onClose: () -> Unit,
 ) {
     Box(
@@ -79,7 +80,7 @@ fun HudOverlayContent(
             .background(Color(0xCC101418)),
     ) {
         Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            HudHeader(state.profile, onCycleLayout, onClose)
+            HudHeader(state.profile, state.isRecording, state.recordingElapsedSeconds, onCycleLayout, onToggleRecord, onClose)
             when (state.profile) {
                 HudProfile.COMPACT -> HudCompactRows(state)
                 HudProfile.VERBOSE -> HudVerbose(state)
@@ -145,7 +146,14 @@ private fun HudClusterChips(state: HudUiState, onTogglePolicy: (Int) -> Unit) {
 }
 
 @Composable
-private fun HudHeader(profile: HudProfile, onCycleLayout: () -> Unit, onClose: () -> Unit) {
+private fun HudHeader(
+    profile: HudProfile,
+    isRecording: Boolean,
+    recordingElapsedSeconds: Long,
+    onCycleLayout: () -> Unit,
+    onToggleRecord: () -> Unit,
+    onClose: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
@@ -155,7 +163,35 @@ private fun HudHeader(profile: HudProfile, onCycleLayout: () -> Unit, onClose: (
             color = Color(0x99FFFFFF),
             fontSize = 10.sp,
         )
+        // Recording elapsed time badge, shown only while recording.
+        if (isRecording) {
+            Spacer(Modifier.width(6.dp))
+            val mins = recordingElapsedSeconds / 60
+            val secs = recordingElapsedSeconds % 60
+            Text(
+                text = "%d:%02d".format(mins, secs),
+                color = Color(0xFFFF4D4D),
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
         Spacer(Modifier.weight(1f))
+        // Record toggle: ● to start, ■ to stop. Red when active.
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .clickable(onClick = onToggleRecord)
+                .padding(6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (isRecording) "■" else "●",
+                color = if (isRecording) Color(0xFFFF4D4D) else Color(0x99FFFFFF),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
         IconButton(onClick = onCycleLayout, modifier = Modifier.size(28.dp)) {
             Icon(
                 Icons.Outlined.SwapVert,

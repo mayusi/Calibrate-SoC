@@ -11,6 +11,27 @@ Nothing yet.
 
 ---
 
+## [0.1.8-alpha] — 2026-06-14
+
+Two new features for seeing performance over time (feature round, wave 2 of 2).
+
+### Added
+- **Benchmark trends** — a third "Trends" tab in the Benchmark screen charts your
+  scores over time (Overall / CPU / GPU / Memory) for a chosen run type, with a
+  first-vs-latest delta and best-ever. Read-only over your existing benchmark
+  history (no schema change); only completed runs are plotted, and the
+  same-device-only honesty caption is always shown. Flavors are charted
+  separately since scores aren't comparable across Quick/Standard/Full.
+- **Gaming session recorder** — record a play session (FPS + CPU/GPU temps +
+  clocks + power at 1 Hz) and review the timeline afterward with four charts.
+  Start/stop from a Record button on the floating HUD (captures real in-game FPS
+  via the SurfaceFlinger/PServer path) or from the Dashboard (temps/clocks/power
+  only — noted honestly in the UI). Keeps the 10 most recent sessions, oldest
+  auto-pruned; sessions are capped at 3 h as a safety. New `game_sessions` table
+  (DB v6 → v7, destructive — bench/stability history reset on upgrade, pre-alpha).
+
+---
+
 ## [0.1.7-alpha] — 2026-06-14
 
 Two new features for longer, cooler play sessions (feature round, wave 1 of 2).
