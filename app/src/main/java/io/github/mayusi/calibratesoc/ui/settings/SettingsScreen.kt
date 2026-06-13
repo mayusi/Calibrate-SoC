@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.ui.settings
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ColorLens
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NewReleases
 import androidx.compose.material.icons.outlined.Straighten
@@ -36,7 +38,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -62,6 +66,9 @@ import io.github.mayusi.calibratesoc.BuildConfig
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.prefs.ClockUnit
 import io.github.mayusi.calibratesoc.data.prefs.TempUnit
+import io.github.mayusi.calibratesoc.data.update.UpdateInfo
+import io.github.mayusi.calibratesoc.ui.components.AlertCard
+import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
@@ -239,75 +246,7 @@ fun SettingsScreen(
 
         // ── Check for updates + GitHub links ──────────────────────────────
         item {
-            SectionCard(title = "Updates & Feedback", icon = Icons.Outlined.SystemUpdate) {
-                Text(
-                    "Calibrate SoC ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(Spacing.group))
-                OutlinedButton(
-                    onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/mayusi/Calibrate-SoC/releases/latest"))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    androidx.compose.material3.Icon(
-                        Icons.AutoMirrored.Outlined.OpenInNew,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(Spacing.dense))
-                    Text("Check for updates")
-                }
-                OutlinedButton(
-                    onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/mayusi/Calibrate-SoC/issues"))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    androidx.compose.material3.Icon(
-                        Icons.Outlined.BugReport,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(Spacing.dense))
-                    Text("Report an issue")
-                }
-                OutlinedButton(
-                    onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/mayusi/Calibrate-SoC"))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    androidx.compose.material3.Icon(
-                        Icons.Outlined.Code,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(Spacing.dense))
-                    Text("View source on GitHub")
-                }
-            }
+            UpdatesAndFeedbackCard(context = context)
         }
 
         // ── Setup checklist ────────────────────────────────────────────────
@@ -525,6 +464,336 @@ fun SettingsScreen(
             onDismiss = viewModel::clearRestoreSummary,
         )
     }
+}
+
+// ── Updates & Feedback card ───────────────────────────────────────────────────
+
+/**
+ * Full in-app updater section. Uses [UpdateViewModel] for state and
+ * [ChangelogText] for rendering GitHub release notes.
+ *
+ * States:
+ *   Idle / UpToDate → shows "Check for updates" button + version label.
+ *   Checking        → spinner + "Checking…" text.
+ *   Available       → version card with expandable release notes + "Update now".
+ *   Downloading     → linear progress bar with percentage.
+ *   ReadyToInstall  → auto-launched installer + "Reopen installer" button.
+ *   Error           → AlertCard + "Open Releases page" fallback.
+ *
+ * Report-issue and View-source buttons are always visible below the updater.
+ */
+@Composable
+private fun UpdatesAndFeedbackCard(
+    context: android.content.Context,
+    updateVm: UpdateViewModel = hiltViewModel(),
+) {
+    val updateState by updateVm.state.collectAsStateWithLifecycle()
+    var notesExpanded by remember { mutableStateOf(false) }
+
+    SectionCard(title = "Updates & Feedback", icon = Icons.Outlined.SystemUpdate) {
+        // ── Version label (always visible) ────────────────────────────────
+        Text(
+            "Calibrate SoC ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Updater state machine ─────────────────────────────────────────
+        when (val s = updateState) {
+            is UpdateUiState.Idle -> {
+                OutlinedButton(
+                    onClick = { updateVm.check() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.AutoMirrored.Outlined.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(Spacing.dense))
+                    Text("Check for updates")
+                }
+            }
+
+            is UpdateUiState.Checking -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("Checking…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            is UpdateUiState.UpToDate -> {
+                Text(
+                    "You're on the latest version (${s.currentVersion}).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                OutlinedButton(
+                    onClick = { updateVm.check() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Check again") }
+            }
+
+            is UpdateUiState.Available -> {
+                UpdateAvailableCard(
+                    info = s.info,
+                    notesExpanded = notesExpanded,
+                    onToggleNotes = { notesExpanded = !notesExpanded },
+                    onDownload = { updateVm.download(s.info) },
+                    onOpenGitHub = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/mayusi/Calibrate-SoC/releases/latest"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    },
+                )
+            }
+
+            is UpdateUiState.Downloading -> {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    Text(
+                        if (s.pct < 0) "Downloading…" else "Downloading… ${s.pct}%",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (s.pct < 0) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { s.pct / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+
+            is UpdateUiState.ReadyToInstall -> {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    Text(
+                        "Opening installer…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    OutlinedButton(
+                        onClick = { updateVm.install(s.file) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        androidx.compose.material3.Icon(
+                            Icons.Outlined.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(Spacing.dense))
+                        Text("Reopen installer")
+                    }
+                }
+            }
+
+            is UpdateUiState.Error -> {
+                AlertCard(
+                    type = AlertType.ERROR,
+                    title = "Update check failed",
+                    message = s.message,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    OutlinedButton(
+                        onClick = { updateVm.reset() },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Dismiss") }
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW,
+                                        Uri.parse("https://github.com/mayusi/Calibrate-SoC/releases/latest"))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            }
+                            updateVm.reset()
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        androidx.compose.material3.Icon(
+                            Icons.AutoMirrored.Outlined.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(Spacing.dense))
+                        Text("Releases page")
+                    }
+                }
+            }
+        }
+
+        // ── Always-visible GitHub links ───────────────────────────────────
+        Spacer(Modifier.height(Spacing.dense))
+        OutlinedButton(
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/mayusi/Calibrate-SoC/issues"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            androidx.compose.material3.Icon(
+                Icons.Outlined.BugReport,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(Spacing.dense))
+            Text("Report an issue")
+        }
+        OutlinedButton(
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/mayusi/Calibrate-SoC"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            androidx.compose.material3.Icon(
+                Icons.Outlined.Code,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(Spacing.dense))
+            Text("View source on GitHub")
+        }
+    }
+}
+
+/**
+ * Card shown when a newer version is available. Shows the version name,
+ * an expandable release notes section (rendered via [ChangelogText]), and
+ * an "Update now" / "Open on GitHub" button depending on whether an APK
+ * asset exists.
+ */
+@Composable
+private fun UpdateAvailableCard(
+    info: UpdateInfo,
+    notesExpanded: Boolean,
+    onToggleNotes: () -> Unit,
+    onDownload: () -> Unit,
+    onOpenGitHub: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(Spacing.card),
+            verticalArrangement = Arrangement.spacedBy(Spacing.group),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Update available",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    Text(
+                        "Version ${info.versionName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                if (info.apkSize > 0) {
+                    Text(
+                        formatBytes(info.apkSize),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+
+            // Expandable release notes
+            if (info.notes.isNotBlank()) {
+                TextButton(
+                    onClick = onToggleNotes,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                ) {
+                    Text(
+                        if (notesExpanded) "Hide release notes ▲" else "Show release notes ▼",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                AnimatedVisibility(visible = notesExpanded) {
+                    ChangelogText(
+                        markdown = info.notes,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            // Action button
+            if (info.apkUrl != null) {
+                Button(
+                    onClick = onDownload,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.Outlined.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(Spacing.dense))
+                    Text("Update now")
+                }
+            } else {
+                // No APK asset — graceful GitHub fallback
+                Text(
+                    "This release has no APK download yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                OutlinedButton(
+                    onClick = onOpenGitHub,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.AutoMirrored.Outlined.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(Spacing.dense))
+                    Text("View on GitHub")
+                }
+            }
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return ""
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1.0) "%.1f MB".format(mb) else "${bytes / 1024} KB"
 }
 
 // ── What's New banner ─────────────────────────────────────────────────────────

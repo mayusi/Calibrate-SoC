@@ -1,3 +1,8 @@
+## [0.1.5-alpha] — 2026-06-11
+
+### Added
+- In-app updater — check GitHub for a newer version, read the patch notes here, and download + install the update without leaving the app (the system installer handles the final confirm).
+
 ## [0.1.4-alpha] — 2026-06-11
 
 A big quality-of-life, polish, and "keep up with updates" release.

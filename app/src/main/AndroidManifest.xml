@@ -83,6 +83,13 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!--
+      Required to launch the system package installer for self-updates.
+      Without this, the Intent.ACTION_VIEW + package-archive MIME causes
+      a SecurityException on Android 8+ (API 26+).
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       Needed to read every installed package's label/icon when building the
       per-app override picker (Android 11+ visibility restriction).
     -->

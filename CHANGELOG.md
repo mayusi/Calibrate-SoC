@@ -11,6 +11,17 @@ Nothing yet.
 
 ---
 
+## [0.1.5-alpha] — 2026-06-11
+
+### Added
+- **In-app updater** — the app now checks GitHub Releases for a newer version, shows the
+  release's patch notes right in the app, and can **download and install** the update for you
+  (the system installer handles the final confirmation — nothing installs silently). If a
+  release has no APK, it falls back to opening the Releases page. No more hunting for the APK
+  in a browser.
+
+---
+
 ## [0.1.4-alpha] — 2026-06-11
 
 A big quality-of-life, polish, and "keep up with updates" release.

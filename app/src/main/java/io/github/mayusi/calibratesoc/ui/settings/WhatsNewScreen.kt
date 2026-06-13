@@ -28,6 +28,79 @@ import io.github.mayusi.calibratesoc.BuildConfig
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
+ * Renders a single markdown-ish changelog line using the same rules as
+ * [WhatsNewScreen]'s inline renderer. Public so other screens (e.g. the
+ * in-app updater) can reuse it for arbitrary release-note bodies without
+ * duplicating the formatting logic.
+ *
+ * Supported constructs (same as the bundled changelog.md format):
+ *   `## ` → version header (titleMedium SemiBold, primary colour)
+ *   `### ` → sub-header (bodyMedium SemiBold, onSurface)
+ *   `- ` / `* ` → bullet (bodySmall, onSurfaceVariant, "• " prefix)
+ *   `---` / blank → small vertical spacer
+ *   anything else → bodySmall
+ */
+@Composable
+fun ChangelogLine(line: String) {
+    when {
+        line.startsWith("## ") -> {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                line.removePrefix("## "),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        line.startsWith("### ") -> {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                line.removePrefix("### "),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
+            )
+        }
+        line.startsWith("- ") || line.startsWith("* ") -> {
+            Text(
+                "• " + line.drop(2),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp),
+            )
+        }
+        line == "---" || line.isBlank() -> {
+            Spacer(Modifier.height(4.dp))
+        }
+        else -> {
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/**
+ * Renders a multi-line markdown-ish string (e.g. a GitHub release body)
+ * inside a [Column]. Each line is passed through [ChangelogLine].
+ *
+ * @param markdown the raw release notes string from a [GitHubRelease.body].
+ */
+@Composable
+fun ChangelogText(markdown: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        markdown.lines().forEach { line -> ChangelogLine(line) }
+    }
+}
+
+/**
  * Full-screen in-app changelog. Reads `assets/changelog.md` at runtime
  * and renders it with a lightweight markdown-ish parser:
  *   - `## ` → version header (titleMedium SemiBold, primary colour)
@@ -84,50 +157,6 @@ fun WhatsNewScreen(onBack: () -> Unit = {}) {
             Spacer(Modifier.height(Spacing.item))
         }
 
-        items(lines) { line ->
-            when {
-                line.startsWith("## ") -> {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        line.removePrefix("## "),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                line.startsWith("### ") -> {
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        line.removePrefix("### "),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
-                    )
-                }
-                line.startsWith("- ") || line.startsWith("* ") -> {
-                    Text(
-                        "• " + line.drop(2),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp),
-                    )
-                }
-                line == "---" || line.isBlank() -> {
-                    Spacer(Modifier.height(4.dp))
-                }
-                else -> {
-                    Text(
-                        line,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-        }
+        items(lines) { line -> ChangelogLine(line) }
     }
 }

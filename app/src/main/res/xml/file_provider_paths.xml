@@ -5,4 +5,6 @@
          chooser can hand off to Odin Settings' script runner. -->
     <external-path name="calibratesoc_scripts" path="CalibrateSoC/" />
     <external-files-path name="app_private_scripts" path="" />
+    <!-- Downloaded APK updates live in getExternalFilesDir(null)/updates/ -->
+    <external-files-path name="apk_updates" path="updates/" />
 </paths>
