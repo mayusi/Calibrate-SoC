@@ -11,6 +11,26 @@ Nothing yet.
 
 ---
 
+## [0.1.7-alpha] — 2026-06-14
+
+Two new features for longer, cooler play sessions (feature round, wave 1 of 2).
+
+### Added
+- **Battery time estimate** — the Dashboard shows estimated play time remaining
+  at the current power draw, derived from the live discharge wattage and the
+  battery's remaining charge (via `BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER`).
+  Power is smoothed over a short window; the estimate is clearly labelled as
+  approximate and shows an honest "unavailable" state when charge/current can't
+  be read. Shows "Charging" instead of a bogus time when plugged in.
+- **Temperature alerts** — set a temperature threshold in Settings and get a
+  notification when CPU/GPU/battery temperature crosses it, with optional
+  auto-switch to a chosen cooler profile. Includes hysteresis (won't re-fire
+  until it cools past threshold − 3 °C) and a 60 s rate-limit so it never spams.
+  Alerts run while monitoring is active (HUD/Dashboard open) — the in-game HUD
+  is the intended companion; this is noted in the Settings copy.
+
+---
+
 ## [0.1.6-alpha] — 2026-06-14
 
 A security-hardening release driven by a full audit of the codebase. No new

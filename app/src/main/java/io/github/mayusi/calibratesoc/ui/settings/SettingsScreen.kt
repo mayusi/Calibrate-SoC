@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NewReleases
 import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.material.icons.outlined.Thermostat
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -39,11 +40,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -66,12 +70,14 @@ import io.github.mayusi.calibratesoc.BuildConfig
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.prefs.ClockUnit
 import io.github.mayusi.calibratesoc.data.prefs.TempUnit
+import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.update.UpdateInfo
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
+import kotlin.math.roundToInt
 
 /**
  * Settings screen. Surfaces:
@@ -106,6 +112,10 @@ fun SettingsScreen(
     val tempUnit by viewModel.tempUnit.collectAsStateWithLifecycle()
     val shouldShowWhatsNew by viewModel.shouldShowWhatsNew.collectAsStateWithLifecycle()
     val showWhatsNewScreen by viewModel.showWhatsNewScreen.collectAsStateWithLifecycle()
+    val tempAlertsEnabled by viewModel.tempAlertsEnabled.collectAsStateWithLifecycle()
+    val tempAlertThresholdC by viewModel.tempAlertThresholdC.collectAsStateWithLifecycle()
+    val tempAlertAutoProfileId by viewModel.tempAlertAutoProfileId.collectAsStateWithLifecycle()
+    val savedProfiles by viewModel.savedProfiles.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     var pendingFactoryConfirm by remember { mutableStateOf(false) }
@@ -227,6 +237,20 @@ fun SettingsScreen(
                     },
                 )
             }
+        }
+
+        // ── Temperature alerts ─────────────────────────────────────────────
+        item {
+            TempAlertsCard(
+                enabled = tempAlertsEnabled,
+                thresholdC = tempAlertThresholdC,
+                tempUnit = tempUnit,
+                autoProfileId = tempAlertAutoProfileId,
+                savedProfiles = savedProfiles,
+                onToggle = viewModel::setTempAlertsEnabled,
+                onThresholdChange = viewModel::setTempAlertThresholdC,
+                onAutoProfileChange = viewModel::setTempAlertAutoProfileId,
+            )
         }
 
         // ── What's New row ────────────────────────────────────────────────
@@ -843,6 +867,182 @@ private fun WhatsNewBanner(
                 TextButton(onClick = onDismiss) {
                     Text("Dismiss", color = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
+            }
+        }
+    }
+}
+
+// ── Temperature alerts card ────────────────────────────────────────────────────
+
+/**
+ * Settings card for the temperature alert feature. Shows:
+ *   - A switch to enable/disable alerts.
+ *   - When enabled: a threshold slider (60–95 °C) displayed in the user's
+ *     preferred temperature unit; stored internally in °C.
+ *   - An auto-profile picker ("None" or any saved profile).
+ *
+ * Honest helper text: alerts reflect real sensor readings. If no temp is
+ * readable, no alert fires.
+ */
+@Composable
+private fun TempAlertsCard(
+    enabled: Boolean,
+    thresholdC: Int,
+    tempUnit: TempUnit,
+    autoProfileId: String?,
+    savedProfiles: List<UserProfile>,
+    onToggle: (Boolean) -> Unit,
+    onThresholdChange: (Int) -> Unit,
+    onAutoProfileChange: (String?) -> Unit,
+) {
+    SectionCard(title = "Temperature alerts", icon = Icons.Outlined.Thermostat) {
+        Text(
+            "Notifies you when your device gets hot so you can take a break or switch to a cooler profile. " +
+                "Alerts run while monitoring is active — keep the floating HUD on while gaming to be warned in-game.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(Spacing.group))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Temperature alerts", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (enabled) "ON — fires when threshold is crossed" else "OFF",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (enabled) MaterialTheme.colorScheme.tertiary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+
+        AnimatedVisibility(visible = enabled) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
+                Spacer(Modifier.height(Spacing.dense))
+
+                // Threshold slider
+                val displayThreshold = when (tempUnit) {
+                    TempUnit.CELSIUS    -> thresholdC.toFloat()
+                    TempUnit.FAHRENHEIT -> thresholdC * 9f / 5f + 32f
+                }
+                val minDisplay = when (tempUnit) {
+                    TempUnit.CELSIUS    -> 60f
+                    TempUnit.FAHRENHEIT -> 60f * 9f / 5f + 32f  // 140°F
+                }
+                val maxDisplay = when (tempUnit) {
+                    TempUnit.CELSIUS    -> 95f
+                    TempUnit.FAHRENHEIT -> 95f * 9f / 5f + 32f  // 203°F
+                }
+                val unitLabel = when (tempUnit) {
+                    TempUnit.CELSIUS    -> "°C"
+                    TempUnit.FAHRENHEIT -> "°F"
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Alert threshold",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "%.0f%s".format(displayThreshold, unitLabel),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    )
+                }
+                Slider(
+                    value = displayThreshold,
+                    onValueChange = { newDisplay ->
+                        // Convert back to °C for storage
+                        val newC = when (tempUnit) {
+                            TempUnit.CELSIUS    -> newDisplay.roundToInt()
+                            TempUnit.FAHRENHEIT -> ((newDisplay - 32f) * 5f / 9f).roundToInt()
+                        }.coerceIn(60, 95)
+                        onThresholdChange(newC)
+                    },
+                    valueRange = minDisplay..maxDisplay,
+                    steps = when (tempUnit) {
+                        TempUnit.CELSIUS    -> 34  // 60–95 °C in 1°C steps = 35 positions → 34 steps
+                        TempUnit.FAHRENHEIT -> 62  // ~1°F per step across ~63 F range
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Alerts fire when any CPU, GPU, or battery sensor reaches this value.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Spacer(Modifier.height(Spacing.dense))
+
+                // Auto-profile picker
+                Text(
+                    "Switch to profile when hot",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                ProfilePickerDropdown(
+                    selectedId = autoProfileId,
+                    profiles = savedProfiles,
+                    onSelect = onAutoProfileChange,
+                )
+                Text(
+                    if (autoProfileId == null) {
+                        "Notify only — no profile will be auto-applied."
+                    } else {
+                        "The selected profile will be applied when the alert fires."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfilePickerDropdown(
+    selectedId: String?,
+    profiles: List<UserProfile>,
+    onSelect: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedName = profiles.firstOrNull { it.id == selectedId }?.name ?: "None"
+
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(selectedName, modifier = Modifier.weight(1f))
+            Text("▾", style = MaterialTheme.typography.labelSmall)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("None — notify only") },
+                onClick = {
+                    onSelect(null)
+                    expanded = false
+                },
+            )
+            profiles.forEach { profile ->
+                DropdownMenuItem(
+                    text = { Text(profile.name) },
+                    onClick = {
+                        onSelect(profile.id)
+                        expanded = false
+                    },
+                )
             }
         }
     }

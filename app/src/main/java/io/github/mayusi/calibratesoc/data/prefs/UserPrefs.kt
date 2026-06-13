@@ -93,6 +93,30 @@ class UserPrefs @Inject constructor(
         prefs[LAST_SEEN_VERSION_KEY] ?: 0
     }
 
+    // ── Temperature alerts ────────────────────────────────────────────────────
+
+    /** Master switch for temperature alerts. Default OFF.
+     *  When ON, the app notifies the user when any CPU/GPU/battery temp
+     *  crosses [tempAlertThresholdC] and optionally auto-switches to a
+     *  cooler profile. Stored in °C regardless of [tempUnit]. */
+    val tempAlertsEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[TEMP_ALERTS_ENABLED_KEY] ?: false
+    }
+
+    /** Alert fires when the hottest relevant sensor (max of cpu/gpu zone
+     *  temps and battery temp) crosses this value in °C. Default 80°C.
+     *  Always stored as integer °C — convert to °F for display only. */
+    val tempAlertThresholdC: Flow<Int> = context.dataStore.data.map { prefs ->
+        prefs[TEMP_ALERT_THRESHOLD_C_KEY] ?: DEFAULT_ALERT_THRESHOLD_C
+    }
+
+    /** Profile ID to auto-apply when the threshold is crossed. Null means
+     *  notify only (no profile switch). The profile must exist in
+     *  [ProfileRepository] — callers should validate before displaying. */
+    val tempAlertAutoProfileId: Flow<String?> = context.dataStore.data.map { prefs ->
+        prefs[TEMP_ALERT_AUTO_PROFILE_ID_KEY]
+    }
+
     // ── Setters ──────────────────────────────────────────────────────────────
 
     suspend fun setOcAcknowledged(value: Boolean) {
@@ -127,6 +151,22 @@ class UserPrefs @Inject constructor(
         context.dataStore.edit { it[LAST_SEEN_VERSION_KEY] = versionCode }
     }
 
+    suspend fun setTempAlertsEnabled(value: Boolean) {
+        context.dataStore.edit { it[TEMP_ALERTS_ENABLED_KEY] = value }
+    }
+
+    suspend fun setTempAlertThresholdC(value: Int) {
+        context.dataStore.edit { it[TEMP_ALERT_THRESHOLD_C_KEY] = value }
+    }
+
+    /** Pass null to clear the auto-profile (notify-only mode). */
+    suspend fun setTempAlertAutoProfileId(profileId: String?) {
+        context.dataStore.edit { prefs ->
+            if (profileId == null) prefs.remove(TEMP_ALERT_AUTO_PROFILE_ID_KEY)
+            else prefs[TEMP_ALERT_AUTO_PROFILE_ID_KEY] = profileId
+        }
+    }
+
     /** Sync read for the capability-probe path which already runs on
      *  Dispatchers.IO. runBlocking is acceptable there because nothing
      *  upstream is on the main thread. Returns false on any error. */
@@ -135,13 +175,18 @@ class UserPrefs @Inject constructor(
     }.getOrDefault(false)
 
     private companion object {
-        val OC_ACK_KEY            = booleanPreferencesKey("oc_acknowledged")
-        val ROOT_MODE_KEY         = booleanPreferencesKey("root_mode_enabled")
-        val ONBOARDING_KEY        = booleanPreferencesKey("onboarding_complete")
-        val EXPERIMENTAL_KEY      = booleanPreferencesKey("experimental_enabled")
-        val ACCENT_COLOR_KEY      = stringPreferencesKey("accent_color")
-        val CLOCK_UNIT_KEY        = stringPreferencesKey("clock_unit")
-        val TEMP_UNIT_KEY         = stringPreferencesKey("temp_unit")
-        val LAST_SEEN_VERSION_KEY = intPreferencesKey("last_seen_version")
+        val OC_ACK_KEY                   = booleanPreferencesKey("oc_acknowledged")
+        val ROOT_MODE_KEY                = booleanPreferencesKey("root_mode_enabled")
+        val ONBOARDING_KEY               = booleanPreferencesKey("onboarding_complete")
+        val EXPERIMENTAL_KEY             = booleanPreferencesKey("experimental_enabled")
+        val ACCENT_COLOR_KEY             = stringPreferencesKey("accent_color")
+        val CLOCK_UNIT_KEY               = stringPreferencesKey("clock_unit")
+        val TEMP_UNIT_KEY                = stringPreferencesKey("temp_unit")
+        val LAST_SEEN_VERSION_KEY        = intPreferencesKey("last_seen_version")
+        val TEMP_ALERTS_ENABLED_KEY      = booleanPreferencesKey("temp_alerts_enabled")
+        val TEMP_ALERT_THRESHOLD_C_KEY   = intPreferencesKey("temp_alert_threshold_c")
+        val TEMP_ALERT_AUTO_PROFILE_ID_KEY = stringPreferencesKey("temp_alert_auto_profile_id")
+
+        const val DEFAULT_ALERT_THRESHOLD_C = 80
     }
 }

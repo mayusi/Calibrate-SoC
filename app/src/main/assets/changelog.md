@@ -1,3 +1,11 @@
+## [0.1.7-alpha] — 2026-06-14
+
+Two new features for longer, cooler play sessions.
+
+### Added
+- **Battery time estimate** — the Dashboard now shows roughly how much play time you have left at your current power draw (e.g. "~3h 10m remaining · 8.4 W"). It's an honest estimate that updates live and tells you when it can't be measured.
+- **Temperature alerts** — set a temperature in Settings and get a notification when your device crosses it, so you can take a break or cool down. Optionally auto-switch to a cooler profile when it trips. (Alerts run while monitoring is active — keep the floating HUD on while gaming to be warned in-game.)
+
 ## [0.1.6-alpha] — 2026-06-14
 
 A security-hardening release. No new features — these fixes make the app safer for everyone.

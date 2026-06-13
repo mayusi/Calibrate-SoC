@@ -86,6 +86,7 @@ class OverlayService :
 
     @Inject lateinit var monitorService: MonitorService
     @Inject lateinit var hudPrefs: HudPrefs
+    @Inject lateinit var tempAlertMonitor: io.github.mayusi.calibratesoc.data.monitor.TempAlertMonitor
     @Inject lateinit var profileRepository: io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
     @Inject lateinit var capabilityProbe: io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
     @Inject lateinit var deviceAdapterRegistry: io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
@@ -130,6 +131,7 @@ class OverlayService :
         startInForeground()
         attachOverlay()
         observeTelemetry()
+        observeAlerts()
         observeProfile()
         observeUserProfiles()
         observeBigCorePolicy()
@@ -365,6 +367,18 @@ class OverlayService :
                     zones = t.zoneTempsMilliC.map { it.label to it.tempMilliC / 1000f },
                 )
             }
+        }
+    }
+
+    /**
+     * Drive the temperature-alert monitor off the same telemetry flow the
+     * HUD already collects. Alerts fire at 1 Hz cadence — same as the HUD
+     * — which is fast enough to detect sustained heat without adding any
+     * polling overhead beyond what already exists.
+     */
+    private fun observeAlerts() {
+        serviceScope.launch {
+            tempAlertMonitor.observe(monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS))
         }
     }
 

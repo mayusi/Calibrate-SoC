@@ -18,11 +18,14 @@ import io.github.mayusi.calibratesoc.data.prefs.ClockUnit
 import io.github.mayusi.calibratesoc.data.prefs.TempUnit
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.profiles.ForegroundAppWatcher
+import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
+import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -34,6 +37,7 @@ class SettingsViewModel @Inject constructor(
     private val userPrefs: UserPrefs,
     private val baselineRecorder: FactoryBaselineRecorder,
     private val factoryRestorer: FactoryRestorer,
+    private val profileRepository: ProfileRepository,
 ) : ViewModel() {
 
     /** Factory baseline state surfaced in Settings so the user can
@@ -124,6 +128,35 @@ class SettingsViewModel @Inject constructor(
 
     fun setTempUnit(unit: TempUnit) {
         viewModelScope.launch { userPrefs.setTempUnit(unit) }
+    }
+
+    // ── Temperature alerts ────────────────────────────────────────────────────
+
+    val tempAlertsEnabled: StateFlow<Boolean> = userPrefs.tempAlertsEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val tempAlertThresholdC: StateFlow<Int> = userPrefs.tempAlertThresholdC
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 80)
+
+    val tempAlertAutoProfileId: StateFlow<String?> = userPrefs.tempAlertAutoProfileId
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** Saved profiles for the auto-switch picker. Empty until profiles are
+     *  loaded; UI shows "None" as the first option regardless. */
+    val savedProfiles: StateFlow<List<UserProfile>> = profileRepository.store
+        .map { it.profiles.sortedByDescending { p -> p.createdAtMs } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun setTempAlertsEnabled(value: Boolean) {
+        viewModelScope.launch { userPrefs.setTempAlertsEnabled(value) }
+    }
+
+    fun setTempAlertThresholdC(value: Int) {
+        viewModelScope.launch { userPrefs.setTempAlertThresholdC(value) }
+    }
+
+    fun setTempAlertAutoProfileId(profileId: String?) {
+        viewModelScope.launch { userPrefs.setTempAlertAutoProfileId(profileId) }
     }
 
     // ── What's New / update banner ────────────────────────────────────────────

@@ -33,6 +33,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
+import io.github.mayusi.calibratesoc.data.monitor.EstimateBasis
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
@@ -57,6 +59,7 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
     val history by viewModel.history.collectAsStateWithLifecycle()
     val latest by viewModel.latest.collectAsStateWithLifecycle()
     val lastAppliedPreset by viewModel.lastAppliedPreset.collectAsStateWithLifecycle()
+    val batteryEstimate by viewModel.batteryEstimate.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -76,7 +79,7 @@ fun DashboardScreen(viewModel: DashboardViewModel = hiltViewModel()) {
         item { CpuLoadCard(history) }
         item { GpuCard(history, current) }
         item { ThermalCard(current) }
-        item { BatteryCard(current) }
+        item { BatteryCard(current, batteryEstimate) }
         item { RamCard(current) }
     }
 }
@@ -428,7 +431,7 @@ private fun tempColor(z: ZoneTemp): Color {
 // --- Battery ---------------------------------------------------------
 
 @Composable
-private fun BatteryCard(t: Telemetry) = SectionCard("Battery") {
+private fun BatteryCard(t: Telemetry, estimate: BatteryEstimate) = SectionCard("Battery") {
     val tempC = t.batteryTempDeciC?.let { "%.1f °C".format(it / 10.0) } ?: "—"
     val volts = t.batteryVoltageUv?.let { "%.2f V".format(it / 1_000_000.0) } ?: "—"
     val watts = t.batteryDrawMilliW?.let { "%.2f W".format(it / 1000.0) } ?: "—"
@@ -436,6 +439,76 @@ private fun BatteryCard(t: Telemetry) = SectionCard("Battery") {
         StatTile(label = "Temp", value = tempC)
         StatTile(label = "Voltage", value = volts)
         StatTile(label = "Draw", value = watts)
+    }
+    Spacer(Modifier.height(Spacing.group))
+    BatteryEstimateRow(estimate)
+}
+
+/**
+ * Time-remaining estimate row inside the battery card. Keeps the layout
+ * honest: labelled "estimate", never shown when data is absent or the
+ * device is charging.
+ */
+@Composable
+private fun BatteryEstimateRow(estimate: BatteryEstimate) {
+    when (estimate.basis) {
+        EstimateBasis.INSUFFICIENT_DATA -> {
+            Text(
+                "Battery time estimate unavailable on this device",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        EstimateBasis.CHARGING -> {
+            val drawLabel = estimate.watts?.let { " (%.1f W)".format(it) } ?: ""
+            Text(
+                "Charging$drawLabel",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+
+        EstimateBasis.LIVE_DRAW -> {
+            val hours = estimate.hoursRemaining
+            val timeLabel: String = when {
+                hours == null -> "—"
+                hours >= 1.0 -> {
+                    val h = hours.toInt()
+                    val m = ((hours - h) * 60).toInt()
+                    if (m > 0) "~${h}h ${m}m" else "~${h}h"
+                }
+                else -> "~${(hours * 60).toInt()} min"
+            }
+            val drawLabel = estimate.watts?.let { "%.1f W".format(it) }
+
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
+                    Text(
+                        timeLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Text(
+                        "remaining",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 2.dp),
+                    )
+                }
+                if (drawLabel != null) {
+                    Text(
+                        "$drawLabel at this load · Estimate only — varies with game activity",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }
 
