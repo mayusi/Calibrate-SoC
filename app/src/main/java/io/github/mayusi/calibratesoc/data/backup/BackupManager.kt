@@ -180,28 +180,31 @@ class BackupManager @Inject constructor(
      * never reaches the script generator in the first place.
      *
      * Validation rules:
-     *  - Free-text fields (name, description): reject if they contain shell
-     *    metacharacters (`'`, `"`, `` ` ``, `$`, `;`, `&`, `|`, `<`, `>`,
-     *    `(`, `)`, `{`, `}`) or ASCII control characters (U+0000–U+001F).
-     *    These characters have no legitimate use in display names and are the
-     *    exact characters that could break single-quote escaping or inject
-     *    commands via other quoting contexts.
-     *  - Governor strings (cpuPolicyGovernor values, gpuGovernor): additionally
-     *    reject values containing whitespace or `/`, since kernel governor names
-     *    are always a single lowercase token (e.g. "schedutil", "performance").
+     *  - Free-text DISPLAY fields (name, description): these never reach the shell
+     *    un-escaped — the script generator [commentSafe]/[shellSingleQuote]-escapes
+     *    everything it emits. So they only need protection against ASCII control
+     *    characters + line breaks (which could break a single-line UI label or a
+     *    script comment). Human punctuation like `/ ( ) & —` is legitimate in a
+     *    display name ("PS2 / GameCube (Sustained)") and must be allowed.
+     *  - Governor strings (cpuPolicyGovernor values, gpuGovernor): reject shell
+     *    metacharacters AND whitespace AND `/`, since kernel governor names are
+     *    always a single lowercase token (e.g. "schedutil", "performance"). These
+     *    DO reach the script as an executable value, so they stay strict.
      */
     internal fun validateProfile(profile: UserProfile): String? {
-        val shellMetaChars = Regex("""['"`$;&|<>(){}]|\p{Cntrl}""")
+        // Control chars + line breaks only — for display-only name/description.
+        val displayUnsafe = Regex("""[\p{Cntrl}\n\r]""")
+        // Strict shell-metachar + whitespace + slash — for the executable governor value.
         val governorInvalid = Regex("""['"`$;&|<>(){}]|\p{Cntrl}|[\s/]""")
 
-        if (shellMetaChars.containsMatchIn(profile.name)) {
-            return "name contains disallowed characters"
+        if (displayUnsafe.containsMatchIn(profile.name)) {
+            return "name contains control characters"
         }
         if (profile.name.isBlank()) {
             return "name must not be blank"
         }
-        if (shellMetaChars.containsMatchIn(profile.description)) {
-            return "description contains disallowed characters"
+        if (displayUnsafe.containsMatchIn(profile.description)) {
+            return "description contains control characters"
         }
         for ((policyId, gov) in profile.cpuPolicyGovernor) {
             if (governorInvalid.containsMatchIn(gov)) {

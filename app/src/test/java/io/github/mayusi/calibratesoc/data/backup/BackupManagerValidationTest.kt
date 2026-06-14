@@ -60,38 +60,45 @@ class BackupManagerValidationTest {
         ).isNull()
     }
 
-    // ── Name / description injection ─────────────────────────────────────────
+    // ── Name / description: DISPLAY-only fields ──────────────────────────────
+    //
+    // name + description never reach a shell un-escaped — the script generator
+    // commentSafe/shellSingleQuote-escapes everything it emits. So human
+    // punctuation (including shell metacharacters) is LEGITIMATE in a display
+    // name and must pass; only ASCII control characters + line breaks (which
+    // could corrupt a single-line UI label or a script comment) are rejected.
+    // The real injection guard lives at the script-generation layer (tested in
+    // AynScriptGeneratorTest) and on the governor fields (below), not here.
 
     @Test
-    fun `name with single quote is rejected`() {
-        val err = manager.validateProfile(profile(name = "Mike's Tune"))
+    fun `name with apostrophe passes (display field, escaped downstream)`() {
+        assertThat(manager.validateProfile(profile(name = "Mike's Tune"))).isNull()
+    }
+
+    @Test
+    fun `name with human punctuation passes`() {
+        // Real preset names contain — / ( ) & — these are display-only and safe.
+        assertThat(
+            manager.validateProfile(profile(name = "RP6 — PS2 / GameCube (Sustained) & Cool")),
+        ).isNull()
+    }
+
+    @Test
+    fun `name with shell metacharacters passes (escaped at script layer)`() {
+        // A name like "Tune; reboot" or "foo' ; rm -rf /data" is harmless as a
+        // display label and is single-quote-escaped if it ever reaches a script.
+        // Defence is at the emit layer, not import-time, for display fields.
+        assertThat(manager.validateProfile(profile(name = "foo' ; rm -rf /data ; echo '"))).isNull()
+        assertThat(manager.validateProfile(profile(name = "Tune \$HOME"))).isNull()
+        assertThat(manager.validateProfile(profile(name = "Tune; reboot"))).isNull()
+        assertThat(manager.validateProfile(profile(name = "Tune`id`"))).isNull()
+    }
+
+    @Test
+    fun `name with newline is rejected`() {
+        val err = manager.validateProfile(profile(name = "Tune\nreboot"))
         assertThat(err).isNotNull()
         assertThat(err).contains("name")
-    }
-
-    @Test
-    fun `name with shell injection payload is rejected`() {
-        val err = manager.validateProfile(profile(name = "foo' ; rm -rf /data ; echo '"))
-        assertThat(err).isNotNull()
-        assertThat(err).contains("name")
-    }
-
-    @Test
-    fun `name with dollar sign is rejected`() {
-        val err = manager.validateProfile(profile(name = "Tune \$HOME"))
-        assertThat(err).isNotNull()
-    }
-
-    @Test
-    fun `name with semicolon is rejected`() {
-        val err = manager.validateProfile(profile(name = "Tune; reboot"))
-        assertThat(err).isNotNull()
-    }
-
-    @Test
-    fun `name with backtick is rejected`() {
-        val err = manager.validateProfile(profile(name = "Tune`id`"))
-        assertThat(err).isNotNull()
     }
 
     @Test
@@ -102,10 +109,9 @@ class BackupManagerValidationTest {
     }
 
     @Test
-    fun `description with shell metacharacter is rejected`() {
-        val err = manager.validateProfile(profile(description = "nice tune; echo bad"))
-        assertThat(err).isNotNull()
-        assertThat(err).contains("description")
+    fun `description with shell metacharacter passes (display field)`() {
+        // Same reasoning as name — display-only, escaped downstream.
+        assertThat(manager.validateProfile(profile(description = "nice tune; echo bad"))).isNull()
     }
 
     @Test

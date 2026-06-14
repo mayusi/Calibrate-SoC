@@ -1,3 +1,8 @@
+## [0.1.13-alpha] — 2026-06-14
+
+### Fixed
+- **Community presets now apply** — the verified device presets delivered over the live content channel (Retroid Pocket 6, Thor, Odin 3) were being rejected by the app's own safety check because their names contain normal punctuation like `—`, `/`, and `(…)`. The check now correctly allows punctuation in display names (which are never run as commands) while keeping the strict guard on the values that actually become a script. Your seeded presets show up again.
+
 ## [0.1.12-alpha] — 2026-06-14
 
 Big quality pass on the things that matter most: presets that make sense, a benchmark that teaches, and Advanced Tuning you can actually use without root.

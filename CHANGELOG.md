@@ -11,6 +11,30 @@ Nothing yet.
 
 ---
 
+## [0.1.13-alpha] — 2026-06-14
+
+Hotfix for the OTA community presets shipped in 0.1.12.
+
+### Fixed
+- **OTA community presets were rejected by our own validator.** The seeded presets
+  (RP6 / Thor / Odin 3) have display names containing legitimate punctuation —
+  `—` (em-dash), `/`, `(`, `)`, `&` — which the import-time injection guard
+  (`RemoteContentValidator` / `BackupManager.validateProfile`) treated as shell
+  metacharacters and rejected, so the on-device log showed
+  `Rejected 6 remote preset(s): ['name contains disallowed characters', …]`.
+  Root cause: the guard applied the strict shell-metachar regex to **display-only**
+  fields (preset/adapter name, description, notes) that never reach a shell
+  un-escaped — the script generator already `shellSingleQuote`/`commentSafe`-escapes
+  everything it emits. Fix: display fields now reject only control characters +
+  line breaks (`DISPLAY_UNSAFE`), while **executable** fields (governor names,
+  sysfs targets/values, daemon names) keep the strict shell-metachar guard. This
+  is the correct security model — defence at the emit layer for display text,
+  strict validation for values that become a script. Tests updated accordingly
+  (display-field metachars now pass; control chars and governor injection still
+  rejected).
+
+---
+
 ## [0.1.12-alpha] — 2026-06-14
 
 Audit-driven quality pass on presets, benchmark, and Advanced Tuning. 460 tests green.
