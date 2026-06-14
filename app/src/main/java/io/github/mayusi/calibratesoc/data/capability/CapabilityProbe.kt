@@ -58,6 +58,23 @@ class CapabilityProbe @Inject constructor(
         val fan = sysfsProber.probeGenericPwmFan()
         val vendor = vendorAppDetector.detect()
 
+        // Extended kernel-manager probes.
+        val cpuGovernorTunables = sysfsProber.probeCpuGovernorTunables(cpuPolicies)
+        val cpuTimeInState = sysfsProber.probeCpuTimeInState(cpuPolicies)
+        val adrenoExtras = sysfsProber.probeAdrenoExtras(gpu)
+        val gpuGovernorTunables = sysfsProber.probeGpuGovernorTunables(gpu)
+        val thermalExtras = sysfsProber.probeThermalExtras(thermal)
+        val coolingDevices = sysfsProber.probeCoolingDevices()
+        val devfreqDevices = sysfsProber.probeDevfreqDevices()
+        val blockDevices = sysfsProber.probeBlockDevices()
+        val vmSysctls = sysfsProber.probeVmSysctls()
+        val schedIface = sysfsProber.probeSchedBoostInterface()
+        val schedBoostValues = sysfsProber.probeSchedBoostValues(
+            iface = schedIface,
+            slices = listOf("top-app", "foreground", "background", "system-background"),
+        )
+        val inputBoost = sysfsProber.probeInputBoost()
+
         val rootOptIn = userPrefs.rootModeEnabledBlocking()
         val hasSecureSettings = settingsWriteProbe.hasWriteSecureSettings()
 
@@ -83,6 +100,19 @@ class CapabilityProbe @Inject constructor(
             thermalZones = thermal,
             fan = fan,
             vendorApps = vendor,
+            cpuGovernorTunables = cpuGovernorTunables,
+            cpuTimeInState = cpuTimeInState,
+            adrenoExtras = adrenoExtras,
+            gpuGovernorTunables = gpuGovernorTunables,
+            thermalExtras = thermalExtras,
+            coolingDevices = coolingDevices,
+            devfreqDevices = devfreqDevices,
+            blockDevices = blockDevices,
+            vmSysctls = vmSysctls,
+            schedBoostInterface = schedIface,
+            schedBoostValues = schedBoostValues,
+            inputBoostPresent = inputBoost != null,
+            inputBoost = inputBoost,
         ).also { _report.value = it }
     }
 

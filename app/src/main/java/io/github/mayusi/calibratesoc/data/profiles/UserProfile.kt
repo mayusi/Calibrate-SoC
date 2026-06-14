@@ -27,6 +27,13 @@ data class UserProfile(
     /** When true, BootRevertReceiver re-applies this instead of reverting. */
     val applyOnBoot: Boolean = false,
     val createdAtMs: Long,
+    /**
+     * Generic sysfs/procfs knobs beyond the first-class fields above.
+     * Mirrors [Preset.extraSysfs] — see that field's kdoc for semantics.
+     * Serialized automatically by kotlinx.serialization; safe for the
+     * OTA/preset-sharing channel.
+     */
+    val extraSysfs: Map<String, String> = emptyMap(),
 ) {
     fun toPreset(): Preset = Preset(
         id = id,
@@ -39,6 +46,7 @@ data class UserProfile(
         gpuMaxHz = gpuMaxHz,
         gpuMinHz = gpuMinHz,
         gpuGovernor = gpuGovernor,
+        extraSysfs = extraSysfs,
     )
 
     companion object {
@@ -52,6 +60,7 @@ data class UserProfile(
             gpuMaxHz = preset.gpuMaxHz,
             gpuMinHz = preset.gpuMinHz,
             gpuGovernor = preset.gpuGovernor,
+            extraSysfs = preset.extraSysfs,
             applyOnBoot = applyOnBoot,
             createdAtMs = System.currentTimeMillis(),
         )

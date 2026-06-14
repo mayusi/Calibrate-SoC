@@ -22,6 +22,9 @@ sealed class Destination(val route: String, val label: String) {
     data object SessionDetail : Destination("session_detail/{sessionId}", "Session") {
         fun route(id: Long) = "session_detail/$id"
     }
+    /** Advanced Tuning — sub-screen reached from the Tune tab. Not in
+     *  the bottom bar; accessed via the "Advanced tuning →" button. */
+    data object AdvancedTuning : Destination("advanced_tuning", "Advanced Tuning")
 
     companion object {
         /** Six-tab bottom bar. Device Info is reachable as a deep-link

@@ -122,6 +122,22 @@
             <action android:name="action_fan_temp_control_curve_config" />
         </intent>
 
+        <!-- Benchmark Hub: popular third-party benchmark apps.
+             Android 11+ (API 30+) requires these <package> entries for
+             PackageManager.getLaunchIntentForPackage() to return a non-null
+             result when checking if the app is installed. Without this block
+             the API always returns null even when the app is present.
+
+             LEGAL: we only detect install status and LAUNCH the apps via the
+             system start-activity mechanism. We do NOT scrape their scores,
+             read their result files, or use accessibility services on them. -->
+        <package android:name="com.futuremark.dmandroid.application" />   <!-- 3DMark -->
+        <package android:name="com.antutu.ABenchMark" />                  <!-- AnTuTu -->
+        <package android:name="com.primatelabs.geekbench6" />             <!-- Geekbench 6 -->
+        <package android:name="com.glbenchmark.glbenchmark27" />          <!-- GFXBench -->
+        <package android:name="skynet.cputhrottlingtest" />               <!-- CPU Throttling Test -->
+        <package android:name="com.futuremark.pcmark.android.benchmark" /> <!-- PCMark -->
+
         <!-- Battery-optimization settings screens. Android 11+ package
              visibility hides these from startActivity() unless declared,
              which is why the fallback "open the battery list" path could

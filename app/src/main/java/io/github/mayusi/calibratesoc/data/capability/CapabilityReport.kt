@@ -24,6 +24,33 @@ data class CapabilityReport(
     val thermalZones: List<ThermalZoneProbe>,
     val fan: FanProbe?,
     val vendorApps: VendorAppPresence,
+    // --- Extended kernel-manager knobs (added in v0.1.11 foundation) ---------
+    /** Per-policy governor tunables discovered dynamically from sysfs dirs. */
+    val cpuGovernorTunables: List<CpuGovernorTunablesProbe> = emptyList(),
+    /** time_in_state entries per CPU policy (read-only monitoring). */
+    val cpuTimeInState: List<CpuTimeInStateProbe> = emptyList(),
+    /** Adreno-specific extra power-level data: per-level freq map + throttling flag. */
+    val adrenoExtras: AdrenoExtrasProbe? = null,
+    /** GPU devfreq governor tunables (e.g. msm-adreno-tz: upthreshold, polling_interval). */
+    val gpuGovernorTunables: List<GpuGovernorTunableProbe> = emptyList(),
+    /** Thermal zone extra data: mode + trip points. */
+    val thermalExtras: List<ThermalZoneExtras> = emptyList(),
+    /** Cooling devices present on this device. */
+    val coolingDevices: List<CoolingDeviceProbe> = emptyList(),
+    /** Bus / DDR devfreq devices (qcom,cpubw / llccbw / etc.). */
+    val devfreqDevices: List<DevfreqDeviceProbe> = emptyList(),
+    /** Block devices present for I/O scheduler tuning. */
+    val blockDevices: List<BlockDeviceProbe> = emptyList(),
+    /** VM sysctl current values. Null when /proc/sys/vm is inaccessible. */
+    val vmSysctls: VmSysctlsProbe? = null,
+    /** Whether schedtune (/dev/stune) or uclamp (/dev/cpuctl) interface is present. */
+    val schedBoostInterface: SchedBoostInterface = SchedBoostInterface.NONE,
+    /** SchedTune/uclamp current values per slice. */
+    val schedBoostValues: List<SchedBoostProbe> = emptyList(),
+    /** Whether cpu_boost module is present. */
+    val inputBoostPresent: Boolean = false,
+    /** Current input boost parameters (null when module absent). */
+    val inputBoost: InputBoostProbe? = null,
 )
 
 @Serializable
@@ -184,3 +211,149 @@ data class VendorAppPresence(
     val anyVendorPerfApp: Boolean
         get() = aynGameAssistant || ayaSpace || retroidGameAssistant
 }
+
+// =============================================================================
+// Extended kernel-manager probe data classes (added in v0.1.11 foundation)
+// =============================================================================
+
+/**
+ * Tunables discovered in the per-governor sub-directory of a CPU policy.
+ * Each [tunables] entry is (name → currentValue). The UI should render
+ * each as a RAW_STRING knob; metadata lookup via [TunableMetadata] refines
+ * to INT_RANGE or BOOL when the tunable is well-known.
+ */
+@Serializable
+data class CpuGovernorTunablesProbe(
+    val policyId: Int,
+    val governor: String,
+    /** Map of tunable filename → current string value. */
+    val tunables: Map<String, String>,
+)
+
+/** One freq–jiffies pair from time_in_state (read-only). */
+@Serializable
+data class CpuTimeInStateEntry(val freqKhz: Int, val jiffies: Long)
+
+@Serializable
+data class CpuTimeInStateProbe(
+    val policyId: Int,
+    val entries: List<CpuTimeInStateEntry>,
+)
+
+/**
+ * Adreno-specific extras beyond what [GpuProbe] already holds:
+ *   - per-level freq map (index → Hz)
+ *   - current throttling toggle state
+ *   - force_clk_on / idle_timer values
+ */
+@Serializable
+data class AdrenoExtrasProbe(
+    /** Maps power level index (0 = fastest) → frequency in Hz. May be empty
+     *  when devfreq/available_frequencies can't be correlated to levels. */
+    val pwrLevelFreqHz: Map<Int, Long>,
+    val currentMinPwrLevel: Int?,
+    val currentMaxPwrLevel: Int?,
+    val currentDefaultPwrLevel: Int?,
+    val throttlingEnabled: Boolean?,
+    val forceClkOn: Boolean?,
+    val idleTimerMs: Int?,
+)
+
+/** One GPU devfreq governor tunable (name → currentValue). */
+@Serializable
+data class GpuGovernorTunableProbe(
+    val governor: String,
+    val name: String,
+    val currentValue: String,
+)
+
+/**
+ * Extra thermal-zone data: writable mode + trip points.
+ * Extends [ThermalZoneProbe] (existing) without breaking its serialization.
+ */
+@Serializable
+data class ThermalTripPoint(
+    val index: Int,
+    val tempMilliC: Int,
+    val type: String,
+)
+
+@Serializable
+data class ThermalZoneExtras(
+    val zoneId: Int,
+    /** "enabled" / "disabled". Null when the mode file is absent. */
+    val mode: String?,
+    val tripPoints: List<ThermalTripPoint>,
+)
+
+/** A /sys/class/thermal/cooling_deviceN — max_state is read-only; cur_state is writable. */
+@Serializable
+data class CoolingDeviceProbe(
+    val id: Int,
+    val type: String,
+    val maxState: Int,
+    val currentState: Int,
+)
+
+/** A /sys/class/devfreq/ device (bus, DDR, etc.) with its current capabilities. */
+@Serializable
+data class DevfreqDeviceProbe(
+    /** Device name as it appears in /sys/class/devfreq/. E.g. "qcom,cpubw". */
+    val deviceName: String,
+    val curFreqHz: Long,
+    val minFreqHz: Long,
+    val maxFreqHz: Long,
+    val currentGovernor: String,
+    val availableGovernors: List<String>,
+)
+
+/** A /sys/block/ device with queue scheduler info. */
+@Serializable
+data class BlockDeviceProbe(
+    /** E.g. "sda", "mmcblk0". */
+    val deviceName: String,
+    /** Full scheduler string from the kernel, brackets included. E.g. "none [mq-deadline] kyber". */
+    val schedulerRaw: String,
+    val currentScheduler: String,
+    val availableSchedulers: List<String>,
+    val readAheadKb: Int,
+    val nrRequests: Int,
+)
+
+/** Current /proc/sys/vm sysctl values. */
+@Serializable
+data class VmSysctlsProbe(
+    val swappiness: Int?,
+    val vfsCachePressure: Int?,
+    val dirtyRatio: Int?,
+    val dirtyBackgroundRatio: Int?,
+)
+
+/** Which cgroup-boost interface the kernel exposes. Mutually exclusive. */
+@Serializable
+enum class SchedBoostInterface {
+    /** /dev/stune/{slice}/schedtune.boost — older kernels. */
+    STUNE,
+    /** /dev/cpuctl/{slice}/cpu.uclamp.{min,max} — newer kernels. */
+    UCLAMP,
+    /** Neither interface found. */
+    NONE,
+}
+
+/** Current schedtune.boost or uclamp values for one cgroup slice. */
+@Serializable
+data class SchedBoostProbe(
+    val slice: String,
+    /** schedtune.boost (0–100) when interface == STUNE; cpu.uclamp.min when UCLAMP. */
+    val boostOrUclampMin: Int?,
+    /** schedtune.prefer_idle (0/1) when STUNE; cpu.uclamp.max when UCLAMP. Null when absent. */
+    val preferIdleOrUclampMax: Int?,
+)
+
+/** Current input_boost_freq / input_boost_ms values. */
+@Serializable
+data class InputBoostProbe(
+    /** Raw value string (may be "0:1209600 4:0 7:0" format). */
+    val inputBoostFreqRaw: String?,
+    val inputBoostMs: Int?,
+)

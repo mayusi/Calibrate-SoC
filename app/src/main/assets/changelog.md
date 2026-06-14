@@ -1,6 +1,18 @@
-## [0.1.10-alpha] — 2026-06-14
+## [0.1.11-alpha] — 2026-06-14
 
-Staying current + sharing tunes.
+The big one — deep clocking + an all-in-one benchmark hub.
+
+### Added — Clocking (the heart of the app, much deeper)
+- **Advanced Tuning** — a whole new screen of kernel-level controls (where your device + permissions allow): per-core CPU on/off, CPU governor tunables, full GPU power levels + governor + throttle, scheduler boost (schedtune/uclamp), input boost, memory/DDR bus, I/O scheduler, VM tweaks, and a power-user custom-rule editor. Everything is risk-labelled, validated, reverts on reboot, and is greyed out with an honest reason when your device can't do it.
+- **Honest voltage card** — explains plainly that CPU/GPU undervolt isn't possible on stock locked devices (needs a custom kernel), instead of pretending.
+- **Deeper monitoring (no root needed)** — CPU time-in-state (which clocks your device actually uses), thermal trip detail (where it throttles), and live DDR/bus frequency.
+
+### Added — Benchmark hub
+- **New heavy GPU benchmark** — a real sustained 3D scene (geometry + lighting + multi-pass) at up to 1440p, with honest FPS percentiles, 1% lows, and a stability score.
+- **Benchmark hub** — detects other benchmark apps you have installed (3DMark, AnTuTu, Geekbench, GFXBench…) and opens them, and lets you log your scores from them into a personal trends history. (The app opens them and stores what you type — it doesn't run or verify them.)
+
+### Changed
+- Presets and profiles can now carry the new advanced knobs, so a shared preset or per-app profile can apply a full deep tune.
 
 ### Added
 - **Share & import presets** — share any saved profile as a short code (copy or send it), and import one someone sends you. Imported presets are marked unverified and never apply on their own — you review and apply them like any other.

@@ -34,6 +34,22 @@ data class Preset(
     val gpuMaxHz: Long? = null,
     val gpuMinHz: Long? = null,
     val gpuGovernor: String? = null,
+    /**
+     * Generic sysfs/procfs knobs that don't have a first-class field above.
+     *
+     * Key   = absolute sysfs/procfs path (e.g. "/proc/sys/vm/swappiness").
+     * Value = desired string value (e.g. "60").
+     *
+     * AynScriptGenerator emits every entry as an existence-guarded,
+     * shell-escaped write line.  ProfileApplier sends every entry through
+     * TunableWriter → TunableMetadata.validate() so a bad value never lands
+     * in a root script.  The OTA / preset-sharing channels serialize this
+     * field for free because it's a plain Map<String,String>.
+     *
+     * Never put thermal trip-point paths here — they're on the block list
+     * in TunableMetadata.
+     */
+    val extraSysfs: Map<String, String> = emptyMap(),
 )
 
 /**

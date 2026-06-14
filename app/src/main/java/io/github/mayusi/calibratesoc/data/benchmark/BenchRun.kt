@@ -65,7 +65,7 @@ data class KernelScores(
      *  empty GLES draws at. Compare against gpuFps to see whether your
      *  workload would be CPU- or GPU-limited. */
     val cpuDrawCallFps: Double? = null,
-    // NEW GPU frame-time detail (nullable + default-null so old rows
+    // GPU frame-time detail (nullable + default-null so old rows
     // deserialize fine under ignoreUnknownKeys + defaults):
     val gpuAvgFrameMs: Double? = null,
     val gpuP50Fps: Double? = null,
@@ -74,10 +74,38 @@ data class KernelScores(
     val gpuFrameConsistencyPct: Double? = null,
     /** Downsampled (<=600) per-frame time series in ms, for the chart. */
     val gpuFrameTimesMs: List<Float>? = null,
+    /**
+     * JSON-serialised [GpuSceneResult] from the heavy 3D scene benchmark,
+     * or null when the scene test did not run / is not yet supported for
+     * this flavor. Null-default keeps this field JSON-safe: old rows that
+     * lack it deserialise as null with ignoreUnknownKeys — no DB bump needed.
+     *
+     * Persistence strategy: rides inside the existing kernelsJson column.
+     * The result is serialised separately here (rather than embedding the
+     * full GpuSceneResult type inline) so the kernelsJson column stays
+     * backward-compatible — callers that do not know about this field
+     * simply ignore it. Decode with:
+     *   json.decodeFromString<GpuSceneResult>(kernels.sceneJson!!)
+     */
+    val sceneJson: String? = null,
 )
 
 @Serializable
-enum class BenchFlavor { QUICK, STANDARD, FULL }
+enum class BenchFlavor {
+    QUICK,
+    STANDARD,
+    FULL,
+    /**
+     * Standalone heavy 3D scene benchmark. Runs the [GpuSceneBenchmark]
+     * sustained-loop renderer at the EXTREME (1440p) tier and returns the
+     * result encoded in [KernelScores.sceneJson]. No CPU kernels run; the
+     * focus is GPU-only sustained load + thermal stability.
+     *
+     * Honesty caption: "Our own benchmark — compare your own runs, not
+     * other chips." Results are NOT comparable to 3DMark or AnTuTu.
+     */
+    SCENE_3D,
+}
 
 @Serializable
 enum class BenchOutcome {

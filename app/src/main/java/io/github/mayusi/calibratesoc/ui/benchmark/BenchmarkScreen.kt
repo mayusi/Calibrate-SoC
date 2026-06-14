@@ -60,8 +60,10 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchRating
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
 import io.github.mayusi.calibratesoc.data.benchmark.BenchScores
 import io.github.mayusi.calibratesoc.data.benchmark.BenchmarkRunner
+import io.github.mayusi.calibratesoc.data.benchmark.GpuSceneResult
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import kotlinx.serialization.json.Json
 import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
@@ -98,23 +100,29 @@ fun BenchmarkScreen(viewModel: BenchmarkViewModel = hiltViewModel()) {
             SegmentedButton(
                 selected = tab == 0,
                 onClick = { tab = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
             ) { Text("Benchmark") }
             SegmentedButton(
                 selected = tab == 1,
                 onClick = { tab = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
             ) { Text("Stability") }
             SegmentedButton(
                 selected = tab == 2,
                 onClick = { tab = 2 },
-                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
             ) { Text("Trends") }
+            SegmentedButton(
+                selected = tab == 3,
+                onClick = { tab = 3 },
+                shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+            ) { Text("Hub") }
         }
         when (tab) {
             0 -> BenchmarkContent(viewModel)
             1 -> StabilityScreen()
-            else -> BenchTrendScreen()
+            2 -> BenchTrendScreen()
+            else -> BenchmarkHubScreen()
         }
     }
 }
@@ -288,6 +296,11 @@ private fun RunControls(
                         subtitle = "~3 min · Standard + 2-min sustained throttle curve. Shows how the chip behaves under heat.",
                         onClick = { onRun(BenchFlavor.FULL, name) },
                     )
+                    FlavorButton(
+                        title = "GPU 3D",
+                        subtitle = "~3 min · Heavy sustained 3D scene at 1440p. GPU-only: FPS + thermal stability across loops.",
+                        onClick = { onRun(BenchFlavor.SCENE_3D, name) },
+                    )
                 }
                 is BenchmarkRunner.State.Running -> {
                     Text(
@@ -379,6 +392,18 @@ private fun RunCard(
             if (run.kernels.memoryBandwidthMBps != null) MemoryCard(run)
             if (run.kernels.gpuFps != null || run.kernels.cpuDrawCallFps != null) GpuDetailCard(run)
             if (run.throttleSamples.isNotEmpty()) PowerThermalCard(run)
+
+            // ── SCENE_3D result card ─────────────────────────────
+            if (run.flavor == BenchFlavor.SCENE_3D && run.kernels.sceneJson != null) {
+                val sceneResult = remember(run.kernels.sceneJson) {
+                    runCatching {
+                        Json { ignoreUnknownKeys = true }.decodeFromString<GpuSceneResult>(
+                            run.kernels.sceneJson
+                        )
+                    }.getOrNull()
+                }
+                sceneResult?.let { Scene3DResultCard(it) }
+            }
 
             // ── Snapshot context ─────────────────────────────────
             SnapshotContext(run)

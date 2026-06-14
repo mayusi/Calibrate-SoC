@@ -57,6 +57,7 @@ import io.github.mayusi.calibratesoc.ui.session.SessionsScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneHistoryScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneScreen
+import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
 import io.github.mayusi.calibratesoc.ui.update.UpdateBannerViewModel
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
@@ -109,10 +110,11 @@ fun CalibrateSocApp(
                                     Destination.Settings -> Icons.Outlined.Settings
                                     Destination.DeviceInfo -> Icons.Outlined.Info
                                     Destination.TuneHistory -> Icons.Outlined.Bookmarks
-                                    // Sessions/SessionDetail are not in the bottom bar;
-                                    // these arms keep the sealed-class when exhaustive.
+                                    // Sessions/SessionDetail/AdvancedTuning are not in the
+                                    // bottom bar; these arms keep the sealed-class exhaustive.
                                     Destination.Sessions -> Icons.Outlined.BarChart
                                     Destination.SessionDetail -> Icons.Outlined.BarChart
+                                    Destination.AdvancedTuning -> Icons.Outlined.Tune
                                 },
                                 contentDescription = dest.label,
                             )
@@ -134,7 +136,13 @@ fun CalibrateSocApp(
                     )
                 }
                 composable(Destination.Tune.route) {
-                    TuneScreen(onOpenHistory = { nav.navigate(Destination.TuneHistory.route) })
+                    TuneScreen(
+                        onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
+                        onOpenAdvancedTuning = { nav.navigate(Destination.AdvancedTuning.route) },
+                    )
+                }
+                composable(Destination.AdvancedTuning.route) {
+                    AdvancedTuningScreen(onBack = { nav.popBackStack() })
                 }
                 composable(Destination.TuneHistory.route) { TuneHistoryScreen() }
                 composable(Destination.Profiles.route) { ProfilesScreen() }

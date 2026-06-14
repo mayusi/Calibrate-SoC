@@ -2,6 +2,9 @@ package io.github.mayusi.calibratesoc.data.profiles
 
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.tunables.TunableId
+import io.github.mayusi.calibratesoc.data.tunables.TunableKind
+import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
@@ -86,6 +89,43 @@ class ProfileApplier @Inject constructor(
                     reason = reason,
                 )
             }
+        }
+
+        // Generic extraSysfs knobs — path→value pairs validated through
+        // TunableMetadata before being dispatched to TunableWriter.
+        //
+        // Validation order per entry:
+        //   1. TunableMetadata.validateCustomSysfsPath → reject bad paths.
+        //   2. TunableMetadata.forId(...).validate(value) → reject bad values.
+        //
+        // A validation failure is recorded as WriteResult.Rejected with a
+        // message so the caller can surface it without crashing.
+        for ((path, value) in preset.extraSysfs) {
+            val id = TunableId(kind = TunableKind.SYSFS, target = path)
+            val pathError = TunableMetadata.validateCustomSysfsPath(path)
+            if (pathError != null) {
+                results += WriteResult.Rejected(
+                    id = id,
+                    errno = null,
+                    message = "extraSysfs path rejected: $pathError",
+                )
+                continue
+            }
+            val valueError = TunableMetadata.forId(id).validate(value)
+            if (valueError != null) {
+                results += WriteResult.Rejected(
+                    id = id,
+                    errno = null,
+                    message = "extraSysfs value rejected for $path: $valueError",
+                )
+                continue
+            }
+            results += tunableWriter.write(
+                id = id,
+                value = value,
+                report = report,
+                reason = reason,
+            )
         }
         return results
     }

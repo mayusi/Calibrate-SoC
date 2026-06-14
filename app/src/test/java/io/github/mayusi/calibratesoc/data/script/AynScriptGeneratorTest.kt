@@ -210,4 +210,77 @@ class AynScriptGeneratorTest {
         // (The echo line keeps the newline but INSIDE single quotes, which is
         // harmless — echo just prints a two-line literal; it executes nothing.)
     }
+
+    // ── extraSysfs escaping + existence-guard tests ──────────────────────────
+
+    @Test
+    fun `extraSysfs value with shell metacharacters is escaped and guarded`() {
+        // Use a RAW_STRING tunable (input_boost_freq) so the value passes
+        // TunableMetadata validation and reaches the shell-escaping step.
+        // If the apostrophe were left bare it would close the single-quote
+        // context and allow '; rm -rf /' to execute.
+        val injectionValue = "0:1209600'; rm -rf / ; echo '"
+        val preset = balanced.copy(
+            extraSysfs = mapOf(
+                "/sys/module/cpu_boost/parameters/input_boost_freq" to injectionValue,
+            ),
+        )
+        val sh = AynScriptGenerator().generate(preset, report, adapter)
+
+        // 1. The apostrophe in the value must be POSIX-escaped (foo'\'' ...).
+        assertThat(sh).contains("'\\''")
+        // 2. The raw injection sequence (close quote then command) must not appear.
+        assertThat(sh).doesNotContain("1209600' ;")
+        // 3. Every extraSysfs write must be existence-guarded.
+        assertThat(sh).contains("[ -e /sys/module/cpu_boost/parameters/input_boost_freq ]")
+    }
+
+    @Test
+    fun `extraSysfs emits chmod sandwich existence guard and correct value`() {
+        val preset = balanced.copy(
+            extraSysfs = mapOf(
+                "/proc/sys/vm/swappiness" to "60",
+                "/sys/module/cpu_boost/parameters/input_boost_ms" to "40",
+            ),
+        )
+        val sh = AynScriptGenerator().generate(preset, report, adapter)
+
+        // Existence guard present for each path.
+        assertThat(sh).contains("[ -e /proc/sys/vm/swappiness ]")
+        assertThat(sh).contains("[ -e /sys/module/cpu_boost/parameters/input_boost_ms ]")
+
+        // Value emitted correctly (single-quoted).
+        assertThat(sh).contains("printf %s '60' > /proc/sys/vm/swappiness")
+        assertThat(sh).contains("printf %s '40' > /sys/module/cpu_boost/parameters/input_boost_ms")
+
+        // chmod sandwich applied.
+        assertThat(sh).contains("chmod 666 /proc/sys/vm/swappiness")
+        assertThat(sh).contains("chmod 444 /proc/sys/vm/swappiness")
+    }
+
+    @Test
+    fun `extraSysfs skips invalid path with comment and never emits it as a command`() {
+        // A path that doesn't start with /sys/ or /proc/ must be rejected.
+        val preset = balanced.copy(
+            extraSysfs = mapOf("/data/dangerous_path" to "1"),
+        )
+        val sh = AynScriptGenerator().generate(preset, report, adapter)
+
+        // Must be skipped with a comment, not emitted as a command.
+        assertThat(sh).contains("# SKIPPED (invalid path)")
+        // The raw path must not appear in any executable context.
+        assertThat(sh).doesNotContain("printf %s '1' > /data/dangerous_path")
+        assertThat(sh).doesNotContain("[ -e /data/dangerous_path ]")
+    }
+
+    @Test
+    fun `extraSysfs skips path-traversal attempt with comment`() {
+        val preset = balanced.copy(
+            extraSysfs = mapOf("/sys/../../etc/shadow" to "root"),
+        )
+        val sh = AynScriptGenerator().generate(preset, report, adapter)
+
+        assertThat(sh).contains("# SKIPPED (invalid path)")
+        assertThat(sh).doesNotContain("printf %s 'root' > /sys/../../etc/shadow")
+    }
 }

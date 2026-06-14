@@ -10,10 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Tune as TuneIcon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -75,6 +79,7 @@ import io.github.mayusi.calibratesoc.data.vendor.OdinIntents
 @Composable
 fun TuneScreen(
     onOpenHistory: () -> Unit = {},
+    onOpenAdvancedTuning: () -> Unit = {},
     viewModel: TuneViewModel = hiltViewModel(),
 ) {
     val capability by viewModel.capability.collectAsStateWithLifecycle()
@@ -231,6 +236,24 @@ fun TuneScreen(
                 },
                 onClear = viewModel::clearPending,
             )
+        }
+
+        // Advanced Tuning entry point — governor tunables, GPU power levels,
+        // scheduler boost, I/O, VM, custom sysfs. A sub-screen so TuneScreen
+        // stays focused on the primary CPU/GPU sliders + presets.
+        item {
+            OutlinedButton(
+                onClick = onOpenAdvancedTuning,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Settings,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Advanced tuning →")
+            }
         }
 
         // Save-as-profile: snapshots the current Tune state (pending

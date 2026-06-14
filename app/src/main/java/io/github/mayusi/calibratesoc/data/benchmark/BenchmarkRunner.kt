@@ -4,6 +4,8 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -47,6 +49,8 @@ class BenchmarkRunner @Inject constructor(
     private val capabilityProbe: CapabilityProbe,
     private val monitorService: MonitorService,
     private val gpuStorm: GpuTriangleStorm,
+    private val gpuScene: GpuSceneBenchmark,
+    private val json: Json,
 ) {
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -83,6 +87,7 @@ class BenchmarkRunner @Inject constructor(
             BenchFlavor.QUICK -> 20_000L
             BenchFlavor.STANDARD -> 60_000L
             BenchFlavor.FULL -> 60_000L + config.throttleDurationMs
+            BenchFlavor.SCENE_3D -> config.scene3dLoopCount * config.scene3dLoopMs
         }
         _state.value = State.Running(flavor, progress = 0f, etaMs = etaMs)
 
@@ -91,6 +96,7 @@ class BenchmarkRunner @Inject constructor(
                 when (flavor) {
                     BenchFlavor.QUICK -> runQuick(config)
                     BenchFlavor.STANDARD, BenchFlavor.FULL -> runStandard(config)
+                    BenchFlavor.SCENE_3D -> runScene3D(config)
                 }
             } catch (t: UnsatisfiedLinkError) {
                 _state.value = State.Idle
@@ -239,6 +245,41 @@ class BenchmarkRunner @Inject constructor(
         }
 
     /**
+     * Heavy 3D scene benchmark flavor.
+     *
+     * Runs [GpuSceneBenchmark] at the EXTREME (1440p) tier, collecting
+     * per-loop FPS and telemetry for stability%. The result is serialised
+     * into [KernelScores.sceneJson] (nullable addition — no DB bump needed).
+     *
+     * Honesty: "Our own benchmark — compare your own runs, not other chips."
+     */
+    private suspend fun runScene3D(config: BenchConfig): KernelScores {
+        val sceneResult = runCatching {
+            gpuScene.run(
+                requestedTier = SceneTier.EXTREME,
+                loopCount = config.scene3dLoopCount,
+                loopMs = config.scene3dLoopMs,
+                killTempC = config.killTempC,
+            )
+        }.getOrNull()
+
+        val sceneJson = sceneResult?.let { json.encodeToString(it) }
+        return KernelScores(
+            // GPU avg FPS also surfaced in the standard gpuFps slot so
+            // the compare card and overall score can use it even without
+            // knowing about sceneJson.
+            gpuFps = sceneResult?.avgFps,
+            gpuP1LowFps = sceneResult?.p1LowFps,
+            gpuP50Fps = sceneResult?.p50Fps,
+            gpuP99FrameMs = sceneResult?.p99FrameMs,
+            gpuFrameConsistencyPct = sceneResult?.consistencyPct,
+            gpuAvgFrameMs = sceneResult?.avgFrameMs,
+            gpuFrameTimesMs = sceneResult?.frameTimesMsDownsampled,
+            sceneJson = sceneJson,
+        )
+    }
+
+    /**
      * Lightweight CPU-busy sampler. Reads aggregate /proc/stat at ~5 Hz
      * and tracks busy% across deltas. Used during the GPU bench so we
      * can tell users whether their GPU score was held back by the CPU.
@@ -370,4 +411,9 @@ data class BenchConfig(
     val throttleInnerIterations: Int = 200,
     val killTempC: Float = 85f,
     val respectBatteryFloor: Boolean = true,
+    // ── SCENE_3D flavor knobs ────────────────────────────────────────────────
+    /** Number of sustained loops for the heavy 3D scene benchmark. */
+    val scene3dLoopCount: Int = 10,
+    /** Duration of each scene benchmark loop, ms. */
+    val scene3dLoopMs: Long = 20_000L,
 )

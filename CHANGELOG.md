@@ -11,6 +11,46 @@ Nothing yet.
 
 ---
 
+## [0.1.11-alpha] — 2026-06-14
+
+The big "all-in-one" round: deep kernel clocking + a benchmark hub. Built across
+two foundation tracks (tunable core + GPU engine) and three breadth tracks
+(advanced-tuning UI, monitoring/script-export, benchmark hub). 411 unit tests green.
+
+### Added — deep clocking
+- **Tunable core extended** to the full kernel-manager taxonomy: CPU core
+  hotplug, per-governor tunables, GPU power levels / governor / throttling /
+  force-clk / idle-timer, schedtune.boost & uclamp, input boost, DDR/bus devfreq,
+  I/O scheduler + readahead, VM sysctls, and a generic custom-sysfs rule. A new
+  `TunableMetadata` layer gives every knob a risk tier (SAFE→DANGEROUS), a value
+  kind, and validation. All writes go through the existing snapshot + boot-revert
+  path, privilege-gated and value-validated.
+- **Advanced Tuning screen** (`ui/tune/advanced/`) surfaces these, capability-gated
+  (only what the device exposes), privilege-gated (honest greyed reason when no
+  root), and risk-gated (blunt confirm dialogs for thermal/throttling knobs).
+- **Honest voltage/UV card** — `VoltageControl` states plainly that undervolt is
+  not possible on stock locked Snapdragon (needs custom kernel / unlocked BL).
+- **Monitoring (no root):** CPU time-in-state histogram, thermal trip-point detail,
+  live DDR/bus devfreq — read-only, the honest differentiator.
+- **Preset/Profile `extraSysfs` map** carries the new knobs, applied via
+  ProfileApplier and emitted (validated + shell-escaped) by AynScriptGenerator for
+  the no-root script path; flows through per-app automation and preset-sharing/OTA.
+
+### Added — benchmark hub
+- **New heavy 3D GPU benchmark** (`GpuSceneBenchmark`, `BenchFlavor.SCENE_3D`):
+  original procedural scene (~871k tris, depth prepass + Blinn-Phong/GGX lit pass +
+  post), GLES 3.0 (2.0 fallback), offscreen at fixed 1080p/1440p/2160p tiers,
+  glFinish timing, honest avg/median/1%-low FPS + p99 frame ms + consistency% +
+  sustained-vs-peak stability%. Rides in `kernelsJson` (no schema change). Baseline
+  GPU test untouched.
+- **Benchmark hub** (`data/benchmarkhub/`): detects installed benchmark apps
+  (3DMark/AnTuTu/Geekbench/GFXBench/CPU-Throttling/PCMark via manifest `<queries>`)
+  and launches them by intent; **manual score log** (`data/scorelog/`, Room v7→v8)
+  with per-benchmark trends. Legally clean: launch-only + user-entered scores,
+  clearly labelled self-reported; no scraping, no embedding, no equivalence claims.
+
+---
+
 ## [0.1.10-alpha] — 2026-06-14
 
 "Keep current + share tunes" round.

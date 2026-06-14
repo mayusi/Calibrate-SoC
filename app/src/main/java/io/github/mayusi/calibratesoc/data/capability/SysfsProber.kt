@@ -318,6 +318,307 @@ class SysfsProber @Inject constructor(
         )
     }
 
+    // --- CPU governor tunables (dynamic) -------------------------------------
+
+    /**
+     * For each CPU policy, reads the governor's sub-directory and returns
+     * every file therein as a tunable. Governor sub-dirs exist on kernels
+     * that expose per-governor parameter files (schedutil, interactive, etc.).
+     *
+     * We do NOT hardcode tunable names — we list the directory so new
+     * tunables added by a custom kernel are discovered automatically.
+     */
+    fun probeCpuGovernorTunables(policies: List<CpuPolicyProbe>): List<CpuGovernorTunablesProbe> {
+        val results = mutableListOf<CpuGovernorTunablesProbe>()
+        for (policy in policies) {
+            val governor = policy.currentGovernor
+            if (governor.isBlank()) continue
+            val govDir = "/sys/devices/system/cpu/cpufreq/policy${policy.policyId}/$governor".toPath()
+            if (!fs.exists(govDir)) continue
+            val tunableFiles = listOrEmpty(govDir).filter { it.name.isNotBlank() }
+            if (tunableFiles.isEmpty()) continue
+            val tunables = mutableMapOf<String, String>()
+            for (file in tunableFiles) {
+                val value = readStringOrNull(file)
+                if (value != null) tunables[file.name] = value
+            }
+            if (tunables.isNotEmpty()) {
+                results += CpuGovernorTunablesProbe(
+                    policyId = policy.policyId,
+                    governor = governor,
+                    tunables = tunables,
+                )
+            }
+        }
+        return results
+    }
+
+    /**
+     * Reads time_in_state for each CPU policy. Returns only policies
+     * where the file is present and parseable.
+     */
+    fun probeCpuTimeInState(policies: List<CpuPolicyProbe>): List<CpuTimeInStateProbe> {
+        return policies.mapNotNull { policy ->
+            val path = "/sys/devices/system/cpu/cpufreq/policy${policy.policyId}/stats/time_in_state".toPath()
+            val raw = readStringOrNull(path) ?: return@mapNotNull null
+            val entries = raw.lines()
+                .filter { it.isNotBlank() }
+                .mapNotNull { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size < 2) return@mapNotNull null
+                    val freq = parts[0].toIntOrNull() ?: return@mapNotNull null
+                    val jiffies = parts[1].toLongOrNull() ?: return@mapNotNull null
+                    CpuTimeInStateEntry(freqKhz = freq, jiffies = jiffies)
+                }
+            if (entries.isEmpty()) null
+            else CpuTimeInStateProbe(policyId = policy.policyId, entries = entries)
+        }
+    }
+
+    // --- Adreno extras -------------------------------------------------------
+
+    /**
+     * Reads the extra Adreno power-level data that goes beyond [GpuProbe]:
+     * per-level freq map, throttling gate, force_clk_on, idle_timer.
+     */
+    fun probeAdrenoExtras(gpuProbe: GpuProbe?): AdrenoExtrasProbe? {
+        if (gpuProbe == null || gpuProbe.family != GpuFamily.ADRENO) return null
+        val root = gpuProbe.rootPath.toPath()
+
+        // Build power-level → freq map by correlating the sorted freq list
+        // with the devfreq/available_frequencies file (which is in ascending
+        // Hz order, same ordering as level indices in DESCENDING freq, i.e.
+        // level 0 = highest freq = last element when sorted ascending).
+        val freqs = gpuProbe.availableFreqsHz // already sorted ascending by probeAdreno
+        val numLevels = gpuProbe.powerLevelRange?.let { it.high - it.low + 1 } ?: 0
+        val pwrLevelFreqHz: Map<Int, Long> = if (freqs.isNotEmpty() && numLevels > 0) {
+            // Adreno: level 0 = max performance = highest freq (last in sorted list).
+            // Map: index 0 → freqs.last(), index 1 → freqs[last-1], etc.
+            val reversed = freqs.reversed()
+            (0 until minOf(numLevels, freqs.size)).associate { levelIdx ->
+                levelIdx to reversed[levelIdx]
+            }
+        } else {
+            emptyMap()
+        }
+
+        val curMin = readIntOrNull(root / "min_pwrlevel")
+        val curMax = readIntOrNull(root / "max_pwrlevel")
+        val curDefault = readIntOrNull(root / "default_pwrlevel")
+        val throttling = readIntOrNull(root / "throttling")?.let { it != 0 }
+        val forceClkOn = readIntOrNull(root / "force_clk_on")?.let { it != 0 }
+        val idleTimer = readIntOrNull(root / "idle_timer")
+
+        return AdrenoExtrasProbe(
+            pwrLevelFreqHz = pwrLevelFreqHz,
+            currentMinPwrLevel = curMin,
+            currentMaxPwrLevel = curMax,
+            currentDefaultPwrLevel = curDefault,
+            throttlingEnabled = throttling,
+            forceClkOn = forceClkOn,
+            idleTimerMs = idleTimer,
+        )
+    }
+
+    /**
+     * GPU devfreq governor tunables — same dynamic approach as CPU governor
+     * tunables: list the governor sub-directory and treat each file as a
+     * tunable.
+     */
+    fun probeGpuGovernorTunables(gpuProbe: GpuProbe?): List<GpuGovernorTunableProbe> {
+        if (gpuProbe == null) return emptyList()
+        val governor = gpuProbe.currentGovernor.ifBlank { return emptyList() }
+        val govDir = "${gpuProbe.rootPath}/devfreq/$governor".toPath()
+        if (!fs.exists(govDir)) return emptyList()
+        return listOrEmpty(govDir).mapNotNull { file ->
+            val value = readStringOrNull(file) ?: return@mapNotNull null
+            GpuGovernorTunableProbe(governor = governor, name = file.name, currentValue = value)
+        }
+    }
+
+    // --- Thermal extras (mode + trip points) ---------------------------------
+
+    fun probeThermalExtras(zones: List<ThermalZoneProbe>): List<ThermalZoneExtras> {
+        return zones.map { zone ->
+            val zoneDir = "/sys/class/thermal/thermal_zone${zone.id}".toPath()
+            val mode = readStringOrNull(zoneDir / "mode")
+            val tripPoints = probeTripPoints(zoneDir)
+            ThermalZoneExtras(zoneId = zone.id, mode = mode, tripPoints = tripPoints)
+        }
+    }
+
+    private fun probeTripPoints(zoneDir: Path): List<ThermalTripPoint> {
+        val results = mutableListOf<ThermalTripPoint>()
+        // Enumerate trip_point_{N}_temp; N is usually 0..3 but can be higher.
+        // We list the directory and look for matching names rather than
+        // iterating 0..MAX_GUESS so we never miss any or iterate pointlessly.
+        val tripTemps = listOrEmpty(zoneDir)
+            .filter { it.name.matches(Regex("trip_point_\\d+_temp")) }
+            .sortedBy { it.name.removePrefix("trip_point_").removeSuffix("_temp").toIntOrNull() ?: 0 }
+        for (tempFile in tripTemps) {
+            val index = tempFile.name.removePrefix("trip_point_").removeSuffix("_temp").toIntOrNull() ?: continue
+            val tempMilliC = readIntOrNull(tempFile) ?: continue
+            val typePath = zoneDir / "trip_point_${index}_type"
+            val type = readStringOrNull(typePath).orEmpty()
+            results += ThermalTripPoint(index = index, tempMilliC = tempMilliC, type = type)
+        }
+        return results
+    }
+
+    // --- Cooling devices -----------------------------------------------------
+
+    fun probeCoolingDevices(): List<CoolingDeviceProbe> {
+        val root = "/sys/class/thermal".toPath()
+        return listOrEmpty(root)
+            .filter { it.name.startsWith("cooling_device") }
+            .sortedBy { it.name.removePrefix("cooling_device").toIntOrNull() ?: Int.MAX_VALUE }
+            .mapNotNull { dir ->
+                val id = dir.name.removePrefix("cooling_device").toIntOrNull() ?: return@mapNotNull null
+                val type = readStringOrNull(dir / "type").orEmpty()
+                val maxState = readIntOrNull(dir / "max_state") ?: return@mapNotNull null
+                val curState = readIntOrNull(dir / "cur_state") ?: return@mapNotNull null
+                CoolingDeviceProbe(id = id, type = type, maxState = maxState, currentState = curState)
+            }
+    }
+
+    // --- Bus / DDR devfreq ---------------------------------------------------
+
+    /**
+     * Enumerates /sys/class/devfreq/ to find bus/DDR devices. Skips the
+     * GPU devfreq entry (already handled by [probeGpu]) — identified by
+     * family name presence (kgsl/mali/gpu).
+     */
+    fun probeDevfreqDevices(): List<DevfreqDeviceProbe> {
+        val root = "/sys/class/devfreq".toPath()
+        return listOrEmpty(root)
+            .filter { dir ->
+                val name = dir.name.lowercase()
+                // Exclude GPU devfreq entries — they're covered by probeGpu.
+                !name.contains("kgsl") && !name.contains("mali") && !name.contains("gpu")
+            }
+            .sortedBy { it.name }
+            .mapNotNull { dir ->
+                val curFreq = readLongOrNull(dir / "cur_freq") ?: return@mapNotNull null
+                val minFreq = readLongOrNull(dir / "min_freq") ?: 0L
+                val maxFreq = readLongOrNull(dir / "max_freq") ?: 0L
+                val governor = readStringOrNull(dir / "governor").orEmpty()
+                val availableGovs = parseSpaceSeparatedStrings(dir / "available_governors")
+                DevfreqDeviceProbe(
+                    deviceName = dir.name,
+                    curFreqHz = curFreq,
+                    minFreqHz = minFreq,
+                    maxFreqHz = maxFreq,
+                    currentGovernor = governor,
+                    availableGovernors = availableGovs,
+                )
+            }
+    }
+
+    // --- Block devices / I/O scheduler ---------------------------------------
+
+    fun probeBlockDevices(): List<BlockDeviceProbe> {
+        val root = "/sys/block".toPath()
+        // Include common storage devices; exclude loop, dm (device-mapper),
+        // and ram devices which don't have meaningful I/O scheduling.
+        val blockDevicePattern = Regex("^(sd[a-z]+|mmcblk\\d+|nvme\\d+n\\d+)$")
+        return listOrEmpty(root)
+            .filter { it.name.matches(blockDevicePattern) }
+            .sortedBy { it.name }
+            .mapNotNull { dir ->
+                val queueDir = dir / "queue"
+                if (!fs.exists(queueDir)) return@mapNotNull null
+                val schedulerRaw = readStringOrNull(queueDir / "scheduler").orEmpty()
+                if (schedulerRaw.isBlank()) return@mapNotNull null
+                val currentScheduler = schedulerRaw
+                    .split(Regex("\\s+"))
+                    .firstOrNull { it.startsWith("[") && it.endsWith("]") }
+                    ?.removeSurrounding("[", "]")
+                    .orEmpty()
+                val availableSchedulers = schedulerRaw
+                    .split(Regex("\\s+"))
+                    .filter { it.isNotBlank() }
+                    .map { it.removeSurrounding("[", "]") }
+                val readAhead = readIntOrNull(queueDir / "read_ahead_kb") ?: 0
+                val nrRequests = readIntOrNull(queueDir / "nr_requests") ?: 0
+                BlockDeviceProbe(
+                    deviceName = dir.name,
+                    schedulerRaw = schedulerRaw,
+                    currentScheduler = currentScheduler,
+                    availableSchedulers = availableSchedulers,
+                    readAheadKb = readAhead,
+                    nrRequests = nrRequests,
+                )
+            }
+    }
+
+    // --- VM sysctls ----------------------------------------------------------
+
+    fun probeVmSysctls(): VmSysctlsProbe? {
+        val root = "/proc/sys/vm".toPath()
+        if (!fs.exists(root)) return null
+        return VmSysctlsProbe(
+            swappiness = readIntOrNull(root / "swappiness"),
+            vfsCachePressure = readIntOrNull(root / "vfs_cache_pressure"),
+            dirtyRatio = readIntOrNull(root / "dirty_ratio"),
+            dirtyBackgroundRatio = readIntOrNull(root / "dirty_background_ratio"),
+        )
+    }
+
+    // --- SchedTune / uclamp --------------------------------------------------
+
+    /**
+     * Probe which boost interface exists — stune or uclamp — and read
+     * current values for the well-known slices. Returns NONE when neither
+     * is present.
+     */
+    fun probeSchedBoostInterface(): SchedBoostInterface {
+        val stuneRoot = "/dev/stune".toPath()
+        val uclampRoot = "/dev/cpuctl".toPath()
+        return when {
+            fs.exists(stuneRoot) -> SchedBoostInterface.STUNE
+            // uclamp presence checked by looking for the cpu.uclamp.min file
+            // in a well-known slice rather than just the cpuctl dir existing.
+            fs.exists(uclampRoot / "top-app" / "cpu.uclamp.min") -> SchedBoostInterface.UCLAMP
+            else -> SchedBoostInterface.NONE
+        }
+    }
+
+    fun probeSchedBoostValues(
+        iface: SchedBoostInterface,
+        slices: List<String>,
+    ): List<SchedBoostProbe> {
+        if (iface == SchedBoostInterface.NONE) return emptyList()
+        return slices.mapNotNull { slice ->
+            when (iface) {
+                SchedBoostInterface.STUNE -> {
+                    val dir = "/dev/stune/$slice".toPath()
+                    if (!fs.exists(dir)) return@mapNotNull null
+                    val boost = readIntOrNull(dir / "schedtune.boost")
+                    val preferIdle = readIntOrNull(dir / "schedtune.prefer_idle")
+                    SchedBoostProbe(slice = slice, boostOrUclampMin = boost, preferIdleOrUclampMax = preferIdle)
+                }
+                SchedBoostInterface.UCLAMP -> {
+                    val dir = "/dev/cpuctl/$slice".toPath()
+                    if (!fs.exists(dir)) return@mapNotNull null
+                    val uclampMin = readIntOrNull(dir / "cpu.uclamp.min")
+                    val uclampMax = readIntOrNull(dir / "cpu.uclamp.max")
+                    SchedBoostProbe(slice = slice, boostOrUclampMin = uclampMin, preferIdleOrUclampMax = uclampMax)
+                }
+                SchedBoostInterface.NONE -> null
+            }
+        }
+    }
+
+    // --- Input boost ---------------------------------------------------------
+
+    fun probeInputBoost(): InputBoostProbe? {
+        val paramsDir = "/sys/module/cpu_boost/parameters".toPath()
+        if (!fs.exists(paramsDir)) return null
+        val freqRaw = readStringOrNull(paramsDir / "input_boost_freq")
+        val boostMs = readIntOrNull(paramsDir / "input_boost_ms")
+        return InputBoostProbe(inputBoostFreqRaw = freqRaw, inputBoostMs = boostMs)
+    }
+
     // --- Helpers ---------------------------------------------------------
 
     private fun listOrEmpty(p: Path): List<Path> = try {

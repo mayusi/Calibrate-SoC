@@ -3,6 +3,9 @@ package io.github.mayusi.calibratesoc.data.script
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.tunables.TunableId
+import io.github.mayusi.calibratesoc.data.tunables.TunableKind
+import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -141,6 +144,37 @@ class AynScriptGenerator @Inject constructor() {
                 appendLine("# race they were stopped to avoid. Reboot to restore them.")
             }
 
+            // Extra sysfs knobs (governor tunables, VM sysctls, I/O, schedtune,
+            // input boost, DDR, etc.) carried in preset.extraSysfs as path→value.
+            //
+            // Every entry is:
+            //   1. Validated via TunableMetadata before being emitted — a bad path
+            //      or bad value is skipped with a comment (never emitted as a real
+            //      command).
+            //   2. Shell-escaped via shellSingleQuote() so no value can break the
+            //      single-quote boundary and inject an arbitrary command.
+            //   3. Wrapped in an existence guard so a node absent on THIS device
+            //      (different SoC/kernel) doesn't abort the rest of the script.
+            val extraEntries = preset.extraSysfs.entries.toSortedSet(compareBy { it.key })
+            if (extraEntries.isNotEmpty()) {
+                appendLine()
+                appendLine("# Extra kernel knobs (governor tunables, VM, I/O, schedtune, etc.)")
+                for ((path, value) in extraEntries) {
+                    val pathError = TunableMetadata.validateCustomSysfsPath(path)
+                    if (pathError != null) {
+                        appendLine("# SKIPPED (invalid path): ${commentSafe(path)} — $pathError")
+                        continue
+                    }
+                    val id = TunableId(kind = TunableKind.SYSFS, target = path)
+                    val valueError = TunableMetadata.forId(id).validate(value)
+                    if (valueError != null) {
+                        appendLine("# SKIPPED (invalid value for ${commentSafe(path)}): $valueError")
+                        continue
+                    }
+                    emitSysfsWrite(path, value)
+                }
+            }
+
             // Verification block: read back every policy we touched so the
             // user (and Calibrate SoC's run-as-root output capture) can
             // confirm the values actually stuck. A line that shows the
@@ -197,6 +231,25 @@ class AynScriptGenerator @Inject constructor() {
         // shellSingleQuote() ensures a governor name with shell metacharacters
         // cannot break out of the single-quote context.
         appendLine("[ -e $path ] && ( printf %s ${shellSingleQuote(governor)} > $path ) 2>/dev/null")
+    }
+
+    /**
+     * Generic sysfs write: existence guard + chmod sandwich + shell-escaped value.
+     *
+     * Used for every entry in [Preset.extraSysfs] — governor tunables, VM
+     * sysctls, I/O scheduler, schedtune/uclamp, input boost, DDR, etc.
+     *
+     * The chmod sandwich is applied unconditionally: on nodes where the kernel
+     * doesn't enforce a read-only mode it's a harmless no-op; on nodes where
+     * perfd/DCVS races the write (e.g. CPU cpufreq) it keeps the value sticky.
+     *
+     * [shellSingleQuote] ensures the value cannot escape its shell context even
+     * if it contains apostrophes, dollar signs, semicolons, or backticks.
+     */
+    internal fun StringBuilder.emitSysfsWrite(path: String, value: String) {
+        appendLine("[ -e $path ] && ( chmod 666 $path ) 2>/dev/null")
+        appendLine("[ -e $path ] && ( printf %s ${shellSingleQuote(value)} > $path ) 2>/dev/null")
+        appendLine("[ -e $path ] && ( chmod 444 $path ) 2>/dev/null")
     }
 
     private fun StringBuilder.emitGpuWrite(gpuRoot: String, relativePath: String, value: String) {

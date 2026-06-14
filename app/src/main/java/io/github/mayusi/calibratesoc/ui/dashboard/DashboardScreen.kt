@@ -32,7 +32,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import io.github.mayusi.calibratesoc.data.capability.DevfreqDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
+import io.github.mayusi.calibratesoc.data.capability.ThermalZoneProbe
 import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
 import io.github.mayusi.calibratesoc.data.monitor.EstimateBasis
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
@@ -92,6 +95,31 @@ fun DashboardScreen(
         item { CpuLoadCard(history) }
         item { GpuCard(history, current) }
         item { ThermalCard(current) }
+
+        // === New read-only monitoring cards (no-root differentiators) ===
+
+        // CPU time-in-state: per-cluster freq residency histogram (cumulative
+        // since boot). Shows WHERE the SoC actually spends its cycles.
+        capability?.let { cap ->
+            if (cap.cpuTimeInState.isNotEmpty()) {
+                item { CpuTimeInStateCard(cap) }
+            }
+        }
+
+        // Thermal detail: trip points per zone so users can see WHEN throttling fires.
+        capability?.let { cap ->
+            if (cap.thermalExtras.isNotEmpty()) {
+                item { ThermalDetailCard(cap.thermalZones, cap.thermalExtras) }
+            }
+        }
+
+        // DDR / bus frequency: cur_freq + governor for each devfreq device.
+        capability?.let { cap ->
+            if (cap.devfreqDevices.isNotEmpty()) {
+                item { DdrBusCard(cap.devfreqDevices) }
+            }
+        }
+
         item { BatteryCard(current, batteryEstimate) }
         item { RamCard(current) }
     }
@@ -589,6 +617,218 @@ private fun SessionRecordingCard(
         }
     }
 }
+
+// --- CPU time-in-state histogram --------------------------------------
+
+/**
+ * Shows, per CPU policy cluster, the percentage of time (jiffies) the kernel
+ * has spent at each available frequency since boot.  This is a READ-ONLY,
+ * no-root metric derived from cpufreq policyN stats/time_in_state.
+ *
+ * "Cumulative since boot" is labelled honestly — it is NOT a live window.
+ * Reboot resets all counters to zero.
+ */
+@Composable
+private fun CpuTimeInStateCard(cap: CapabilityReport) =
+    SectionCard("CPU freq residency (since boot)") {
+        Text(
+            "How long each cluster has spent at each clock speed since the last reboot (read-only, no root needed).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(Spacing.group))
+        cap.cpuTimeInState.forEach { probe ->
+            val totalJiffies = probe.entries.sumOf { it.jiffies }.takeIf { it > 0L } ?: 1L
+            Text(
+                "Cluster / policy${probe.policyId}",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(Spacing.dense))
+            // Show top 5 frequencies by jiffies to keep the card compact.
+            val topEntries = probe.entries
+                .filter { it.jiffies > 0L }
+                .sortedByDescending { it.jiffies }
+                .take(5)
+            if (topEntries.isEmpty()) {
+                Text(
+                    "No data yet — device may not have been under load",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                topEntries.forEach { entry ->
+                    val pct = (entry.jiffies.toDouble() / totalJiffies * 100).coerceIn(0.0, 100.0)
+                    val mhz = entry.freqKhz / 1000
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "$mhz MHz",
+                            modifier = Modifier.width(72.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        LinearProgressIndicator(
+                            progress = { pct.toFloat() / 100f },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(8.dp)
+                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(4.dp)),
+                        )
+                        Text(
+                            "${"%.1f".format(pct)}%",
+                            modifier = Modifier.width(44.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(Spacing.group))
+        }
+    }
+
+// --- Thermal trip-point detail ----------------------------------------
+
+/**
+ * Shows the thermal trip points for each zone alongside its live
+ * temperature — users can see at what temperature their device will
+ * throttle, without needing root.  All data is READ-ONLY from the
+ * capability probe snapshot taken at launch.
+ */
+@Composable
+private fun ThermalDetailCard(
+    zones: List<ThermalZoneProbe>,
+    extras: List<ThermalZoneExtras>,
+) = SectionCard("Thermal trip points (read-only)") {
+    Text(
+        "Where your device starts throttling. All data is read-only — no root needed.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(Spacing.group))
+
+    // Only show zones that have actual trip points.
+    val extrasWithTrips = extras.filter { it.tripPoints.isNotEmpty() }
+    if (extrasWithTrips.isEmpty()) {
+        Text(
+            "Trip point data not available on this kernel",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return@SectionCard
+    }
+
+    extrasWithTrips.forEach { extra ->
+        // Find matching zone probe for the human-readable label.
+        val zone = zones.firstOrNull { it.id == extra.zoneId }
+        val label = zone?.type ?: "zone${extra.zoneId}"
+        val liveC = zone?.currentTempMilliC?.let { "  (now %.0f °C)".format(it / 1000.0) } ?: ""
+
+        Text(
+            "$label$liveC",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        // Mode badge if zone has a mode file.
+        extra.mode?.let { mode ->
+            Text(
+                "mode: $mode",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (mode == "disabled") MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        // Trip points sorted by temperature.
+        extra.tripPoints.sortedBy { it.tempMilliC }.forEach { tp ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            ) {
+                Text(
+                    tp.type,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "%.0f °C".format(tp.tempMilliC / 1000.0),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = when {
+                        tp.tempMilliC >= 95_000 -> MaterialTheme.colorScheme.error
+                        tp.tempMilliC >= 80_000 -> Color(0xFFFCD34D)
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                )
+            }
+        }
+        Spacer(Modifier.height(Spacing.group))
+    }
+}
+
+// --- DDR / bus frequency ----------------------------------------------
+
+/**
+ * Shows the current frequency and governor for each devfreq device
+ * (bus interconnect, DDR, etc.).  All data is READ-ONLY from the
+ * capability probe snapshot taken at launch.  DDR frequency changes
+ * asynchronously with workloads; this card shows the snapshot value
+ * at last probe refresh.
+ */
+@Composable
+private fun DdrBusCard(devices: List<DevfreqDeviceProbe>) =
+    SectionCard("Memory / bus bandwidth (read-only)") {
+        Text(
+            "DDR and bus interconnect operating frequencies at last probe refresh (read-only, no root).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(Spacing.group))
+        devices.forEach { dev ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        dev.deviceName,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "gov: ${dev.currentGovernor}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                    val curMhz = dev.curFreqHz / 1_000_000L
+                    val maxMhz = dev.maxFreqHz / 1_000_000L
+                    Text(
+                        "$curMhz / $maxMhz MHz",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    // Visual fill ratio for how close to max we are.
+                    val ratio = if (dev.maxFreqHz > 0L) {
+                        (dev.curFreqHz.toFloat() / dev.maxFreqHz.toFloat()).coerceIn(0f, 1f)
+                    } else 0f
+                    LinearProgressIndicator(
+                        progress = { ratio },
+                        modifier = Modifier
+                            .width(80.dp)
+                            .height(4.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp)),
+                    )
+                }
+            }
+            Spacer(Modifier.height(Spacing.dense))
+        }
+    }
 
 // --- RAM -------------------------------------------------------------
 
