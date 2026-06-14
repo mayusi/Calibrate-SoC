@@ -3,7 +3,6 @@ package io.github.mayusi.calibratesoc.data.benchmark
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
-import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.async
@@ -87,13 +86,36 @@ class BenchmarkRunner @Inject constructor(
         }
         _state.value = State.Running(flavor, progress = 0f, etaMs = etaMs)
 
-        val kernels = try {
-            when (flavor) {
-                BenchFlavor.QUICK -> runQuick(config)
-                BenchFlavor.STANDARD, BenchFlavor.FULL -> runStandard(config)
+        try {
+            val kernels = try {
+                when (flavor) {
+                    BenchFlavor.QUICK -> runQuick(config)
+                    BenchFlavor.STANDARD, BenchFlavor.FULL -> runStandard(config)
+                }
+            } catch (t: UnsatisfiedLinkError) {
+                _state.value = State.Idle
+                return BenchRun(
+                    id = 0L,
+                    name = name,
+                    flavor = flavor,
+                    startedAtMs = startedAt,
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    snapshot = snapshot,
+                    kernels = KernelScores(),
+                    throttleSamples = emptyList(),
+                    outcome = BenchOutcome.FAILED_NATIVE,
+                )
             }
-        } catch (t: UnsatisfiedLinkError) {
-            _state.value = State.Idle
+
+            var throttleSamples: List<ThrottleSample> = emptyList()
+            var outcome = BenchOutcome.COMPLETED
+
+            if (flavor == BenchFlavor.FULL) {
+                val result = runThrottleTest(config)
+                throttleSamples = result.samples
+                outcome = result.outcome
+            }
+
             return BenchRun(
                 id = 0L,
                 name = name,
@@ -101,34 +123,15 @@ class BenchmarkRunner @Inject constructor(
                 startedAtMs = startedAt,
                 durationMs = System.currentTimeMillis() - startedAt,
                 snapshot = snapshot,
-                kernels = KernelScores(),
-                throttleSamples = emptyList(),
-                outcome = BenchOutcome.FAILED_NATIVE,
+                kernels = kernels,
+                throttleSamples = throttleSamples,
+                outcome = outcome,
             )
+        } finally {
+            // Always reset state to Idle — covers both normal completion and
+            // coroutine cancellation triggered by the user hitting Cancel.
+            _state.value = State.Idle
         }
-
-        var throttleSamples: List<ThrottleSample> = emptyList()
-        var outcome = BenchOutcome.COMPLETED
-
-        if (flavor == BenchFlavor.FULL) {
-            val result = runThrottleTest(config)
-            throttleSamples = result.samples
-            outcome = result.outcome
-        }
-
-        _state.value = State.Idle
-
-        return BenchRun(
-            id = 0L,
-            name = name,
-            flavor = flavor,
-            startedAtMs = startedAt,
-            durationMs = System.currentTimeMillis() - startedAt,
-            snapshot = snapshot,
-            kernels = kernels,
-            throttleSamples = throttleSamples,
-            outcome = outcome,
-        )
     }
 
     private fun defaultName(flavor: BenchFlavor): String {
@@ -318,26 +321,8 @@ class BenchmarkRunner @Inject constructor(
         ThrottleResult(samples = samples.toList(), outcome = outcome)
     }
 
-    private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample {
-        val cpuMaxMhz = (t.perCoreCpuFreqKhz.maxOrNull() ?: 0) / 1000
-        val cpuTempC = t.zoneTempsMilliC
-            .filter { it.label.contains("cpu", ignoreCase = true) }
-            .maxOfOrNull { it.tempMilliC / 1000f } ?: 0f
-        val gpuTempC = t.zoneTempsMilliC
-            .filter { it.label.contains("gpu", ignoreCase = true) || it.label.contains("kgsl", ignoreCase = true) }
-            .maxOfOrNull { it.tempMilliC / 1000f }
-        val gpuMaxMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
-        val batteryTempC = (t.batteryTempDeciC ?: 0) / 10f
-        return ThrottleSample(
-            elapsedMs = System.currentTimeMillis() - runStartedAt,
-            cpuMaxMhz = cpuMaxMhz,
-            cpuMaxTempC = cpuTempC,
-            gpuTempC = gpuTempC,
-            batteryTempC = batteryTempC,
-            batteryDrawMw = t.batteryDrawMilliW,
-            gpuMaxMhz = gpuMaxMhz,
-        )
-    }
+    private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample =
+        telemetryToThrottleSample(t, runStartedAt)
 
     private fun preflightCheck(config: BenchConfig): BenchOutcome? = null
 

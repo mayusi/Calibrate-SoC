@@ -33,6 +33,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.R
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
@@ -197,9 +199,7 @@ class OverlayService :
         _viewModelStore.clear()
         // Fire the "running = false" pref BEFORE we cancel the scope,
         // otherwise the launched coroutine is dropped.
-        runCatching {
-            kotlinx.coroutines.runBlocking { hudPrefs.setRunning(false) }
-        }
+        serviceScope.launch { hudPrefs.setRunning(false) }
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
@@ -250,6 +250,17 @@ class OverlayService :
         windowManager = wm
 
         val density = resources.displayMetrics.density
+
+        // Read the last-saved drag position from DataStore synchronously so
+        // the overlay is placed at the correct spot from the first frame, with
+        // no flash or jump. This is a deliberate one-time read at HUD attach
+        // (NOT a per-frame/per-tick hot path) — a single warm DataStore read
+        // is < 1 ms and the only alternative (async read) makes the HUD visibly
+        // jump on every open. Both values are read in one runBlocking to avoid
+        // a second flow-collection round-trip. Default (16, 64) dp top-left when
+        // nothing is saved yet.
+        val (savedXDp, savedYDp) = runBlocking { hudPrefs.xDp.first() to hudPrefs.yDp.first() }
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -261,8 +272,8 @@ class OverlayService :
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (16 * density).roundToInt()
-            y = (64 * density).roundToInt()
+            x = (savedXDp * density).roundToInt()
+            y = (savedYDp * density).roundToInt()
         }
         layoutParams = params
 

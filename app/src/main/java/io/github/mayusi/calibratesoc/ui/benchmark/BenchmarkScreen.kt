@@ -141,7 +141,11 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
     ) {
         item { BenchHeader() }
         item {
-            RunControls(runnerState) { flavor, name -> viewModel.runBenchmark(flavor, name) }
+            RunControls(
+                state = runnerState,
+                onRun = { flavor, name -> viewModel.runBenchmark(flavor, name) },
+                onCancel = viewModel::cancelBenchmark,
+            )
         }
 
         if (selection.size == 2) {
@@ -245,6 +249,7 @@ private fun BenchEmptyState() {
 private fun RunControls(
     state: BenchmarkRunner.State,
     onRun: (BenchFlavor, String?) -> Unit,
+    onCancel: () -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     Card(
@@ -299,6 +304,12 @@ private fun RunControls(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Cancel")
+                    }
                 }
             }
         }

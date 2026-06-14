@@ -20,7 +20,7 @@ data class StabilityResult(
 
     private fun sustainedFpsAverage(): Double {
         if (loopFps.isEmpty()) return 0.0
-        val tailFrom = (loopFps.size * 0.75).toInt().coerceAtMost(loopFps.size - 1)
+        val tailFrom = (loopFps.size * SUSTAINED_WINDOW_RATIO).toInt().coerceAtMost(loopFps.size - 1)
         return loopFps.drop(tailFrom).average()
     }
 
@@ -30,7 +30,7 @@ data class StabilityResult(
         fun compute(loopFps: List<Double>): Int {
             val mx = loopFps.maxOrNull() ?: return 0
             if (mx <= 0.0) return 0
-            val tailFrom = (loopFps.size * 0.75).toInt().coerceAtMost(loopFps.size - 1)
+            val tailFrom = (loopFps.size * SUSTAINED_WINDOW_RATIO).toInt().coerceAtMost(loopFps.size - 1)
             val sustained = if (loopFps.isEmpty()) 0.0 else loopFps.drop(tailFrom).average()
             return ((sustained / mx) * 100).toInt().coerceIn(0, 100)
         }

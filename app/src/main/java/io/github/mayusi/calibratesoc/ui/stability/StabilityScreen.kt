@@ -17,6 +17,7 @@ import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -85,7 +86,7 @@ fun StabilityScreen(viewModel: StabilityViewModel = hiltViewModel()) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StabilityHeader()
-            RunControls(state = state, onStart = viewModel::start)
+            RunControls(state = state, onStart = viewModel::start, onCancel = viewModel::cancelStability)
             result?.let { StabilityResultCard(it) }
             if (history.isEmpty() && result == null && state == StabilityTestRunner.State.Idle) {
                 StabilityEmptyState()
@@ -209,6 +210,7 @@ private fun StabilityHeader() {
 private fun RunControls(
     state: StabilityTestRunner.State,
     onStart: (loopCount: Int, loopMs: Long) -> Unit,
+    onCancel: () -> Unit,
 ) {
     SectionCard("Run") {
         when (state) {
@@ -244,6 +246,12 @@ private fun RunControls(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Stop")
+                }
             }
         }
     }

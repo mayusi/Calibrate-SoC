@@ -19,19 +19,32 @@ import javax.inject.Singleton
 class PerCoreFreqSampler @Inject constructor(
     private val fs: FileSystem,
 ) {
+    // CPU topology is fixed at boot; cache the sorted cpuN directory list
+    // on first successful enumeration and reuse it every tick.
+    private var cachedCpuDirs: List<okio.Path>? = null
+
     fun sample(): List<Int> {
-        val cpuRoot = "/sys/devices/system/cpu".toPath()
-        val cpus = runCatching {
-            if (fs.exists(cpuRoot)) fs.list(cpuRoot) else emptyList()
-        }.getOrDefault(emptyList())
-            .filter { it.name.matches(Regex("cpu\\d+")) }
-            .sortedBy { it.name.removePrefix("cpu").toIntOrNull() ?: Int.MAX_VALUE }
+        val cpus = cachedCpuDirs ?: run {
+            val cpuRoot = "/sys/devices/system/cpu".toPath()
+            val found = runCatching {
+                fs.list(cpuRoot)
+            }.getOrDefault(emptyList())
+                .filter { it.name.matches(CPU_NAME) }
+                .sortedBy { it.name.removePrefix("cpu").toIntOrNull() ?: Int.MAX_VALUE }
+            // Only cache a non-empty result; retry next tick if enumeration fails.
+            if (found.isNotEmpty()) cachedCpuDirs = found
+            found
+        }
 
         return cpus.map { cpu ->
             val freqPath = cpu / "cpufreq" / "scaling_cur_freq"
             runCatching {
-                if (!fs.exists(freqPath)) 0 else fs.read(freqPath) { readUtf8() }.trim().toIntOrNull() ?: 0
+                fs.read(freqPath) { readUtf8() }.trim().toIntOrNull() ?: 0
             }.getOrDefault(0)
         }
+    }
+
+    companion object {
+        private val CPU_NAME = Regex("cpu\\d+")
     }
 }

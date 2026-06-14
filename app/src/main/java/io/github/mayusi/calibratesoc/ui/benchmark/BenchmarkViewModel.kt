@@ -11,6 +11,7 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
 import io.github.mayusi.calibratesoc.data.benchmark.BenchmarkRunner
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +44,9 @@ class BenchmarkViewModel @Inject constructor(
 
     val runnerState: StateFlow<BenchmarkRunner.State> = runner.state
 
+    /** Job backing the current in-flight benchmark run. Null when idle. */
+    private var runJob: Job? = null
+
     /** Up to two selected runs for the compare drawer. */
     private val _compareSelection = MutableStateFlow<List<Long>>(emptyList())
     val compareSelection: StateFlow<List<Long>> = _compareSelection.asStateFlow()
@@ -69,8 +73,11 @@ class BenchmarkViewModel @Inject constructor(
     }
 
     fun runBenchmark(flavor: BenchFlavor, name: String? = null) {
-        viewModelScope.launch {
+        runJob = viewModelScope.launch {
             val resolved = name?.trim()?.takeIf { it.isNotEmpty() }
+            // runner.run() throws CancellationException when the job is cancelled.
+            // In that case the code below is never reached, so no partial result
+            // is persisted — the correct behaviour for a user-initiated cancel.
             val run = if (resolved != null) {
                 runner.run(
                     flavor = flavor,
@@ -90,6 +97,17 @@ class BenchmarkViewModel @Inject constructor(
             // the temp cap fired, e.g.).
             repo.save(run)
         }
+    }
+
+    /**
+     * Cancel a running benchmark. The coroutine cancellation propagates
+     * into BenchmarkRunner (which checks [kotlinx.coroutines.isActive]
+     * in its inner loops). The runner resets its own state to Idle in
+     * the finally block. No partial result is persisted.
+     */
+    fun cancelBenchmark() {
+        runJob?.cancel()
+        runJob = null
     }
 
     fun delete(id: Long) {

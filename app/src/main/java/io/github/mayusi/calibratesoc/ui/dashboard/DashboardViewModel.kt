@@ -1,5 +1,6 @@
 package io.github.mayusi.calibratesoc.ui.dashboard
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -65,11 +66,42 @@ class DashboardViewModel @Inject constructor(
     }
 
     /**
-     * Name of the most recently applied tune preset, or null when the
-     * history is empty (= stock / factory state).
+     * Active-tune chip state for the Dashboard header.
+     *
+     * The chip can show one of three things:
+     *  - null  → no tune has ever been applied; show "Stock (factory)".
+     *  - [ActiveTuneState.Current]  → last apply happened AFTER the current boot;
+     *    the kernel state should still reflect it.
+     *  - [ActiveTuneState.MayHaveReverted] → last apply happened BEFORE the
+     *    current boot; the kernel reverts on every boot (BootRevertReceiver),
+     *    so we can't honestly claim it's still active.
+     *
+     * Signal used: approximate boot-wall-clock time =
+     *   System.currentTimeMillis() − SystemClock.elapsedRealtime()
+     * If the last TuneHistoryEntry's appliedAtMs < bootWallClockMs, the tune
+     * pre-dates this boot → show as "Last applied" rather than "Active".
+     *
+     * Limitation: elapsedRealtime() counts from kernel boot, so the
+     * boot-wall-clock estimate drifts by at most a few seconds (NTP
+     * correction). That's fine for our purpose — we only need to know
+     * "did the apply happen in this boot session", not the exact second.
+     * There's also the case where the user applied a profile with
+     * "apply on boot" — in that case BootRevertReceiver re-applies it,
+     * so it IS still active post-boot. We don't track this currently;
+     * such profiles will show "Last applied" (slightly conservative but
+     * never wrong — it was at minimum last applied at that time).
      */
-    val lastAppliedPreset: StateFlow<String?> = tuneHistoryStore.entries
-        .map { entries -> entries.firstOrNull()?.presetName }
+    val activeTuneState: StateFlow<ActiveTuneState?> = tuneHistoryStore.entries
+        .map { entries ->
+            val last = entries.firstOrNull() ?: return@map null
+            // Approximate wall-clock time of current boot.
+            val bootWallClockMs = System.currentTimeMillis() - SystemClock.elapsedRealtime()
+            if (last.appliedAtMs >= bootWallClockMs) {
+                ActiveTuneState.Current(last.presetName)
+            } else {
+                ActiveTuneState.MayHaveReverted(last.presetName)
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** Rolling history of recent samples; head = oldest, tail = newest. */
@@ -128,4 +160,12 @@ class DashboardViewModel @Inject constructor(
     companion object {
         const val HISTORY_SAMPLES = 60
     }
+}
+
+/** Tune chip display state for the Dashboard header. */
+sealed interface ActiveTuneState {
+    /** The tune was applied during the current boot session — likely still active. */
+    data class Current(val name: String) : ActiveTuneState
+    /** The tune was applied in a previous boot — kernel has likely reverted since then. */
+    data class MayHaveReverted(val name: String) : ActiveTuneState
 }

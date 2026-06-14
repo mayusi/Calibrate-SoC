@@ -2,7 +2,6 @@ package io.github.mayusi.calibratesoc.data.benchmark
 
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
-import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -106,28 +105,8 @@ class StabilityTestRunner @Inject constructor(
         )
     }
 
-    /** Local copy of BenchmarkRunner's telemetry → ThrottleSample mapping;
-     *  kept self-contained so this runner does not depend on BenchmarkRunner. */
-    private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample {
-        val cpuMaxMhz = (t.perCoreCpuFreqKhz.maxOrNull() ?: 0) / 1000
-        val cpuTempC = t.zoneTempsMilliC
-            .filter { it.label.contains("cpu", ignoreCase = true) }
-            .maxOfOrNull { it.tempMilliC / 1000f } ?: 0f
-        val gpuTempC = t.zoneTempsMilliC
-            .filter { it.label.contains("gpu", ignoreCase = true) || it.label.contains("kgsl", ignoreCase = true) }
-            .maxOfOrNull { it.tempMilliC / 1000f }
-        val gpuMaxMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
-        val batteryTempC = (t.batteryTempDeciC ?: 0) / 10f
-        return ThrottleSample(
-            elapsedMs = System.currentTimeMillis() - runStartedAt,
-            cpuMaxMhz = cpuMaxMhz,
-            cpuMaxTempC = cpuTempC,
-            gpuTempC = gpuTempC,
-            batteryTempC = batteryTempC,
-            batteryDrawMw = t.batteryDrawMilliW,
-            gpuMaxMhz = gpuMaxMhz,
-        )
-    }
+    private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample =
+        telemetryToThrottleSample(t, runStartedAt)
 
     sealed interface State {
         data object Idle : State

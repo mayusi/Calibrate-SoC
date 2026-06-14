@@ -32,9 +32,13 @@ class MeminfoSampler @Inject constructor(
 
     private fun extractKb(line: String): Long {
         // Lines look like: "MemTotal:       16384912 kB"
-        val parts = line.split(Regex("\\s+"))
+        val parts = line.split(WHITESPACE)
         return parts.getOrNull(1)?.toLongOrNull() ?: 0L
     }
 
     data class MemSample(val totalKb: Long, val availableKb: Long)
+
+    companion object {
+        private val WHITESPACE = Regex("\\s+")
+    }
 }

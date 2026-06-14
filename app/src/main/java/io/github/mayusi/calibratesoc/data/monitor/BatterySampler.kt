@@ -28,7 +28,17 @@ class BatterySampler @Inject constructor(
         context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
 
     fun sample(): Sample {
-        val temp = readSticky()
+        // One binder IPC for the sticky intent; read all fields from it.
+        val intent = runCatching {
+            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+
+        val tempInt = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+        val temp = tempInt?.takeIf { it != Int.MIN_VALUE }
+
+        val mv = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
+        val voltageUv = if (mv > 0) mv * 1_000L else null
+
         val current = bm?.runCatching {
             getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
         }?.getOrNull()
@@ -39,29 +49,12 @@ class BatterySampler @Inject constructor(
         val rawVoltage = bm?.runCatching {
             getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
         }?.getOrNull()
-        val voltageUv = readVoltageUv()
         return Sample(
             temperatureDeciC = temp,
             currentUa = current,
             voltageUv = voltageUv,
             chargeCounter = rawVoltage,
         )
-    }
-
-    private fun readSticky(): Int? {
-        val intent = runCatching {
-            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        }.getOrNull() ?: return null
-        val tempInt = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
-        return tempInt.takeIf { it != Int.MIN_VALUE }
-    }
-
-    private fun readVoltageUv(): Long? {
-        val intent = runCatching {
-            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        }.getOrNull() ?: return null
-        val mv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
-        return if (mv > 0) mv * 1_000L else null
     }
 
     data class Sample(

@@ -63,7 +63,7 @@ class CpuStatSampler @Inject constructor(
             val name = line.substringBefore(' ')
             if (name == "cpu") continue
             val cpuIdx = name.removePrefix("cpu").toIntOrNull() ?: continue
-            val parts = line.split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+            val parts = line.split(WHITESPACE).drop(1).mapNotNull { it.toLongOrNull() }
             if (parts.size < 4) continue
             val user = parts.getOrElse(0) { 0 }
             val nice = parts.getOrElse(1) { 0 }
@@ -81,4 +81,8 @@ class CpuStatSampler @Inject constructor(
     }
 
     private data class CpuSnapshot(val total: Long, val busy: Long)
+
+    companion object {
+        private val WHITESPACE = Regex("\\s+")
+    }
 }

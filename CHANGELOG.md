@@ -11,6 +11,42 @@ Nothing yet.
 
 ---
 
+## [0.1.9-alpha] — 2026-06-14
+
+A polish & quality pass (no new headline features) driven by the codebase audit.
+
+### Added
+- **Cancel running tests** — Benchmark and Stability runs now expose a Stop
+  button while in progress. Cancellation propagates through the coroutine so the
+  runner's cleanup (CPU thread-pool close, EGL release) runs and no partial
+  result is persisted.
+
+### Changed
+- **HUD position persists** — the overlay reopens at its last-dragged position
+  across HUD close/reopen and reboot, instead of resetting to the default.
+- **Honest active-tune chip** — after a reboot, the Dashboard shows "Last
+  applied: <profile>" instead of "Active: <profile>" when the tune predates the
+  current boot (sysfs reverts on reboot), so the chip never asserts a tune is
+  active when it may not be.
+
+### Performance (internal)
+- Telemetry samplers no longer compile a regex per sample (`/proc/stat`,
+  `/proc/meminfo`, GPU load, per-core freq) — hoisted to constants.
+- `PerCoreFreqSampler` caches the CPU-directory enumeration (topology is fixed
+  at boot) instead of re-listing + re-sorting every tick.
+- Removed redundant `exists()`-before-`read()` syscalls in the freq/GPU samplers.
+- `BatterySampler` registers the battery sticky-intent once per sample instead
+  of twice (one binder IPC instead of two).
+- Removed a main-thread `runBlocking` in `OverlayService.onDestroy`.
+
+### Code quality (internal)
+- De-duplicated the telemetry→ThrottleSample mapping (was copied in two runners)
+  into a single shared `TelemetrySampleMapper`.
+- Hoisted the `0.75` sustained-window ratio (was a magic number in three places)
+  to a named `SUSTAINED_WINDOW_RATIO` constant.
+
+---
+
 ## [0.1.8-alpha] — 2026-06-14
 
 Two new features for seeing performance over time (feature round, wave 2 of 2).

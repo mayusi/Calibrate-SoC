@@ -28,7 +28,7 @@ data class ThrottleAnalysis(
             // Peak = highest clock the device actually reached under load (not the idle first sample).
             val peakMhz = samples.maxOf { it.cpuMaxMhz }
 
-            val tailFrom = (samples.size * 0.75).toInt().coerceAtMost(samples.size - 1)
+            val tailFrom = (samples.size * SUSTAINED_WINDOW_RATIO).toInt().coerceAtMost(samples.size - 1)
             val sustainedMhz = samples.drop(tailFrom).map { it.cpuMaxMhz }.average().toInt()
 
             // Drop is peak → sustained, clamped to 0 so a ramp-up-then-hold reads 0%, never negative.

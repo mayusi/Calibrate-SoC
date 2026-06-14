@@ -54,13 +54,13 @@ class GpuLoadSampler @Inject constructor(
 
     private fun readGpuBusyPair(p: okio.Path): Int? {
         val raw = readString(p) ?: return null
-        val parts = raw.split(Regex("\\s+")).mapNotNull { it.toLongOrNull() }
+        val parts = raw.split(WHITESPACE).mapNotNull { it.toLongOrNull() }
         if (parts.size < 2 || parts[1] == 0L) return null
         return ((parts[0].toDouble() / parts[1]) * 100.0).toInt().coerceIn(0, 100)
     }
 
     private fun readString(p: okio.Path): String? = runCatching {
-        if (!fs.exists(p)) null else fs.read(p) { readUtf8() }.trim().ifBlank { null }
+        fs.read(p) { readUtf8() }.trim().ifBlank { null }
     }.getOrNull()
 
     /**
@@ -79,4 +79,8 @@ class GpuLoadSampler @Inject constructor(
     private fun readLong(p: okio.Path) = readString(p)?.toLongOrNull()
 
     data class Result(val loadPct: Int?, val freqHz: Long?)
+
+    companion object {
+        private val WHITESPACE = Regex("\\s+")
+    }
 }

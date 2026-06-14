@@ -7,6 +7,7 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchRepository
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityResult
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityRun
 import io.github.mayusi.calibratesoc.data.benchmark.StabilityTestRunner
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +30,9 @@ class StabilityViewModel @Inject constructor(
 
     val runnerState: StateFlow<StabilityTestRunner.State> = runner.state
 
+    /** Job backing the current in-flight stability run. Null when idle. */
+    private var runJob: Job? = null
+
     private val _result = MutableStateFlow<StabilityResult?>(null)
     val result: StateFlow<StabilityResult?> = _result.asStateFlow()
 
@@ -40,11 +44,26 @@ class StabilityViewModel @Inject constructor(
         )
 
     fun start(loopCount: Int, loopMs: Long) {
-        viewModelScope.launch {
+        runJob = viewModelScope.launch {
+            // runner.run() throws CancellationException if the job is cancelled.
+            // In that case the code below is never reached, so no partial result
+            // is shown or persisted — which is the desired behaviour for user cancel.
             val result = runner.run(loopCount = loopCount, loopMs = loopMs, killTempC = 95f)
             _result.value = result
             repository.saveStability(result, loopMs)
         }
+    }
+
+    /**
+     * Cancel a running stability test. Cancellation propagates into
+     * StabilityTestRunner's coroutine structure (cpu jobs, sampler job,
+     * and the loop itself all check [kotlinx.coroutines.isActive]). The
+     * runner's finally block resets state to Idle and closes the CPU
+     * dispatcher. No partial result is shown or persisted.
+     */
+    fun cancelStability() {
+        runJob?.cancel()
+        runJob = null
     }
 
     fun clear() {

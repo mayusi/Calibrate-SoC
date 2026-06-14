@@ -1,3 +1,15 @@
+## [0.1.9-alpha] — 2026-06-14
+
+Polish & quality pass.
+
+### Added
+- **Cancel a running test** — Benchmark and Stability tests now have a Stop button so you're never stuck waiting for a long run to finish.
+
+### Changed
+- The floating HUD now **remembers where you put it** — it reopens at your last position instead of resetting.
+- The Dashboard's active-tune chip is now honest after a reboot: it says **"Last applied"** (not "Active") when a tune may have reverted on restart, so it never claims something that isn't true.
+- Smoother live monitoring — the telemetry samplers do less work each tick (fewer allocations and system calls), so the in-game HUD is a little lighter.
+
 ## [0.1.8-alpha] — 2026-06-14
 
 Two new features for seeing how your device performs over time.

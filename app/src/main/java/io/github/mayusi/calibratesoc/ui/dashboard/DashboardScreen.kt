@@ -61,7 +61,7 @@ fun DashboardScreen(
     val capability by viewModel.capability.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val latest by viewModel.latest.collectAsStateWithLifecycle()
-    val lastAppliedPreset by viewModel.lastAppliedPreset.collectAsStateWithLifecycle()
+    val activeTuneState by viewModel.activeTuneState.collectAsStateWithLifecycle()
     val batteryEstimate by viewModel.batteryEstimate.collectAsStateWithLifecycle()
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
     val recordingElapsed by viewModel.recordingElapsedSeconds.collectAsStateWithLifecycle()
@@ -71,7 +71,7 @@ fun DashboardScreen(
         contentPadding = PaddingValues(Spacing.screen),
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        item { Header(capability, lastAppliedPreset) }
+        item { Header(capability, activeTuneState) }
         item { HudLauncherCard() }
         item {
             SessionRecordingCard(
@@ -100,7 +100,7 @@ fun DashboardScreen(
 // --- Header -------------------------------------------------------------
 
 @Composable
-private fun Header(capability: CapabilityReport?, lastAppliedPreset: String?) {
+private fun Header(capability: CapabilityReport?, activeTuneState: ActiveTuneState?) {
     Column {
         Text(
             "Calibrate SoC",
@@ -127,12 +127,15 @@ private fun Header(capability: CapabilityReport?, lastAppliedPreset: String?) {
                 AssistChip(onClick = {}, label = { Text(key) })
             }
         }
-        // Active tune chip: shows last applied preset name or "Stock (factory)"
+        // Active tune chip. The label is chosen to be honest:
+        //  - No history → "Stock (factory)"
+        //  - Last apply was THIS boot session → "Active: <name>" (likely still in effect)
+        //  - Last apply was a PREVIOUS boot → "Last applied: <name>" (kernel has likely reverted)
         Spacer(Modifier.height(Spacing.dense))
-        val activeTuneLabel = if (lastAppliedPreset != null) {
-            "Active: $lastAppliedPreset"
-        } else {
-            "Stock (factory)"
+        val activeTuneLabel = when (activeTuneState) {
+            null -> "Stock (factory)"
+            is ActiveTuneState.Current -> "Active: ${activeTuneState.name}"
+            is ActiveTuneState.MayHaveReverted -> "Last applied: ${activeTuneState.name}"
         }
         AssistChip(
             onClick = {},
