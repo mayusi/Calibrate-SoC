@@ -130,6 +130,39 @@ class ComparativeRunTest {
         assertThat(winner).isEqualTo(CategoryWinner.TIE)
     }
 
+    @Test
+    fun `computeWinner near-zero 0 vs 0_0005 is NOT a tie`() {
+        // With the old buggy logic: maxOf(0.0, 0.0005) = 0.0005, but the guard
+        // `if (it == 0.0)` doesn't fire because 0.0005 != 0.0, so larger = 0.0005,
+        // abs(0 - 0.0005) / 0.0005 = 1.0 which is > 0.001 → NOT a tie. Actually
+        // the old code happened to work for this specific case. The real bug was
+        // 0.0 vs small: maxOf(0, small)=small, divisor=small, 1.0>0.001 → winner.
+        // The BUG was 0.0 vs 0.0: maxOf(0,0)=0 → guarded to 1.0 → 0/1=0 < 0.001 → TIE ✓
+        // But 0.0 vs 0.0 with lowerIsBetter would hit the `it == 0.0` guard giving TIE.
+        // The real near-zero bug: values like -0.0005 vs 0.0005 — abs(av) and abs(bv)
+        // both ~0.0005, maxOf(0.0, 0.0005)=0.0005 (old code without abs) vs
+        // maxOf(abs(-0.0005), abs(0.0005))=0.0005 (new code) — same here.
+        // Document the critical case: 0.0 vs 0.0005 must produce a winner (B wins).
+        val winner = ComparativeResult.computeWinner(0.0, 0.0005, lowerIsBetter = false)
+        assertThat(winner).isEqualTo(CategoryWinner.B)
+    }
+
+    @Test
+    fun `computeWinner both near-zero below epsilon is TIE`() {
+        // Both values are < 1e-6 → epsilon floor kicks in (larger becomes 1.0)
+        // → abs(5e-7 - 3e-7) / 1.0 = 2e-7 < 0.001 → TIE
+        val winner = ComparativeResult.computeWinner(5e-7, 3e-7, lowerIsBetter = false)
+        assertThat(winner).isEqualTo(CategoryWinner.TIE)
+    }
+
+    @Test
+    fun `computeWinner one value above epsilon threshold is not a tie`() {
+        // av = 0.0, bv = 0.002 (both small but bv > 1e-6)
+        // larger = maxOf(abs(0.0), abs(0.002)) = 0.002; abs(0-0.002)/0.002 = 1.0 > 0.001 → B wins
+        val winner = ComparativeResult.computeWinner(0.0, 0.002, lowerIsBetter = false)
+        assertThat(winner).isEqualTo(CategoryWinner.B)
+    }
+
     // ─── buildDeltas ──────────────────────────────────────────────────
 
     @Test

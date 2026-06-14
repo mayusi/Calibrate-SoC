@@ -58,13 +58,15 @@ data class GpuFrameSummary(
             return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * frac
         }
 
-        /** Uniform stride downsample preserving first+last. */
+        /** Uniform stride downsample preserving first+last exactly. */
         fun downsample(src: FloatArray, target: Int): List<Float> {
             if (src.size <= target) return src.toList()
+            if (target <= 1) return listOf(src[0])
             val out = ArrayList<Float>(target)
-            val stride = src.size.toDouble() / target
-            var i = 0.0
-            while (out.size < target) { out.add(src[i.toInt().coerceAtMost(src.size - 1)]); i += stride }
+            out.add(src[0])
+            val stride = (src.size - 1).toDouble() / (target - 1)
+            for (i in 1 until target - 1) out.add(src[(i * stride).toInt().coerceIn(0, src.size - 1)])
+            out.add(src[src.size - 1])
             return out
         }
     }

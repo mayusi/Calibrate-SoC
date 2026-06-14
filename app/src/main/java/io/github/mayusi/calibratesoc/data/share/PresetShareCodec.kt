@@ -65,6 +65,12 @@ class PresetShareCodec(
             return ShareDecodeResult.Error("Preset code is empty after the version prefix.")
         }
 
+        // FIX 2 — Base64 size cap: reject before allocating memory for decoding.
+        // A real preset encodes to well under 1 KiB; 64 KiB chars is extremely generous.
+        if (b64Part.length > MAX_BASE64_LENGTH) {
+            return ShareDecodeResult.Error("Preset code is too large.")
+        }
+
         // Base64 decode
         val compressed = runCatching { base64.decode(b64Part) }.getOrElse { e ->
             return ShareDecodeResult.Error("Preset code contains invalid characters: ${e.message}")
@@ -118,10 +124,19 @@ class PresetShareCodec(
         inflater.setInput(input)
         val buf = java.io.ByteArrayOutputStream()
         val tmp = ByteArray(1024)
+        var totalDecompressed = 0
         while (!inflater.finished()) {
             val n = inflater.inflate(tmp)
             if (n == 0 && !inflater.finished()) {
                 throw java.util.zip.DataFormatException("Unexpected end of deflate stream")
+            }
+            // FIX 1 — Decompression bomb guard: cap total decompressed output.
+            // A real preset is well under 256 KiB; exceeding this cap indicates
+            // a crafted hostile payload attempting to exhaust heap.
+            totalDecompressed += n
+            if (totalDecompressed > MAX_INFLATED_BYTES) {
+                inflater.end()
+                throw java.util.zip.DataFormatException("Decompressed payload exceeds size limit")
             }
             buf.write(tmp, 0, n)
         }
@@ -133,8 +148,29 @@ class PresetShareCodec(
         /** Versioned prefix. Bump the digit on any breaking payload change. */
         const val PREFIX = "CSOC1:"
 
-        /** Current payload format version embedded in [ShareablePreset.fmtVersion]. */
-        const val CURRENT_FMT_VERSION = 1
+        /**
+         * Current payload format version embedded in [ShareablePreset.fmtVersion].
+         * History:
+         *   v1 — initial release (no extraSysfs)
+         *   v2 — adds extraSysfs (Map<String,String>); v1 codes still decode fine
+         *         because kotlinx.serialization uses the field's default (emptyMap())
+         *         when the key is absent and the Json config has ignoreUnknownKeys=true.
+         */
+        const val CURRENT_FMT_VERSION = 2
+
+        /**
+         * Maximum allowed length (in chars) of the Base64 portion of a share code.
+         * Rejects oversized input before allocating memory for decoding.
+         * 64 KiB characters is far larger than any real preset code.
+         */
+        const val MAX_BASE64_LENGTH = 64 * 1024
+
+        /**
+         * Maximum number of bytes the decompressed payload may occupy.
+         * Prevents a crafted "decompression bomb" from exhausting the heap.
+         * 256 KiB is far larger than any real preset JSON.
+         */
+        const val MAX_INFLATED_BYTES = 256 * 1024
     }
 }
 
@@ -172,6 +208,14 @@ data class ShareablePreset(
     val gpuMaxHz: Long? = null,
     val gpuMinHz: Long? = null,
     val gpuGovernor: String? = null,
+    /**
+     * Generic sysfs/procfs knobs beyond the first-class fields above.
+     * Added in format v2; defaults to emptyMap() so v1 codes (which omit
+     * this key entirely) still deserialize correctly — kotlinx.serialization
+     * uses the default when the key is absent (requires ignoreUnknownKeys=true
+     * on the Json config, which both production and test instances set).
+     */
+    val extraSysfs: Map<String, String> = emptyMap(),
 ) {
     fun toUserProfile(): UserProfile = UserProfile(
         // New unique ID on every import so two imports of the same code don't collide.
@@ -184,6 +228,13 @@ data class ShareablePreset(
         gpuMaxHz = gpuMaxHz,
         gpuMinHz = gpuMinHz,
         gpuGovernor = gpuGovernor,
+        // SECURITY: extraSysfs from an untrusted share code is passed through as-is
+        // here. It is validated at apply-time via TunableMetadata.validateCustomSysfsPath
+        // (per-path) and TunableMetadata.forId().validate (per-value) inside
+        // ProfileApplier.apply(). The resulting UserProfile is also run through
+        // BackupManager.validateProfile() in ProfilesViewModel.confirmImport() before
+        // being persisted. Shared profiles are never auto-applied (applyOnBoot = false).
+        extraSysfs = extraSysfs,
         // Shared profiles do NOT auto-apply — user applies manually.
         applyOnBoot = false,
         createdAtMs = System.currentTimeMillis(),
@@ -200,6 +251,7 @@ data class ShareablePreset(
             gpuMaxHz = profile.gpuMaxHz,
             gpuMinHz = profile.gpuMinHz,
             gpuGovernor = profile.gpuGovernor,
+            extraSysfs = profile.extraSysfs,
         )
     }
 }

@@ -11,6 +11,28 @@ Nothing yet.
 
 ---
 
+## [0.1.16-alpha] — 2026-06-14
+
+Third audit round — focused on the never-audited new feature surface (benchmark hub, external-score logging, comparative A/B, session stats, baseline degradation) + the recent hardening. 19 confirmed-new findings (0 critical, 3 high, 7 medium, 7 low); the verifiers dropped 12 as false-positive or already-fixed. 662 unit tests green (was 629).
+
+### Security
+- **Decompression bomb in `PresetShareCodec` (HIGH)** — `inflate()` had no cap on decompressed size, so a crafted share code could expand to GBs → OOM crash on paste. Added `MAX_INFLATED_BYTES` (256 KiB) cap in the inflate loop (throws → clean `ShareDecodeResult.Error`), plus a `MAX_BASE64_LENGTH` (64 KiB) cap before the base64 decode to prevent pre-decompression memory exhaustion.
+- **`BackupManager.validateProfile` now validates `extraSysfs` (defence-in-depth)** — the apply path already validated custom sysfs paths/values, but the import/backup trust boundary did not, so a malicious shared/backup profile's `extraSysfs` sat in the saved store until apply-time. Now rejected at import via `TunableMetadata.validateCustomSysfsPath` + value validation, mirroring the OTA validator.
+
+### Fixed
+- **Share codes dropped `extraSysfs` (HIGH data-loss)** — `ShareablePreset` was missing the field, so sharing a profile silently lost its Advanced Tuning knobs. Added the field, bumped `CURRENT_FMT_VERSION` to 2, **back-compatible** (v1 codes decode to empty extraSysfs via the serialized default; no existing code breaks).
+- **FPS-dip detector used AND instead of OR (HIGH)** — `SessionSummary` flagged a dip only below `minOf(80%-of-avg, 40fps)`, so on a high-refresh device a 120→55fps stutter registered nothing on the Thermal Timeline. Fixed to `(fps < dipThreshold || fps < absoluteFloor)` matching the code's own comment.
+- **Dangerous-path blocklist substring false-positives (MEDIUM)** — `reboot`/`drop_caches`/`sysrq-trigger` were matched as substrings, wrongly blocking legit paths like `/sys/.../reboot_mode/reboot_mode`. Now bare-name entries match whole path components (`split('/')`), full-path entries keep prefix/substring match; the real dangerous nodes stay blocked.
+- `GpuFrameResult.downsample` now truly preserves first+last (it dropped the last point despite the doc); `ComparativeRun` tie-band uses abs + epsilon floor for near-zero values; the 1%-low percentile count rounds instead of floor-truncating; manually-entered benchmark scores must be finite + `< 1e10` (blocks `Infinity`/`1e308`).
+
+### Quality / perf
+- Cached un-`remember`ed `SimpleDateFormat` instances in two screens; removed dead `isEmpty()` check in `AppStatsScreen`; clarified the NUL-byte check in `validateCustomSysfsPath`.
+
+### Deferred (lower-value, batched for later)
+- `AdvancedTuningScreen` god-file extraction (2235 LOC), `CpuCoresSection` recomposition keying, date-format helper consolidation, score-name Unicode hygiene — all medium/low, no correctness impact.
+
+---
+
 ## [0.1.15-alpha] — 2026-06-14
 
 The three device-tested security/safety items deferred from 0.1.14, implemented and verified. 629 unit tests green.

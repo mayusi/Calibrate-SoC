@@ -241,6 +241,71 @@ class PresetShareCodecTest {
         assertThat(result).isInstanceOf(ShareDecodeResult.Success::class.java)
     }
 
+    // ─── Fix 3: extraSysfs round-trip + back-compat ────────────────────────────
+
+    @Test
+    fun `encode-decode round-trip preserves extraSysfs`() {
+        val sysfsMap = mapOf(
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" to "schedutil",
+            "/sys/class/thermal/thermal_zone0/mode" to "enabled",
+        )
+        val source = profile().copy(extraSysfs = sysfsMap)
+        val code = codec.encode(source)
+        val result = codec.decode(code) as ShareDecodeResult.Success
+        assertThat(result.profile.extraSysfs).isEqualTo(sysfsMap)
+    }
+
+    @Test
+    fun `old format v1 code without extraSysfs decodes to empty extraSysfs`() {
+        // Craft a v1 payload that has no extraSysfs key (mirrors codes produced
+        // before format v2). The decoder must accept fmtVersion=1 and produce
+        // extraSysfs = emptyMap() via the field default.
+        val v1Json = """{"fmtVersion":1,"name":"Legacy","description":"Old code","cpuPolicyMaxKhz":{},"cpuPolicyMinKhz":{},"cpuPolicyGovernor":{}}"""
+        val compressed = deflate(v1Json.toByteArray(Charsets.UTF_8))
+        val b64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(compressed)
+        val code = "${PresetShareCodec.PREFIX}$b64"
+
+        val result = codec.decode(code)
+        assertThat(result).isInstanceOf(ShareDecodeResult.Success::class.java)
+        val success = result as ShareDecodeResult.Success
+        assertThat(success.profile.name).isEqualTo("Legacy")
+        assertThat(success.profile.extraSysfs).isEmpty()
+    }
+
+    // ─── Fix 2: Base64 size cap ────────────────────────────────────────────────
+
+    @Test
+    fun `base64 payload over MAX_BASE64_LENGTH returns Error not crash`() {
+        // Build a string just above the cap. Content doesn't matter — we only
+        // need it to pass the prefix check so decode() reaches the length gate.
+        val oversized = "A".repeat(PresetShareCodec.MAX_BASE64_LENGTH + 1)
+        val code = "${PresetShareCodec.PREFIX}$oversized"
+
+        val result = codec.decode(code)
+        assertThat(result).isInstanceOf(ShareDecodeResult.Error::class.java)
+        val error = result as ShareDecodeResult.Error
+        assertThat(error.reason).isNotEmpty()
+    }
+
+    // ─── Fix 1: Decompression bomb cap ─────────────────────────────────────────
+
+    @Test
+    fun `inflated payload over MAX_INFLATED_BYTES returns Error not crash`() {
+        // Build a JSON blob that compresses well but expands beyond the cap.
+        // 300 KiB of repetitive content easily exceeds MAX_INFLATED_BYTES (256 KiB).
+        val bigJson = """{"fmtVersion":1,"name":"Bomb","description":"${"x".repeat(300_000)}","cpuPolicyMaxKhz":{},"cpuPolicyMinKhz":{},"cpuPolicyGovernor":{}}"""
+        val compressed = deflate(bigJson.toByteArray(Charsets.UTF_8))
+        val b64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(compressed)
+        // The compressed form is tiny (deflate handles repetition well) so it
+        // passes the MAX_BASE64_LENGTH check — the inflate cap is what fires.
+        val code = "${PresetShareCodec.PREFIX}$b64"
+
+        val result = codec.decode(code)
+        assertThat(result).isInstanceOf(ShareDecodeResult.Error::class.java)
+        val error = result as ShareDecodeResult.Error
+        assertThat(error.reason).contains("decompression failed")
+    }
+
     // ─── Deflate helper (mirrors codec internals, needed for test setup) ───────
 
     private fun deflate(input: ByteArray): ByteArray {

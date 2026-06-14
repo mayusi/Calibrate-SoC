@@ -1,5 +1,7 @@
 package io.github.mayusi.calibratesoc.data.session
 
+import kotlin.math.roundToInt
+
 /**
  * Computed summary derived from [List<SessionSample>]. All maths is
  * pure (no I/O, no side effects) so it can be unit-tested on the JVM
@@ -52,7 +54,7 @@ fun computeSessionSummary(samples: List<SessionSample>): SessionSummary {
     // meaningful. Sort ascending, take bottom 1 %.
     val p1LowFps: Float? = if (fpsSamples.size < 100) null else {
         val sorted = fpsSamples.sorted()
-        val p1Count = (sorted.size * 0.01).toInt().coerceAtLeast(1)
+        val p1Count = (sorted.size * 0.01).roundToInt().coerceAtLeast(1)
         sorted.take(p1Count).average().toFloat()
     }
 
@@ -72,7 +74,7 @@ fun computeSessionSummary(samples: List<SessionSample>): SessionSummary {
     var inDip = false
     for (s in samples) {
         val fps = s.fps
-        val isDip = fps != null && fps < minOf(dipThreshold, absoluteFloor.coerceAtMost(dipThreshold))
+        val isDip = fps != null && (fps < dipThreshold || fps < absoluteFloor)
         if (isDip && !inDip) {
             fpsDipEvents++
             inDip = true

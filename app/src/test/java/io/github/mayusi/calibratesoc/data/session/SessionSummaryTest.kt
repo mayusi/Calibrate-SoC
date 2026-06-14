@@ -195,6 +195,48 @@ class SessionSummaryTest {
         assertThat(computeSessionSummary(samples).fpsDipEvents).isEqualTo(0)
     }
 
+    @Test
+    fun `fpsDipEvents fires on OR condition - below avg threshold but above absolute floor`() {
+        // avg = 100 fps. dipThreshold = 80 fps (100 * 0.80). absoluteFloor = 40.
+        // A sample at 70 fps is < 80 (dipThreshold) but > 40 (absoluteFloor).
+        // With the old AND/minOf logic this would NOT count as a dip because
+        // minOf(80, 40) = 40 and 70 > 40. With the fixed OR logic it DOES count.
+        val samples = listOf(
+            sample(fps = 100f), sample(fps = 100f), sample(fps = 100f), sample(fps = 100f),
+            sample(fps = 70f),  // dip: < 80 (avg-threshold) but > 40 (floor) → event 1
+            sample(fps = 100f), sample(fps = 100f),
+        )
+        assertThat(computeSessionSummary(samples).fpsDipEvents).isEqualTo(1)
+    }
+
+    @Test
+    fun `fpsDipEvents fires on OR condition - below absolute floor but above avg threshold`() {
+        // avg = 30 fps. dipThreshold = 24 fps (30 * 0.80). absoluteFloor = 40.
+        // A sample at 35 fps is > 24 (dipThreshold) but < 40 (absoluteFloor).
+        // With the old AND/minOf logic this would NOT count (minOf(24,40)=24; 35>24).
+        // With the fixed OR logic it counts because 35 < 40.
+        val samples = listOf(
+            sample(fps = 30f), sample(fps = 30f), sample(fps = 30f),
+            sample(fps = 35f),  // dip: < 40 (absolute floor) → event 1
+            sample(fps = 30f),
+        )
+        assertThat(computeSessionSummary(samples).fpsDipEvents).isEqualTo(1)
+    }
+
+    // --- p1LowFps rounding (FIX 4) -------------------------------------
+
+    @Test
+    fun `p1LowFps uses rounded count not floored - boundary at 150 samples`() {
+        // 150 * 0.01 = 1.5 → floor gives 1, round gives 2.
+        // Bottom 2 samples (fps 1 + fps 2) average = 1.5 fps with rounding.
+        // Bottom 1 sample average = 1.0 fps with floor.
+        val sorted = listOf(1f, 2f) + (1..148).map { 60f }
+        val samples = sorted.map { sample(fps = it) }
+        val s = computeSessionSummary(samples)
+        // With roundToInt: p1Count=2, p1Low = avg(1,2) = 1.5
+        assertThat(s.p1LowFps!!).isWithin(0.1f).of(1.5f)
+    }
+
     // --- prune-to-10 logic (pure) --------------------------------------
     //
     // The actual pruning runs in Room (SessionDao.pruneToTen) and is

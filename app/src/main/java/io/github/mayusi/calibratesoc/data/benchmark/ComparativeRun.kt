@@ -291,8 +291,11 @@ data class ComparativeResult(
             if (av == null) return CategoryWinner.B
             if (bv == null) return CategoryWinner.A
 
-            // Tie-band: within 0.1% of the larger value
-            val larger = maxOf(av, bv).let { if (it == 0.0) 1.0 else it }
+            // Tie-band: within 0.1% of the larger absolute value.
+            // Use abs() so negative values are handled correctly, and use a
+            // small epsilon floor (1e-6) so two genuine near-zeros still tie
+            // while a real difference like 0.0 vs 0.0005 is not suppressed.
+            val larger = maxOf(kotlin.math.abs(av), kotlin.math.abs(bv)).let { if (it < 1e-6) 1.0 else it }
             if (kotlin.math.abs(av - bv) / larger < 0.001) return CategoryWinner.TIE
 
             return when {

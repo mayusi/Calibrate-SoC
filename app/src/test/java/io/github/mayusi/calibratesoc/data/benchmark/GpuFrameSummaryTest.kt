@@ -45,15 +45,30 @@ class GpuFrameSummaryTest {
     }
 
     @Test
-    fun `downsample reduces to target preserving first and near-last`() {
+    fun `downsample reduces to target preserving first and last exactly`() {
         val src = FloatArray(2000) { it.toFloat() }
         val out = GpuFrameSummary.downsample(src, 600)
         assertThat(out.size).isEqualTo(600)
-        // Uniform stride downsample starts at index 0 (first preserved) and
-        // walks by stride; the final sampled index lands near the end.
+        // Fixed implementation: first point = src[0], last point = src[size-1] exactly.
         assertThat(out.first()).isEqualTo(0f)
-        assertThat(out.last()).isAtLeast(1990f)
-        assertThat(out.last()).isAtMost(1999f)
+        assertThat(out.last()).isEqualTo(1999f)
+    }
+
+    @Test
+    fun `downsample target 1 returns only first element`() {
+        val src = FloatArray(100) { it.toFloat() }
+        val out = GpuFrameSummary.downsample(src, 1)
+        assertThat(out).hasSize(1)
+        assertThat(out[0]).isEqualTo(0f)
+    }
+
+    @Test
+    fun `downsample target 2 returns exactly first and last`() {
+        val src = FloatArray(100) { it.toFloat() }
+        val out = GpuFrameSummary.downsample(src, 2)
+        assertThat(out).hasSize(2)
+        assertThat(out[0]).isEqualTo(0f)
+        assertThat(out[1]).isEqualTo(99f)
     }
 
     @Test

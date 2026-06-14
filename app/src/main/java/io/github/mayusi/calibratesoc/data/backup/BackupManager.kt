@@ -6,6 +6,9 @@ import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.remote.ValidationRegexes
+import io.github.mayusi.calibratesoc.data.tunables.TunableId
+import io.github.mayusi.calibratesoc.data.tunables.TunableKind
+import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryEntry
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.flow.first
@@ -220,6 +223,22 @@ class BackupManager @Inject constructor(
             }
             if (gov.isBlank()) {
                 return "gpuGovernor must not be blank"
+            }
+        }
+        // extraSysfs carries arbitrary kernel paths + values that can become a
+        // root-script write. The apply path (ProfileApplier) validates these too,
+        // but we reject at the import trust boundary as well (defence-in-depth) so
+        // a malicious backup/shared profile never reaches the saved store with an
+        // unsafe path. Mirrors the OTA validator's extraSysfs check.
+        for ((path, value) in profile.extraSysfs) {
+            TunableMetadata.validateCustomSysfsPath(path)?.let { err ->
+                return "extraSysfs path '$path' is invalid: $err"
+            }
+            val valueError = TunableMetadata
+                .forId(TunableId(kind = TunableKind.SYSFS, target = path))
+                .validate(value)
+            if (valueError != null) {
+                return "extraSysfs value for '$path' is invalid: $valueError"
             }
         }
         return null

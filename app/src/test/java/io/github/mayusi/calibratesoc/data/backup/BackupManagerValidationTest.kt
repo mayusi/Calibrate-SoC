@@ -31,12 +31,14 @@ class BackupManagerValidationTest {
         description: String = "Nice tune",
         cpuGov: Map<Int, String> = emptyMap(),
         gpuGov: String? = null,
+        extraSysfs: Map<String, String> = emptyMap(),
     ) = UserProfile(
         id = "test_id",
         name = name,
         description = description,
         cpuPolicyGovernor = cpuGov,
         gpuGovernor = gpuGov,
+        extraSysfs = extraSysfs,
         createdAtMs = 0L,
     )
 
@@ -163,6 +165,34 @@ class BackupManagerValidationTest {
     @Test
     fun `null gpu governor is always valid`() {
         assertThat(manager.validateProfile(profile(gpuGov = null))).isNull()
+    }
+
+    // ── extraSysfs validation (defence-in-depth at the import boundary) ───────
+
+    @Test
+    fun `profile with valid extraSysfs path passes`() {
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/class/devfreq/gpu/min_freq" to "300000000")),
+        )
+        assertThat(err).isNull()
+    }
+
+    @Test
+    fun `extraSysfs path with shell metacharacter is rejected`() {
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/x`reboot`" to "1")),
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("extraSysfs")
+    }
+
+    @Test
+    fun `extraSysfs path outside sys or proc is rejected`() {
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/data/local/tmp/evil" to "1")),
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("extraSysfs")
     }
 
     // ── Schema version constant ──────────────────────────────────────────────

@@ -177,6 +177,46 @@ class TunableMetadataTest {
         assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic")).isNotNull()
     }
 
+    // =========================================================================
+    // isDangerousPath — component-aware blocklist matching (FIX 1)
+    // =========================================================================
+
+    @Test
+    fun `blocklist bare name sysrq-trigger blocked as path component`() {
+        // "/proc/sysrq-trigger": component "sysrq-trigger" == bare blocklist entry → blocked
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sysrq-trigger")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist full-path entry proc sys kernel panic blocked by prefix match`() {
+        // "/proc/sys/kernel/panic": matched by full-path entry "/proc/sys/kernel/panic" → blocked
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist bare name reboot does not false-positive on reboot_mode component`() {
+        // "/sys/devices/virtual/reboot_mode/reboot_mode": no component is exactly "reboot",
+        // only "reboot_mode" → must be ALLOWED (false-positive fix)
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/devices/virtual/reboot_mode/reboot_mode")).isNull()
+    }
+
+    @Test
+    fun `blocklist bare name drop_caches blocked as path component`() {
+        // "/proc/sys/vm/drop_caches": component "drop_caches" == bare blocklist entry → blocked
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/vm/drop_caches")).isNotNull()
+    }
+
+    // =========================================================================
+    // NUL byte in path (FIX 2)
+    // =========================================================================
+
+    @Test
+    fun `custom sysfs path rejects real NUL byte in path`() {
+        // A path containing an actual NUL character (code point 0) must be rejected.
+        val pathWithNul = "/sys/block/sda" + ' ' + "evil"
+        assertThat(TunableMetadata.validateCustomSysfsPath(pathWithNul)).isNotNull()
+    }
+
     @Test
     fun `custom sysfs path rejects paths with newlines`() {
         assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda\n/queue/scheduler")).isNotNull()

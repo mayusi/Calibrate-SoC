@@ -1,3 +1,20 @@
+## [0.1.16-alpha] — 2026-06-14
+
+A correctness & safety pass — fixes found by a deep audit of the newer features.
+
+### Security
+- **Pasting a malicious preset code can no longer crash the app.** Share codes are now size-capped on both decode steps, so a crafted "zip bomb" code can't balloon into gigabytes of memory.
+- **Imported/shared presets now have their advanced kernel paths checked at import**, not just when applied — a bad path is rejected at the door (defense in depth).
+
+### Fixed
+- **Sharing a preset now includes your Advanced Tuning knobs.** Previously, custom sysfs tweaks were silently dropped from a shared code, so the person you sent it to got an incomplete tune. (Older codes still import fine.)
+- **The in-game throttle/FPS-dip timeline now actually catches dips on high-refresh devices.** A drop from, say, 120→55 fps was being missed; it now flags a dip when frames fall below 80% of your session average *or* below 40 fps.
+- A custom tuning path like `…/reboot_mode/…` is no longer wrongly blocked just because it contains the word "reboot" — the dangerous-path list now matches whole path components, while still blocking the real dangerous nodes.
+- GPU frame-time charts now keep the true first and last data point; the 1%-low and A/B "tie" calculations were tightened for edge cases; absurd manually-typed benchmark scores (infinity / huge values) are now rejected.
+
+### Under the hood
+- Cached a few date formatters and removed some dead code in the newer screens. 662 unit tests pass.
+
 ## [0.1.15-alpha] — 2026-06-14
 
 The security follow-ups from the last audit, now done properly.

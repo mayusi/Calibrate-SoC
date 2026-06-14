@@ -276,7 +276,7 @@ private fun SummaryTile(
 
 @Composable
 private fun RunLegend(series: List<BenchTrend.Point>) {
-    val dateFmt = SimpleDateFormat("MMM d", Locale.getDefault())
+    val dateFmt = remember { SimpleDateFormat("MMM d", Locale.getDefault()) }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             "Run legend",

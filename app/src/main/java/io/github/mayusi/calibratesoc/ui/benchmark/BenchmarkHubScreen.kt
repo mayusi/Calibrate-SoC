@@ -71,6 +71,19 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * Returns true when [d] is a safe, meaningful score value:
+ *   - non-null, finite (not NaN or ±Infinity)
+ *   - strictly positive
+ *   - below 1e10 (guards against absurd inputs like "1e308" parsed from
+ *     a copy-paste; the score field itself filters 'e', but belt-and-suspenders)
+ *
+ * Extracted as an [internal] top-level function so it can be unit-tested
+ * on the JVM without any Android dependency.
+ */
+internal fun isValidScore(d: Double?): Boolean =
+    d != null && d.isFinite() && d > 0.0 && d < 1e10
+
+/**
  * Benchmark Hub — discover, launch, and personally log scores from popular
  * third-party benchmark apps.
  *
@@ -430,7 +443,7 @@ private fun AddScoreDialog(
 
     val benchmarkName = selectedApp?.displayName ?: customBenchmarkName
     val scoreDouble = scoreText.toDoubleOrNull()
-    val canSave = benchmarkName.isNotBlank() && scoreDouble != null && scoreDouble > 0
+    val canSave = benchmarkName.isNotBlank() && isValidScore(scoreDouble)
 
     AlertDialog(
         onDismissRequest = onDismiss,

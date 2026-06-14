@@ -110,14 +110,6 @@ fun AppStatsScreen(
 @Composable
 private fun TopAppsSummaryCard(stats: List<SessionStatsAggregator.AppSessionStats>) {
     SectionCard("Top apps by playtime", icon = Icons.Outlined.BarChart) {
-        if (stats.isEmpty()) {
-            Text(
-                "No recorded sessions.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            return@SectionCard
-        }
         Text(
             "Sorted by total recorded play time across all sessions.",
             style = MaterialTheme.typography.labelSmall,
