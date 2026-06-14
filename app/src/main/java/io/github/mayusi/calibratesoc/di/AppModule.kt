@@ -11,6 +11,9 @@ import io.github.mayusi.calibratesoc.data.benchmark.db.BenchDatabase
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchRunDao
 import io.github.mayusi.calibratesoc.data.benchmark.db.StabilityRunDao
 import io.github.mayusi.calibratesoc.data.session.SessionDao
+import io.github.mayusi.calibratesoc.data.share.AndroidBase64Encoder
+import io.github.mayusi.calibratesoc.data.share.Base64Encoder
+import io.github.mayusi.calibratesoc.data.share.PresetShareCodec
 import kotlinx.serialization.json.Json
 import okio.FileSystem
 import javax.inject.Singleton
@@ -60,4 +63,15 @@ object AppModule {
 
     @Provides
     fun provideSessionDao(db: BenchDatabase): SessionDao = db.sessionDao()
+
+    /** Production Base64 encoder backed by android.util.Base64. */
+    @Provides
+    @Singleton
+    fun provideBase64Encoder(): Base64Encoder = AndroidBase64Encoder()
+
+    /** Preset share codec — injected into ProfilesViewModel for share/import. */
+    @Provides
+    @Singleton
+    fun providePresetShareCodec(json: Json, base64: Base64Encoder): PresetShareCodec =
+        PresetShareCodec(json, base64)
 }

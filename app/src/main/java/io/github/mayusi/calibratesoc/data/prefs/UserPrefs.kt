@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -93,6 +94,32 @@ class UserPrefs @Inject constructor(
         prefs[LAST_SEEN_VERSION_KEY] ?: 0
     }
 
+    // ── Auto-update check ─────────────────────────────────────────────────────
+
+    /** Master switch for the automatic daily update check. Default TRUE —
+     *  just a network check, never an auto-download or auto-install. */
+    val autoUpdateCheckEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[AUTO_UPDATE_CHECK_ENABLED_KEY] ?: true
+    }
+
+    /** Epoch-ms of the last successful auto-check (used to throttle to once/day).
+     *  0 means never checked. */
+    val lastUpdateCheckMs: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[LAST_UPDATE_CHECK_MS_KEY] ?: 0L
+    }
+
+    /** Epoch-ms before which the "update available" banner should be suppressed
+     *  (i.e. user tapped "Later" — snooze for 7 days). Default 0 (no snooze). */
+    val updateRemindAfterMs: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[UPDATE_REMIND_AFTER_MS_KEY] ?: 0L
+    }
+
+    /** The release tag the user last dismissed ("don't nag me about this version").
+     *  Null means never dismissed. Banner re-appears when a newer tag arrives. */
+    val dismissedUpdateTag: Flow<String?> = context.dataStore.data.map { prefs ->
+        prefs[DISMISSED_UPDATE_TAG_KEY]
+    }
+
     // ── Temperature alerts ────────────────────────────────────────────────────
 
     /** Master switch for temperature alerts. Default OFF.
@@ -151,6 +178,27 @@ class UserPrefs @Inject constructor(
         context.dataStore.edit { it[LAST_SEEN_VERSION_KEY] = versionCode }
     }
 
+    suspend fun setAutoUpdateCheckEnabled(value: Boolean) {
+        context.dataStore.edit { it[AUTO_UPDATE_CHECK_ENABLED_KEY] = value }
+    }
+
+    suspend fun setLastUpdateCheckMs(value: Long) {
+        context.dataStore.edit { it[LAST_UPDATE_CHECK_MS_KEY] = value }
+    }
+
+    suspend fun setUpdateRemindAfterMs(value: Long) {
+        context.dataStore.edit { it[UPDATE_REMIND_AFTER_MS_KEY] = value }
+    }
+
+    /** Pass null to clear the dismissed tag (e.g. after a fresh install or
+     *  when a newer release supersedes the dismissed one). */
+    suspend fun setDismissedUpdateTag(tag: String?) {
+        context.dataStore.edit { prefs ->
+            if (tag == null) prefs.remove(DISMISSED_UPDATE_TAG_KEY)
+            else prefs[DISMISSED_UPDATE_TAG_KEY] = tag
+        }
+    }
+
     suspend fun setTempAlertsEnabled(value: Boolean) {
         context.dataStore.edit { it[TEMP_ALERTS_ENABLED_KEY] = value }
     }
@@ -186,6 +234,10 @@ class UserPrefs @Inject constructor(
         val TEMP_ALERTS_ENABLED_KEY      = booleanPreferencesKey("temp_alerts_enabled")
         val TEMP_ALERT_THRESHOLD_C_KEY   = intPreferencesKey("temp_alert_threshold_c")
         val TEMP_ALERT_AUTO_PROFILE_ID_KEY = stringPreferencesKey("temp_alert_auto_profile_id")
+        val AUTO_UPDATE_CHECK_ENABLED_KEY  = booleanPreferencesKey("auto_update_check_enabled")
+        val LAST_UPDATE_CHECK_MS_KEY       = longPreferencesKey("last_update_check_ms")
+        val UPDATE_REMIND_AFTER_MS_KEY     = longPreferencesKey("update_remind_after_ms")
+        val DISMISSED_UPDATE_TAG_KEY       = stringPreferencesKey("dismissed_update_tag")
 
         const val DEFAULT_ALERT_THRESHOLD_C = 80
     }

@@ -5,6 +5,7 @@ import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
 import io.github.mayusi.calibratesoc.data.devicedb.CommunityPreset
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.remote.RemoteContentRepository
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -15,11 +16,16 @@ import javax.inject.Singleton
  *   1. Community Tuned — bundled per-device recipes (TheOldTaylor's
  *      Odin 3 underclocks, anything else we've curated). Always wins
  *      when present.
- *   2. Built-in algorithmic — Battery Saver / Balanced / Performance /
+ *   2. Remote community presets — fetched from `content/presets.json`
+ *      on the main branch via [RemoteContentRepository]. Surfaced as
+ *      [VerificationTier.GENERIC_UNKNOWN_FAMILY] ("Community (unverified)")
+ *      so they go through the EXTRA "unknown device — I accept the risk"
+ *      confirm gate before Apply. Never auto-applied.
+ *   3. Built-in algorithmic — Battery Saver / Balanced / Performance /
  *      Max, generated from the OPP table the kernel reports + SoC-family
  *      heuristics. Works on ANY device, including ones we've never
  *      seen, because everything is derived from kernel-published values.
- *   3. User Custom — saved via the Tune UI. (Phase 4 follow-up.)
+ *   4. User Custom — saved via the Tune UI. (Phase 4 follow-up.)
  *
  * Design intent: we never hard-code "Snapdragon 8 Elite top freq = 4320
  * MHz". The kernel tells us its OPP table; we cap a percentage of the
@@ -30,24 +36,47 @@ import javax.inject.Singleton
 @Singleton
 class PresetGenerator @Inject constructor(
     private val deviceAdapterRegistry: DeviceAdapterRegistry,
+    private val remoteContent: RemoteContentRepository,
 ) {
 
     /** Full preset list ready to render in the Tune UI, ordered:
-     *  Community Tuned first, then the four built-ins. */
+     *  Community Tuned first, then remote community, then the four built-ins. */
     fun presetsFor(report: CapabilityReport): List<Preset> {
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         return buildList {
             addAll(communityPresetsFor(adapter))
+            addAll(remoteCommunityPresets())
             addAll(builtinPresetsFor(report, adapter))
         }
     }
 
-    // --- Community Tuned -----------------------------------------------
+    // --- Community Tuned (bundled) ------------------------------------
 
     private fun communityPresetsFor(adapter: DeviceAdapter?): List<Preset> {
         if (adapter == null) return emptyList()
         return adapter.communityPresets.map { c -> c.toPreset(adapter.key) }
     }
+
+    // --- Remote community presets ------------------------------------
+
+    /**
+     * Returns remote community presets (if any) fetched from the OTA channel.
+     *
+     * These are deliberately surfaced as [VerificationTier.GENERIC_UNKNOWN_FAMILY]
+     * ("Community (unverified)") so the user sees the EXTRA confirm dialog before
+     * Apply — the same gate the UI already uses for unknown-device built-in presets.
+     * They are never auto-applied.
+     *
+     * The [RemoteContentRepository] already validated + sanitized every string
+     * field. We re-enforce the verification tier here to guarantee it regardless
+     * of what the JSON contained.
+     */
+    private fun remoteCommunityPresets(): List<Preset> =
+        remoteContent.remotePresets().map { p ->
+            // Force GENERIC_UNKNOWN_FAMILY so the extra confirm gate is ALWAYS
+            // shown for remote content, even if the JSON claimed a higher tier.
+            p.copy(verification = VerificationTier.GENERIC_UNKNOWN_FAMILY)
+        }
 
     private fun CommunityPreset.toPreset(adapterKey: String): Preset = Preset(
         id = "${adapterKey}_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_")}",

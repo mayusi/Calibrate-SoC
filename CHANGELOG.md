@@ -11,6 +11,33 @@ Nothing yet.
 
 ---
 
+## [0.1.10-alpha] — 2026-06-14
+
+"Keep current + share tunes" round.
+
+### Added
+- **Preset sharing** — export a saved profile as a short paste-safe code
+  (`CSOC1:…`, copy or system-share) and import one by pasting it, with a preview
+  before saving. Imported presets are validated (no shell-metachar injection),
+  marked unverified, and never auto-apply — they go through the normal
+  safety-gated Apply flow.
+- **Auto-check for updates** — opt-in (default on) daily GitHub check on launch
+  that shows a dismissible "update available" banner with "Later" (snooze 7 days)
+  and per-version dismiss. Reuses the existing signature-verifying installer;
+  never auto-downloads or auto-installs. Toggle in Settings.
+
+### Changed
+- **OTA content channel** — device adapters and community presets can now be
+  updated without an app release: the app fetches small JSON files from
+  `content/` on the repo's `main` branch over HTTPS (GitHub-host allowlist,
+  strict schema validation), caches them to internal storage (offline-safe,
+  throttled ~12 h), and merges them over the bundled defaults (remote wins by
+  key; bundled is always the fallback). Remote community presets are forced to
+  the "unverified" tier and never auto-apply. Code still ships only as signed
+  APKs — only DATA goes OTA. Seed files + format docs live in `content/`.
+
+---
+
 ## [0.1.9-alpha] — 2026-06-14
 
 A polish & quality pass (no new headline features) driven by the codebase audit.

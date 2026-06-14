@@ -5,6 +5,8 @@ import dagger.hilt.android.HiltAndroidApp
 import io.github.mayusi.calibratesoc.data.baseline.FactoryBaselineRecorder
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.remote.RemoteContentRepository
+import io.github.mayusi.calibratesoc.data.update.AutoUpdateChecker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,6 +30,8 @@ class CalibrateSocApplication : Application() {
     @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var deviceAdapterRegistry: DeviceAdapterRegistry
     @Inject lateinit var factoryBaselineRecorder: FactoryBaselineRecorder
+    @Inject lateinit var autoUpdateChecker: AutoUpdateChecker
+    @Inject lateinit var remoteContentRepository: RemoteContentRepository
 
     /** Detached scope — capture runs in parallel with the rest of
      *  startup. Worst case the user opens Tune before capture
@@ -37,10 +41,22 @@ class CalibrateSocApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // OTA content refresh — best-effort, non-blocking, throttled to
+        // once per 12 hours. Failure leaves the bundled set intact and
+        // never crashes. Launched first so that if the fetch completes
+        // quickly (e.g. disk-cache hit) the merged adapter + preset sets
+        // are ready before the capability probe finishes.
+        scope.launch { remoteContentRepository.refresh() }
+
         scope.launch {
             val report = capabilityProbe.refresh()
             val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
             factoryBaselineRecorder.ensureCaptured(report, adapter)
         }
+        // Best-effort auto-update check — fire-and-forget, never blocks startup.
+        // Runs on IO, swallows all errors, and only proceeds if the user opted in
+        // and 24 hours have passed since the last check.
+        scope.launch { autoUpdateChecker.runIfDue() }
     }
 }

@@ -1,5 +1,6 @@
 package io.github.mayusi.calibratesoc.ui.profiles
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,6 +15,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -32,15 +36,20 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
+import kotlinx.coroutines.launch
 
 /**
  * Profiles screen. Two sections:
@@ -55,8 +64,17 @@ import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
     val store by viewModel.store.collectAsStateWithLifecycle()
     val installed by viewModel.installedApps.collectAsStateWithLifecycle()
-    var assigning by remember { mutableStateOf<String?>(null) }
+    val shareCode by viewModel.shareCode.collectAsStateWithLifecycle()
+    val importState by viewModel.importState.collectAsStateWithLifecycle()
+
     var editingApp by remember { mutableStateOf<String?>(null) }
+    var sharingProfile by remember { mutableStateOf<UserProfile?>(null) }
+    var showImportDialog by remember { mutableStateOf(false) }
+
+    // When shareCode is populated, update the sharingProfile trigger.
+    LaunchedEffect(shareCode) {
+        if (shareCode == null) sharingProfile = null
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -64,12 +82,29 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text("Profiles", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Saved tunes you can reapply. Mark a profile Apply on boot to keep it across reboots — otherwise everything reverts.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Profiles", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Saved tunes you can reapply. Mark a profile Apply on boot to keep it across reboots — otherwise everything reverts.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = { showImportDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.size(6.dp))
+                Text("Import preset from code")
+            }
         }
 
         if (store.profiles.isEmpty()) {
@@ -87,6 +122,10 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                     onApply = { viewModel.apply(profile) },
                     onDelete = { viewModel.delete(profile) },
                     onToggleBoot = { viewModel.toggleApplyOnBoot(profile) },
+                    onShare = {
+                        viewModel.generateShareCode(profile)
+                        sharingProfile = profile
+                    },
                 )
             }
         }
@@ -130,6 +169,35 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                 enabled = store.profiles.isNotEmpty(),
             ) { Text("Add per-app override") }
         }
+    }
+
+    // ── Share dialog ────────────────────────────────────────────────────────────
+    if (sharingProfile != null && shareCode != null) {
+        SharePresetDialog(
+            profile = sharingProfile!!,
+            code = shareCode!!,
+            onDismiss = {
+                viewModel.clearShareCode()
+                sharingProfile = null
+            },
+        )
+    }
+
+    // ── Import dialog ───────────────────────────────────────────────────────────
+    if (showImportDialog) {
+        ImportPresetDialog(
+            importState = importState,
+            onCodeChange = { viewModel.decodeImportCode(it) },
+            onConfirm = { profile ->
+                viewModel.confirmImport(profile) { /* errors shown inline */ }
+                showImportDialog = false
+                viewModel.dismissImport()
+            },
+            onDismiss = {
+                showImportDialog = false
+                viewModel.dismissImport()
+            },
+        )
     }
 
     if (editingApp != null) {
@@ -186,13 +254,28 @@ private fun ProfileCard(
     onApply: () -> Unit,
     onDelete: () -> Unit,
     onToggleBoot: () -> Unit,
+    onShare: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(profile.name, style = MaterialTheme.typography.titleSmall)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(profile.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                androidx.compose.material3.IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = Icons.Outlined.Share,
+                        contentDescription = "Share preset code",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             if (profile.description.isNotBlank()) {
                 Text(
                     profile.description,
@@ -316,5 +399,136 @@ private fun AppPickerDialog(
             ) { Text("Assign") }
         },
         dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// ── Share / Import dialogs ─────────────────────────────────────────────────────
+
+/**
+ * Dialog that shows the shareable base-64 preset code for [profile] and
+ * lets the user copy it or share it via the Android share sheet.
+ */
+@Composable
+private fun SharePresetDialog(
+    profile: UserProfile,
+    code: String,
+    onDismiss: () -> Unit,
+) {
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Share \"${profile.name}\"") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Anyone with this code can import your preset exactly as-is.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Preset code") },
+                    modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = {
+                        Icon(
+                            Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy",
+                            modifier = Modifier
+                                .size(20.dp)
+                                .padding(2.dp),
+                        )
+                    },
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                clipboardManager.setText(AnnotatedString(code))
+                scope.launch {
+                    android.widget.Toast.makeText(context, "Copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }) { Text("Copy") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                runCatching {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, code)
+                        putExtra(Intent.EXTRA_SUBJECT, "Calibrate SoC preset: ${profile.name}")
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share preset"))
+                }
+                onDismiss()
+            }) { Text("Share…") }
+        },
+    )
+}
+
+/**
+ * Dialog that lets the user paste an imported preset code and preview
+ * the decoded [UserProfile] before saving it.
+ */
+@Composable
+private fun ImportPresetDialog(
+    importState: ProfilesViewModel.ImportState,
+    onCodeChange: (String) -> Unit,
+    onConfirm: (UserProfile) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var code by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import preset") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Paste a preset code shared by another user.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = {
+                        code = it
+                        onCodeChange(it)
+                    },
+                    label = { Text("Preset code") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 2,
+                )
+                when (val s = importState) {
+                    is ProfilesViewModel.ImportState.Preview -> {
+                        Text(
+                            "Preview: ${s.profile.name}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        val caps = s.profile.cpuPolicyMaxKhz.entries
+                            .sortedBy { it.key }
+                            .joinToString("  ") { "p${it.key}=${it.value / 1000}MHz" }
+                        if (caps.isNotBlank()) {
+                            Text(caps, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                    is ProfilesViewModel.ImportState.Error ->
+                        Text(s.reason, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    is ProfilesViewModel.ImportState.Idle -> Unit
+                }
+            }
+        },
+        confirmButton = {
+            val preview = importState as? ProfilesViewModel.ImportState.Preview
+            Button(
+                onClick = { preview?.let { onConfirm(it.profile) } },
+                enabled = preview != null,
+            ) { Text("Import") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
     )
 }

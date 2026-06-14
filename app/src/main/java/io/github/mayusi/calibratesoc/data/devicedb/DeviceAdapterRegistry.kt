@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc.data.devicedb
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.mayusi.calibratesoc.data.remote.RemoteContentRepository
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -16,19 +17,39 @@ import javax.inject.Singleton
  * device DB via the "Report unknown device" button in Device Info, which
  * uploads the anonymised CapabilityReport JSON to a public GitHub repo
  * for the community to triage and add an adapter.
+ *
+ * **OTA overlay:** on each launch [RemoteContentRepository] fetches an
+ * overlay from `content/adapters.json` on the main branch. Remote entries
+ * WIN by key over bundled entries, so the developer can ship a corrected
+ * adapter for an existing device or add a brand-new one without a new APK.
+ * Bundled entries with no remote counterpart are left unchanged. When the
+ * remote fetch has not yet completed (offline / first launch) the bundled
+ * set is the sole source of truth.
  */
 @Singleton
 class DeviceAdapterRegistry @Inject constructor(
     @ApplicationContext private val context: Context,
     private val json: Json,
+    private val remoteContent: RemoteContentRepository,
 ) {
-    private val cache: Map<String, DeviceAdapter> by lazy { load() }
+    /** Bundled adapters loaded once at first access. */
+    private val bundled: Map<String, DeviceAdapter> by lazy { loadBundled() }
 
-    fun lookup(key: String?): DeviceAdapter? = key?.lowercase()?.let(cache::get)
+    /**
+     * Merged view: bundled + remote with REMOTE WINNING by lowercase key.
+     * Rebuilt on each call to pick up whatever [RemoteContentRepository]
+     * has loaded since the last call (including from disk cache on startup).
+     */
+    private fun merged(): Map<String, DeviceAdapter> {
+        val remote = remoteContent.remoteAdapters().associateBy { it.key.lowercase() }
+        return if (remote.isEmpty()) bundled else bundled + remote
+    }
 
-    fun all(): List<DeviceAdapter> = cache.values.sortedBy { it.displayName }
+    fun lookup(key: String?): DeviceAdapter? = key?.lowercase()?.let { merged()[it] }
 
-    private fun load(): Map<String, DeviceAdapter> {
+    fun all(): List<DeviceAdapter> = merged().values.sortedBy { it.displayName }
+
+    private fun loadBundled(): Map<String, DeviceAdapter> {
         val asset = runCatching {
             context.assets.open(ADAPTERS_PATH).bufferedReader().use { it.readText() }
         }.getOrNull() ?: return emptyMap()

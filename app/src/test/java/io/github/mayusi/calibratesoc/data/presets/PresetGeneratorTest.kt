@@ -14,6 +14,7 @@ import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
 import io.github.mayusi.calibratesoc.data.devicedb.CommunityPreset
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.remote.RemoteContentRepository
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Test
@@ -109,7 +110,7 @@ class PresetGeneratorTest {
             ),
         )
 
-        val presets = PresetGenerator(registry).presetsFor(report)
+        val presets = PresetGenerator(registry, emptyRemoteContent()).presetsFor(report)
 
         assertThat(presets.first().name).isEqualTo("Underclock — Large")
         assertThat(presets.first().verification).isEqualTo(VerificationTier.COMMUNITY_TUNED)
@@ -219,7 +220,13 @@ class PresetGeneratorTest {
         val registry = mockk<DeviceAdapterRegistry>()
         every { registry.lookup(any()) } returns null
         every { registry.lookup(null) } returns null
-        return PresetGenerator(registry)
+        return PresetGenerator(registry, emptyRemoteContent())
+    }
+
+    private fun emptyRemoteContent(): RemoteContentRepository {
+        val repo = mockk<RemoteContentRepository>()
+        every { repo.remotePresets() } returns emptyList()
+        return repo
     }
 
     private fun policy(id: Int, freqsMhz: List<Int>) = CpuPolicyProbe(

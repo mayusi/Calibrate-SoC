@@ -1,3 +1,14 @@
+## [0.1.10-alpha] — 2026-06-14
+
+Staying current + sharing tunes.
+
+### Added
+- **Share & import presets** — share any saved profile as a short code (copy or send it), and import one someone sends you. Imported presets are marked unverified and never apply on their own — you review and apply them like any other.
+- **Auto-check for updates** — the app can quietly check GitHub about once a day and show a banner when a new version is out (with "Later" and dismiss). Toggle it in Settings. Updates never install on their own.
+
+### Changed
+- **Live content updates** — new device support and community presets can now arrive without waiting for a full app update. The app fetches a small content file from GitHub on launch (offline-safe; the built-in data is always the fallback).
+
 ## [0.1.9-alpha] — 2026-06-14
 
 Polish & quality pass.

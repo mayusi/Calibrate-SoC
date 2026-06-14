@@ -510,8 +510,10 @@ fun SettingsScreen(
 private fun UpdatesAndFeedbackCard(
     context: android.content.Context,
     updateVm: UpdateViewModel = hiltViewModel(),
+    settingsVm: SettingsViewModel = hiltViewModel(),
 ) {
     val updateState by updateVm.state.collectAsStateWithLifecycle()
+    val autoUpdateEnabled by settingsVm.autoUpdateCheckEnabled.collectAsStateWithLifecycle()
     var notesExpanded by remember { mutableStateOf(false) }
 
     SectionCard(title = "Updates & Feedback", icon = Icons.Outlined.SystemUpdate) {
@@ -523,6 +525,26 @@ private fun UpdatesAndFeedbackCard(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
+
+        // ── Auto-check toggle ─────────────────────────────────────────────
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Check for updates automatically",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "Checks GitHub about once a day and shows a banner when a new version is out. Updates never install on their own.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = autoUpdateEnabled,
+                onCheckedChange = { settingsVm.setAutoUpdateCheckEnabled(it) },
+            )
+        }
+        Spacer(Modifier.height(Spacing.dense))
 
         // ── Updater state machine ─────────────────────────────────────────
         when (val s = updateState) {

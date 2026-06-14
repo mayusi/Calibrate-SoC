@@ -159,6 +159,15 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { userPrefs.setTempAlertAutoProfileId(profileId) }
     }
 
+    // ── Auto-update check toggle ──────────────────────────────────────────────
+
+    val autoUpdateCheckEnabled: StateFlow<Boolean> = userPrefs.autoUpdateCheckEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    fun setAutoUpdateCheckEnabled(value: Boolean) {
+        viewModelScope.launch { userPrefs.setAutoUpdateCheckEnabled(value) }
+    }
+
     // ── What's New / update banner ────────────────────────────────────────────
 
     /** True when the current versionCode hasn't been seen yet.
