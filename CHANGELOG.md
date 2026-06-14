@@ -11,6 +11,22 @@ Nothing yet.
 
 ---
 
+## [0.1.15-alpha] — 2026-06-14
+
+The three device-tested security/safety items deferred from 0.1.14, implemented and verified. 629 unit tests green.
+
+### Security
+- **TLS certificate pinning** on all GitHub network calls (UpdateChecker, RemoteContentRepository, ApkDownloader) via a new `GitHubCertPins`. Pins each host's CURRENT INTERMEDIATE + the ROOT above it, extracted from the LIVE chains (Sectigo E36 + root E46 for github.com/api/codeload; Let's Encrypt R12 + ISRG Root X1 for the githubusercontent CDN) — real values, openssl-verified, not placeholders. **Fail-open by design:** a pin mismatch (e.g. a CA rotation) logs a warning and falls back to standard HTTPS rather than bricking updates; the APK signature-pin remains the hard install gate, which is why fail-open on transport is safe. Closes the OTA-content MITM gap from the last audit.
+- **Symlink-resolve in `validateCustomSysfsPath`** — after the string checks, the path is canonicalised and the resolved target re-validated (must stay under /sys or /proc, not hit the dangerous-path list), blocking a symlink that escapes to e.g. /proc/sys/kernel/panic. Non-existent paths (targeting another SoC) and non-Unix-rooted resolutions (the Windows test host) fall back to string validation — no over-rejection of legit nodes.
+
+### Added
+- **Real battery state-of-charge benchmark abort** — long benchmark/stability runs now stop with `ABORTED_BATTERY_LOW` when charge drops below 15% and the device is not charging, protecting against a mid-run shutdown. Independent from the existing thermal/temp abort, and only triggers on a genuine percent read (never on a null/unknown reading). Battery % is read via `BatteryManager.BATTERY_PROPERTY_CAPACITY`.
+
+### Notes
+- Two agent-introduced regressions were caught at integration and fixed before release: the symlink check rejected valid paths on the Windows unit-test host (now guarded to Unix-rooted resolutions), and the cert-pin test invoked an unmocked `android.util.Log` (now stubbed).
+
+---
+
 ## [0.1.14-alpha] — 2026-06-14
 
 Six-dimension audit (bugs, security, perf, robustness, quality, features) with adversarial verification: ~30 fixes + 4 features. 599 unit tests green (was 460).

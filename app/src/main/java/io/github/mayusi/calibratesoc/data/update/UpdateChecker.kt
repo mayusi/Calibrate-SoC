@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.data.update
 
 import io.github.mayusi.calibratesoc.BuildConfig
+import io.github.mayusi.calibratesoc.data.net.GitHubCertPins
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -24,7 +25,17 @@ class UpdateChecker @Inject constructor(
     private val json: Json,
 ) {
 
-    private val client = OkHttpClient.Builder()
+    // Pinned client: TLS cert pinning on GitHub hosts as defence-in-depth.
+    // See GitHubCertPins for threat model and fail-open rationale.
+    private val pinnedClient: OkHttpClient = GitHubCertPins.pinnedClient(
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS),
+    )
+
+    // Unpinned fallback: same timeouts, no CertificatePinner.
+    private val unpinnedClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
@@ -44,10 +55,21 @@ class UpdateChecker @Inject constructor(
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .build()
 
-            val body = client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) return@runCatching null
-                resp.body?.string() ?: return@runCatching null
-            } ?: return@runCatching null
+            // Cert-pinned fetch with fail-open fallback on pin mismatch.
+            val bodyOrNull: String? = GitHubCertPins.executeWithPinFallback(
+                tag = "UpdateChecker.fetchLatest",
+                pinnedAttempt = {
+                    pinnedClient.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) null else resp.body?.string()
+                    }
+                },
+                unpinnedAttempt = {
+                    unpinnedClient.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) null else resp.body?.string()
+                    }
+                },
+            )
+            val body: String = bodyOrNull ?: return@runCatching null
 
             val release = json.decodeFromString<GitHubRelease>(body)
 

@@ -260,6 +260,65 @@ class BenchRatingTest {
         assertThat(rating.abortReason).ignoringCase().doesNotContain("low battery")
     }
 
+    // ─── B3: ABORTED_BATTERY_LOW (charge level, not temperature) ─────
+
+    @Test
+    fun `ABORTED_BATTERY_LOW label mentions low and under 15 percent`() {
+        val report = reportWithSoc("Qualcomm", "Snapdragon 8 Gen 2")
+        val run = BenchRun(
+            id = 4L,
+            name = "test",
+            flavor = BenchFlavor.FULL,
+            startedAtMs = 0L,
+            durationMs = 10_000L,
+            snapshot = SystemSnapshot(
+                capturedAtMs = 0L,
+                deviceModel = "Test",
+                socModel = "Snapdragon 8 Gen 2",
+                androidVersion = "14",
+                privilegeTier = "NONE",
+                cpuPolicies = emptyList(),
+                gpuMinHz = null,
+                gpuMaxHz = null,
+                gpuGovernor = null,
+                appVersion = "0.1.14",
+            ),
+            kernels = KernelScores(cpuIntegerSingle = 1000L),
+            throttleSamples = emptyList(),
+            outcome = BenchOutcome.ABORTED_BATTERY_LOW,
+        )
+        val rating = BenchRating.rate(run, report)
+        assertThat(rating.word).isNull()
+        assertThat(rating.abortReason).isNotNull()
+        // Must be distinct from the "too hot" thermal label.
+        assertThat(rating.abortReason).ignoringCase().doesNotContain("hot")
+        assertThat(rating.abortReason).ignoringCase().contains("low")
+        assertThat(rating.abortReason).contains("15%")
+    }
+
+    @Test
+    fun `ABORTED_BATTERY_LOW and ABORTED_BATTERY_TEMP have distinct labels`() {
+        val report = reportWithSoc("Qualcomm", "Snapdragon 8 Gen 2")
+        fun runWith(outcome: BenchOutcome) = BenchRun(
+            id = 5L, name = "test", flavor = BenchFlavor.FULL,
+            startedAtMs = 0L, durationMs = 10_000L,
+            snapshot = SystemSnapshot(
+                capturedAtMs = 0L, deviceModel = "Test",
+                socModel = "Snapdragon 8 Gen 2", androidVersion = "14",
+                privilegeTier = "NONE", cpuPolicies = emptyList(),
+                gpuMinHz = null, gpuMaxHz = null, gpuGovernor = null,
+                appVersion = "0.1.14",
+            ),
+            kernels = KernelScores(), throttleSamples = emptyList(),
+            outcome = outcome,
+        )
+        val lowLabel = BenchRating.rate(runWith(BenchOutcome.ABORTED_BATTERY_LOW), report).abortReason
+        val hotLabel = BenchRating.rate(runWith(BenchOutcome.ABORTED_BATTERY_TEMP), report).abortReason
+        assertThat(lowLabel).isNotEqualTo(hotLabel)
+        assertThat(lowLabel).isNotNull()
+        assertThat(hotLabel).isNotNull()
+    }
+
     // ─── Helper builders ──────────────────────────────────────────────
 
     private fun reportWithSoc(

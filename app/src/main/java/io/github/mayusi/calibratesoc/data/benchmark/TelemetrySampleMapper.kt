@@ -11,9 +11,21 @@ import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
  * Keeping the mapping in one place ensures both runners always produce
  * identical [ThrottleSample] values from the same telemetry input.
  *
- * No Android framework dependencies — pure JVM, trivially unit-testable.
+ * [batteryPercent] and [charging] are not in [Telemetry] (which is read
+ * from sysfs / procfs). They come from [BatteryManager] directly; callers
+ * read them immediately before constructing the sample and pass them in.
+ * Both default to null so callers that do not have a reading (or in tests)
+ * can omit them — null means "unavailable", never substitute a fake value.
+ *
+ * No Android framework dependencies on the mapper itself — pure JVM,
+ * trivially unit-testable.
  */
-internal fun telemetryToThrottleSample(t: Telemetry, runStartedAt: Long): ThrottleSample {
+internal fun telemetryToThrottleSample(
+    t: Telemetry,
+    runStartedAt: Long,
+    batteryPercent: Int? = null,
+    charging: Boolean? = null,
+): ThrottleSample {
     val cpuMaxMhz = (t.perCoreCpuFreqKhz.maxOrNull() ?: 0) / 1000
     val cpuTempC = t.zoneTempsMilliC
         .filter { it.label.contains("cpu", ignoreCase = true) }
@@ -31,5 +43,7 @@ internal fun telemetryToThrottleSample(t: Telemetry, runStartedAt: Long): Thrott
         batteryTempC = batteryTempC,
         batteryDrawMw = t.batteryDrawMilliW,
         gpuMaxMhz = gpuMaxMhz,
+        batteryPercent = batteryPercent,
+        charging = charging,
     )
 }

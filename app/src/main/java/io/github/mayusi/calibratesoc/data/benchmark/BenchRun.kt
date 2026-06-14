@@ -129,6 +129,13 @@ enum class BenchOutcome {
     /** Legacy name kept for backward-compatibility with persisted DB rows. Do
      *  not use in new code — emit [ABORTED_BATTERY_TEMP] instead. */
     ABORTED_BATTERY,
+    /**
+     * Battery charge dropped below 15% while NOT charging during the sustained
+     * run. This is a CHARGE LEVEL condition, completely distinct from
+     * [ABORTED_BATTERY_TEMP] (which is a temperature condition). Only emitted
+     * when a real percent reading is available — never emitted on a null read.
+     */
+    ABORTED_BATTERY_LOW,
     ABORTED_DURATION,
     ABORTED_USER,
     FAILED_NATIVE,
@@ -147,4 +154,20 @@ data class ThrottleSample(
     val batteryTempC: Float,
     val batteryDrawMw: Long?,
     val gpuMaxMhz: Int? = null,  // GPU frequency in MHz; gpuFreqHz from Telemetry / 1_000_000
+    /**
+     * Battery state-of-charge in whole percent (0–100), or null when the
+     * device does not expose this property. Nullable default keeps this
+     * JSON-safe: old rows that lack the field deserialise as null with
+     * ignoreUnknownKeys — no DB version bump required (rides inside the
+     * existing throttleSamplesJson / samplesJson column).
+     *
+     * HONESTY: null means "unavailable" — never substitute a default value
+     * here and never abort a run based on a null reading.
+     */
+    val batteryPercent: Int? = null,
+    /**
+     * Whether the battery was charging at sample time. Null when unknown.
+     * Same JSON-safe nullable addition as [batteryPercent] — no DB bump.
+     */
+    val charging: Boolean? = null,
 )

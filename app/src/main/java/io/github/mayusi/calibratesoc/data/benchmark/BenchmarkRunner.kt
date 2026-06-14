@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc.data.benchmark
 
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.hardware.StorageSpeedTester
+import io.github.mayusi.calibratesoc.data.monitor.BatteryChargeReader
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,7 @@ class BenchmarkRunner @Inject constructor(
     private val gpuStorm: GpuTriangleStorm,
     private val gpuScene: GpuSceneBenchmark,
     private val storageTester: StorageSpeedTester,
+    private val batteryChargeReader: BatteryChargeReader,
     private val json: Json,
 ) {
 
@@ -370,6 +372,12 @@ class BenchmarkRunner @Inject constructor(
                     outcome = BenchOutcome.ABORTED_BATTERY_TEMP
                     return@withTimeoutOrNull
                 }
+                // Battery low abort — INDEPENDENT of the thermal abort above.
+                // Only aborts on a REAL percent reading; null = unavailable = no abort.
+                if (shouldAbortLowBattery(last.batteryPercent, last.charging)) {
+                    outcome = BenchOutcome.ABORTED_BATTERY_LOW
+                    return@withTimeoutOrNull
+                }
             }
         }
         // watchdog == null is the NORMAL case: withTimeoutOrNull returns null
@@ -385,7 +393,12 @@ class BenchmarkRunner @Inject constructor(
     }
 
     private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample =
-        telemetryToThrottleSample(t, runStartedAt)
+        telemetryToThrottleSample(
+            t = t,
+            runStartedAt = runStartedAt,
+            batteryPercent = batteryChargeReader.readPercent(),
+            charging = batteryChargeReader.isCharging(),
+        )
 
     private fun preflightCheck(config: BenchConfig): BenchOutcome? = null
 

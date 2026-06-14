@@ -621,6 +621,7 @@ private fun outcomeLabel(outcome: BenchOutcome) = when (outcome) {
     BenchOutcome.ABORTED_TEMP      -> "Aborted — thermal limit"
     BenchOutcome.ABORTED_BATTERY_TEMP -> "Aborted — battery too hot"
     BenchOutcome.ABORTED_BATTERY   -> "Aborted — battery too hot"
+    BenchOutcome.ABORTED_BATTERY_LOW -> "Aborted — battery too low"
     BenchOutcome.ABORTED_DURATION  -> "Aborted — time limit"
     BenchOutcome.ABORTED_USER      -> "Aborted by user"
     BenchOutcome.FAILED_NATIVE     -> "Native crash"

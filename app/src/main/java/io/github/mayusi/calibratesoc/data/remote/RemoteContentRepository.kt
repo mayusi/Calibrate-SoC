@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
+import io.github.mayusi.calibratesoc.data.net.GitHubCertPins
 import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.update.ApkDownloader
 import kotlinx.serialization.json.Json
@@ -42,9 +43,19 @@ class RemoteContentRepository @Inject constructor(
     private val json: Json,
 ) {
 
-    // ── OkHttp client — conservative timeouts, mirrors UpdateChecker ─────────
+    // ── OkHttp clients — conservative timeouts, mirrors UpdateChecker ────────
 
-    private val client = OkHttpClient.Builder()
+    // Pinned client: TLS cert pinning on GitHub hosts as defence-in-depth.
+    // See GitHubCertPins for threat model and fail-open rationale.
+    private val pinnedClient: OkHttpClient = GitHubCertPins.pinnedClient(
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS),
+    )
+
+    // Unpinned fallback: same timeouts, no CertificatePinner.
+    private val unpinnedClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
@@ -253,13 +264,30 @@ class RemoteContentRepository @Inject constructor(
                 .url(url)
                 .header("Accept", "application/json")
                 .build()
-            client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    Log.w(TAG, "HTTP ${resp.code} fetching $url")
-                    return@runCatching null
-                }
-                resp.body?.string()
-            }
+            // Cert-pinned fetch with fail-open fallback on pin mismatch.
+            GitHubCertPins.executeWithPinFallback(
+                tag = "RemoteContent.fetchText($url)",
+                pinnedAttempt = {
+                    pinnedClient.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            Log.w(TAG, "HTTP ${resp.code} fetching $url (pinned)")
+                            null
+                        } else {
+                            resp.body?.string()
+                        }
+                    }
+                },
+                unpinnedAttempt = {
+                    unpinnedClient.newCall(request).execute().use { resp ->
+                        if (!resp.isSuccessful) {
+                            Log.w(TAG, "HTTP ${resp.code} fetching $url (unpinned fallback)")
+                            null
+                        } else {
+                            resp.body?.string()
+                        }
+                    }
+                },
+            )
         }.getOrElse { e ->
             Log.w(TAG, "Network error fetching $url", e)
             null

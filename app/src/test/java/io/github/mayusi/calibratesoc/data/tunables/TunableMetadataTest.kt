@@ -257,6 +257,79 @@ class TunableMetadataTest {
     }
 
     // =========================================================================
+    // validateCustomSysfsPath — canonical-resolution / symlink checks
+    //
+    // All tests below use the injectable-resolver overload so no real filesystem
+    // is needed.  The public fun delegates to this overload with a real
+    // java.io.File.canonicalPath resolver; the resolver returns null for the
+    // non-existent paths used by the string-level tests above, so those tests
+    // are unaffected by the new code path.
+    // =========================================================================
+
+    @Test
+    fun `symlink that escapes to proc panic is rejected`() {
+        // /sys/vendor/power/perf_mode is an innocent-looking name, but on this
+        // hypothetical device it is a symlink pointing to /proc/sys/kernel/panic.
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/vendor/power/perf_mode",
+        ) { _ -> "/proc/sys/kernel/panic" }
+        assertThat(result).isNotNull()
+        assertThat(result).contains("/proc/sys/kernel/panic")
+    }
+
+    @Test
+    fun `symlink that resolves within sys is accepted`() {
+        // Many real vendor CPUfreq nodes are symlinks that canonicalise to a
+        // longer /sys path (e.g. policy0 -> cpu0/cpufreq/policy0).
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+        ) { _ -> "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq" }
+        assertThat(result).isNull()
+    }
+
+    @Test
+    fun `unresolvable path (resolver returns null) falls back to string validation and passes`() {
+        // Path doesn't exist on this host JVM / test device -- resolver returns null.
+        // The string checks already passed, so the result must be null (pass).
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+        ) { _ -> null }
+        assertThat(result).isNull()
+    }
+
+    @Test
+    fun `symlink that resolves to dangerous proc drop_caches is rejected`() {
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/kernel/fast_clear",
+        ) { _ -> "/proc/sys/vm/drop_caches" }
+        assertThat(result).isNotNull()
+        assertThat(result).contains("drop_caches")
+    }
+
+    @Test
+    fun `symlink that resolves outside sys and proc entirely is rejected`() {
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/fs/cgroup/cpu/cpuset",
+        ) { _ -> "/data/local/tmp/evil" }
+        assertThat(result).isNotNull()
+        assertThat(result).contains("outside /sys or /proc")
+    }
+
+    @Test
+    fun `string-level metachar rejection still fires before resolver is consulted`() {
+        // The resolver must never be reached for paths rejected at the string level.
+        // We verify this by passing a resolver that would PASS the path -- if it were
+        // consulted and returned null (non-existent), the function would also pass.
+        // Instead the semicolon must cause rejection at the string stage.
+        val resolverCalled = booleanArrayOf(false)
+        val result = TunableMetadata.validateCustomSysfsPath(
+            "/sys/block/sda;rm -rf /",
+        ) { _ -> resolverCalled[0] = true; null }
+        assertThat(result).isNotNull() // rejected at string stage
+        assertThat(resolverCalled[0]).isFalse()
+    }
+
+    // =========================================================================
     // KernelTunables.customSysfsRule — throws on invalid path
     // =========================================================================
 

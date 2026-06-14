@@ -1,5 +1,6 @@
 package io.github.mayusi.calibratesoc.data.benchmark
 
+import io.github.mayusi.calibratesoc.data.monitor.BatteryChargeReader
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,7 @@ import javax.inject.Singleton
 class StabilityTestRunner @Inject constructor(
     private val monitorService: MonitorService,
     private val gpuStorm: GpuTriangleStorm,
+    private val batteryChargeReader: BatteryChargeReader,
 ) {
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -86,6 +88,13 @@ class StabilityTestRunner @Inject constructor(
                     outcome = BenchOutcome.ABORTED_TEMP
                     break
                 }
+                // Battery low abort — INDEPENDENT of the thermal abort above.
+                // Only aborts on a REAL percent reading; null = unavailable = no abort.
+                val lastSample = samples.lastOrNull()
+                if (shouldAbortLowBattery(lastSample?.batteryPercent, lastSample?.charging)) {
+                    outcome = BenchOutcome.ABORTED_BATTERY_LOW
+                    break
+                }
             }
         } finally {
             cpuJobs.forEach { it.cancel() }
@@ -106,7 +115,12 @@ class StabilityTestRunner @Inject constructor(
     }
 
     private fun sampleFromTelemetry(t: Telemetry, runStartedAt: Long): ThrottleSample =
-        telemetryToThrottleSample(t, runStartedAt)
+        telemetryToThrottleSample(
+            t = t,
+            runStartedAt = runStartedAt,
+            batteryPercent = batteryChargeReader.readPercent(),
+            charging = batteryChargeReader.isCharging(),
+        )
 
     sealed interface State {
         data object Idle : State

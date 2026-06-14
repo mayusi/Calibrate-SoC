@@ -7,6 +7,7 @@ import android.content.pm.Signature
 import android.util.Log
 import androidx.core.content.FileProvider
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.mayusi.calibratesoc.data.net.GitHubCertPins
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -52,7 +53,20 @@ class ApkDownloader @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
 
-    private val client = OkHttpClient.Builder()
+    // Pinned client: TLS cert pinning on GitHub hosts as defence-in-depth.
+    // See GitHubCertPins for threat model and fail-open rationale.
+    private val pinnedClient: OkHttpClient = GitHubCertPins.pinnedClient(
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS),
+    )
+
+    // Unpinned fallback client (same timeouts, no CertificatePinner).
+    // Used by executeWithPinFallback when a pin mismatch is detected so that
+    // a CA rotation never permanently bricks downloads. APK signature
+    // verification (verifySignature) remains the hard gate regardless.
+    private val unpinnedClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
@@ -172,40 +186,19 @@ class ApkDownloader @Inject constructor(
             val destFile = File(updateDir, "CalibrateSoC-update.apk")
             if (destFile.exists()) destFile.delete()
 
-            client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) return@runCatching null
-                val body = resp.body ?: return@runCatching null
-                val total = body.contentLength() // -1 if unknown
-
-                // Fix 5: size sanity — reject if Content-Length diverges from
-                // the expected size by more than 1 MiB.
-                if (expectedSize > 0 && total > 0) {
-                    val delta = Math.abs(total - expectedSize)
-                    if (delta > SIZE_TOLERANCE_BYTES) {
-                        Log.e(
-                            TAG,
-                            "Size mismatch: Content-Length=$total, expected=$expectedSize, " +
-                                "delta=$delta > tolerance=$SIZE_TOLERANCE_BYTES"
-                        )
-                        return@runCatching null
-                    }
-                }
-
-                body.byteStream().use { input ->
-                    destFile.outputStream().use { output ->
-                        val buf = ByteArray(64 * 1024)
-                        var downloaded = 0L
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n <= 0) break
-                            output.write(buf, 0, n)
-                            downloaded += n
-                            onProgress(downloaded, total)
-                        }
-                    }
-                }
-                destFile
-            }
+            // Cert-pinned download with fail-open fallback. If the pin
+            // check fails (CA rotation), the unpinned client retries the
+            // same request under standard HTTPS. APK signature verification
+            // (verifySignature / installApk) remains the hard gate.
+            GitHubCertPins.executeWithPinFallback(
+                tag = "$TAG.download",
+                pinnedAttempt = {
+                    executeDownload(pinnedClient, request, destFile, expectedSize, onProgress)
+                },
+                unpinnedAttempt = {
+                    executeDownload(unpinnedClient, request, destFile, expectedSize, onProgress)
+                },
+            )
         }.getOrNull()
     }
 
@@ -247,6 +240,56 @@ class ApkDownloader @Inject constructor(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Performs the actual HTTP download using [httpClient] and writes the
+     * body to [destFile].  Shared by the pinned and unpinned attempt arms of
+     * [GitHubCertPins.executeWithPinFallback].
+     *
+     * Returns [destFile] on success, null on any HTTP / IO / size-sanity failure.
+     */
+    private fun executeDownload(
+        httpClient: OkHttpClient,
+        request: okhttp3.Request,
+        destFile: File,
+        expectedSize: Long,
+        onProgress: (downloaded: Long, total: Long) -> Unit,
+    ): File? {
+        return httpClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) return@use null
+            val body = resp.body ?: return@use null
+            val total = body.contentLength() // -1 if unknown
+
+            // Fix 5: size sanity — reject if Content-Length diverges from
+            // the expected size by more than 1 MiB.
+            if (expectedSize > 0 && total > 0) {
+                val delta = Math.abs(total - expectedSize)
+                if (delta > SIZE_TOLERANCE_BYTES) {
+                    Log.e(
+                        TAG,
+                        "Size mismatch: Content-Length=$total, expected=$expectedSize, " +
+                            "delta=$delta > tolerance=$SIZE_TOLERANCE_BYTES"
+                    )
+                    return@use null
+                }
+            }
+
+            body.byteStream().use { input ->
+                destFile.outputStream().use { output ->
+                    val buf = ByteArray(64 * 1024)
+                    var downloaded = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        output.write(buf, 0, n)
+                        downloaded += n
+                        onProgress(downloaded, total)
+                    }
+                }
+            }
+            destFile
+        }
+    }
 
     private fun sha256(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256")

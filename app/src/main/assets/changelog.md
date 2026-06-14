@@ -1,3 +1,14 @@
+## [0.1.15-alpha] — 2026-06-14
+
+The security follow-ups from the last audit, now done properly.
+
+### Security
+- **Update & content downloads are now certificate-pinned** to GitHub's real CAs (verified against the live certificates), so a network attacker with a rogue certificate can't slip in tampered content. If GitHub ever rotates its certificate authority, the app safely falls back to normal HTTPS (and logs it) rather than breaking your updates — defense without the risk of bricking.
+- **Tuning paths are now symlink-checked** — a custom or community tuning path that secretly points at a dangerous system file is blocked, while legitimate device paths still work.
+
+### Added
+- **Benchmarks now stop if your battery gets genuinely low** (under 15%, and not charging) so a long run can't drain you into a shutdown. This is separate from the existing "too hot" safety stop — and it only triggers on a real battery reading, never a guess.
+
 ## [0.1.14-alpha] — 2026-06-14
 
 A big audit-and-harden pass — dozens of fixes plus four new features. Nothing you do day-to-day changes; the app is just safer, lighter, and more useful.

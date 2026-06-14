@@ -123,6 +123,9 @@ object BenchRating {
             // Legacy DB rows written before the rename still deserialise as ABORTED_BATTERY;
             // display the honest label so old records don't claim "low battery" either.
             BenchOutcome.ABORTED_BATTERY -> "Aborted — battery got too hot (≥ 45 °C)"
+            // Distinct from ABORTED_BATTERY_TEMP: this is a CHARGE LEVEL condition,
+            // not a temperature condition. Only emitted when a real percent read is available.
+            BenchOutcome.ABORTED_BATTERY_LOW -> "Aborted — battery low (under 15%)"
             BenchOutcome.ABORTED_DURATION -> "Aborted — time limit"
             BenchOutcome.ABORTED_USER -> "Aborted by user"
             BenchOutcome.FAILED_NATIVE -> "Benchmark failed (native crash)"
