@@ -4,6 +4,8 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
 import io.github.mayusi.calibratesoc.data.capability.SysfsProber
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -19,10 +21,15 @@ import javax.inject.Singleton
  * Sample cadence is parameterised because the benchmark module wants
  * 4 Hz during stress runs while the idle dashboard is happy at 1 Hz.
  *
- * One quirk worth flagging: thermal-zone enumeration is re-run on every
- * sample, because some kernels add hwmon nodes hot (USB-C dock, charger
- * insertion). The cost is a handful of `readlink` ops per zone — well
- * under 1 ms in practice.
+ * Thermal zone topology is cached in [SysfsProber] (30-second TTL).
+ * The hot tick calls [SysfsProber.readThermalZoneTemps] which only
+ * re-reads the temperature files using the cached paths — no directory
+ * enumeration per sample. A hot-added zone (USB-C dock insertion) will
+ * be picked up within the next TTL window.
+ *
+ * Independent samplers run concurrently via [coroutineScope] + [async]
+ * so their sysfs reads overlap on Dispatchers.IO thread pool, cutting
+ * per-tick wall time roughly proportional to the number of samplers.
  */
 @Singleton
 class MonitorService @Inject constructor(
@@ -48,13 +55,32 @@ class MonitorService @Inject constructor(
 
         while (true) {
             val now = System.currentTimeMillis()
-            val freqs = perCoreFreq.sample()
-            val loads = cpuStat.sample()
-            val mem = meminfo.sample()
-            val gpu = gpuLoad.sample(gpuProbe)
-            val batt = battery.sample()
-            val zones = sysfsProber.probeThermalZones().map {
-                ZoneTemp(zoneId = it.id, label = it.type, tempMilliC = it.currentTempMilliC)
+
+            // Run independent I/O-bound samplers concurrently.
+            // CpuStatSampler is stateful (delta between calls) so it must not
+            // be reordered relative to itself, but running it in parallel with
+            // the other samplers is safe — it reads /proc/stat independently.
+            // BatterySampler uses Android binder, not sysfs, and is independent.
+            val (freqs, loads, mem, gpu, batt, zones) = coroutineScope {
+                val dFreqs = async { perCoreFreq.sample() }
+                val dLoads = async { cpuStat.sample() }
+                val dMem   = async { meminfo.sample() }
+                val dGpu   = async { gpuLoad.sample(gpuProbe) }
+                val dBatt  = async { battery.sample() }
+                // Use the cheap temp-only read — zone list is cached by SysfsProber.
+                val dZones = async {
+                    sysfsProber.readThermalZoneTemps().map {
+                        ZoneTemp(zoneId = it.id, label = it.type, tempMilliC = it.currentTempMilliC)
+                    }
+                }
+                SamplerResults(
+                    freqs = dFreqs.await(),
+                    loads = dLoads.await(),
+                    mem   = dMem.await(),
+                    gpu   = dGpu.await(),
+                    batt  = dBatt.await(),
+                    zones = dZones.await(),
+                )
             }
 
             emit(
@@ -77,6 +103,16 @@ class MonitorService @Inject constructor(
             delay(intervalMs)
         }
     }.flowOn(Dispatchers.IO)
+
+    /** Scratch holder so [coroutineScope] results can be destructured. */
+    private data class SamplerResults(
+        val freqs: List<Int>,
+        val loads: List<Int>,
+        val mem: MeminfoSampler.MemSample,
+        val gpu: GpuLoadSampler.Result,
+        val batt: BatterySampler.Sample,
+        val zones: List<ZoneTemp>,
+    )
 
     companion object {
         const val DEFAULT_INTERVAL_MS = 1_000L

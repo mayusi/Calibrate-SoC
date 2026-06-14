@@ -5,6 +5,7 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
+import io.github.mayusi.calibratesoc.data.remote.ValidationRegexes
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryEntry
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.flow.first
@@ -192,10 +193,9 @@ class BackupManager @Inject constructor(
      *    DO reach the script as an executable value, so they stay strict.
      */
     internal fun validateProfile(profile: UserProfile): String? {
-        // Control chars + line breaks only — for display-only name/description.
-        val displayUnsafe = Regex("""[\p{Cntrl}\n\r]""")
-        // Strict shell-metachar + whitespace + slash — for the executable governor value.
-        val governorInvalid = Regex("""['"`$;&|<>(){}]|\p{Cntrl}|[\s/]""")
+        // Shared canonical regexes — single source of truth in ValidationRegexes.
+        val displayUnsafe = ValidationRegexes.DISPLAY_UNSAFE
+        val governorInvalid = ValidationRegexes.GOVERNOR_INVALID
 
         if (displayUnsafe.containsMatchIn(profile.name)) {
             return "name contains control characters"

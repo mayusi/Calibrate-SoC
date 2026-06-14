@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.SportsEsports
+import androidx.compose.material.icons.outlined.Thermostat
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -23,6 +25,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -31,6 +34,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.session.GameSession
 import io.github.mayusi.calibratesoc.data.session.SessionSummary
+import io.github.mayusi.calibratesoc.data.session.SessionStatsAggregator
+import io.github.mayusi.calibratesoc.ui.components.AlertCard
+import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartCard
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
@@ -63,6 +69,8 @@ fun SessionDetailScreen(
 
     val session by viewModel.session.collectAsStateWithLifecycle()
     val fullSummary by viewModel.fullSummary.collectAsStateWithLifecycle()
+    val throttleEvents by viewModel.throttleEvents.collectAsStateWithLifecycle()
+    val throttleSummary by viewModel.throttleSummary.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -98,6 +106,14 @@ fun SessionDetailScreen(
         ) {
             item { SessionHeaderCard(s) }
             item { SessionSummaryCard(s, fullSummary ?: s.summary) }
+            // ── Feature 1: Thermal Event Timeline ─────────────────────────
+            item {
+                ThermalEventTimelineCard(
+                    session = s,
+                    events = throttleEvents,
+                    summaryLine = throttleSummary,
+                )
+            }
             // Chart (a): FPS over time — only when FPS was available
             if (s.fpsAvailableDuringSampling) {
                 item {
@@ -293,6 +309,128 @@ private fun SessionSummaryCard(session: GameSession, summary: SessionSummary) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/**
+ * Thermal Event Timeline card — Feature 1.
+ *
+ * Shows:
+ *   - A plain-language summary sentence (or honest "no events" / "not enough data").
+ *   - A scrollable list of individual heuristic throttle events with timestamp,
+ *     FPS before/after, and CPU temperature.
+ *
+ * Honesty rules:
+ *   - Events are labelled "(heuristic)" — they are not confirmed kernel sysfs throttle
+ *     records; they are detected by the temp-90th-percentile + FPS-dip algorithm.
+ *   - When FPS was not recorded, we show an explicit "FPS not available" message
+ *     rather than pretending we can detect throttle events.
+ *   - When the session has too few samples, we say so.
+ */
+@Composable
+private fun ThermalEventTimelineCard(
+    session: GameSession,
+    events: List<SessionStatsAggregator.ThermalThrottleEvent>,
+    summaryLine: String?,
+) {
+    SectionCard("Thermal event timeline", icon = Icons.Outlined.Thermostat) {
+        when {
+            // Case 1: FPS was not available — cannot detect throttle events.
+            !session.fpsAvailableDuringSampling -> {
+                Text(
+                    "Throttle event detection requires FPS data. " +
+                        "Run a session with the HUD active to enable this analysis.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // Case 2: Session too short.
+            session.samples.size < SessionStatsAggregator.MIN_SAMPLES_FOR_ANALYSIS -> {
+                Text(
+                    "Session too short for throttle analysis " +
+                        "(need ≥ ${SessionStatsAggregator.MIN_SAMPLES_FOR_ANALYSIS} samples, " +
+                        "got ${session.samples.size}).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // Case 3: No events found.
+            events.isEmpty() -> {
+                Text(
+                    "No thermal throttle events detected (heuristic). " +
+                        "CPU temperatures stayed below the 90th-percentile threshold " +
+                        "without a simultaneous FPS dip.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // Case 4: Events detected — show summary + list.
+            else -> {
+                // Summary sentence
+                if (summaryLine != null) {
+                    AlertCard(
+                        type = AlertType.WARNING,
+                        title = "Thermal events detected",
+                        message = summaryLine,
+                    )
+                    Spacer(Modifier.height(Spacing.group))
+                }
+                Text(
+                    "Heuristic: events fired when CPU was in the hottest 10 % of the session " +
+                        "AND FPS dropped >10 % below the 30-second rolling average. " +
+                        "Not a confirmed kernel throttle record.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(Spacing.group))
+                events.forEachIndexed { index, event ->
+                    ThermalEventRow(index + 1, event)
+                    if (index < events.lastIndex) {
+                        Spacer(Modifier.height(Spacing.dense))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThermalEventRow(
+    index: Int,
+    event: SessionStatsAggregator.ThermalThrottleEvent,
+) {
+    val elapsedSec = event.elapsedMs / 1_000L
+    val m = elapsedSec / 60
+    val s = elapsedSec % 60
+    val timeStr = if (m > 0) "${m}m ${s}s" else "${s}s"
+    val fpsBefore = "%.0f".format(event.fpsBefore)
+    val fpsAfter = event.fpsAtEvent?.let { "%.0f".format(it) } ?: "?"
+    val temp = "%.0f°C".format(event.cpuTempC)
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Thermostat,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.size(16.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Event $index  @  $timeStr",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "FPS ${fpsBefore}→${fpsAfter}   CPU $temp",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

@@ -218,9 +218,13 @@ class AynScriptGenerator @Inject constructor() {
         // subshell with the subshell's stderr redirected DOES catch it —
         // `( printf ... > file ) 2>/dev/null`. Keeps the runner output
         // clean even when a node is momentarily unwritable.
-        if (chmodLock) appendLine("[ -e $path ] && ( chmod 666 $path ) 2>/dev/null")
-        appendLine("[ -e $path ] && ( printf %s '$khz' > $path ) 2>/dev/null")
-        if (chmodLock) appendLine("[ -e $path ] && ( chmod 444 $path ) 2>/dev/null")
+        // Defence-in-depth: single-quote the path too. policyId is an Int and node is a
+        // hardcoded string so neither can contain metacharacters, but quoting consistently
+        // makes the shell lines audit-friendly and safe against future code changes.
+        val qpath = shellSingleQuote(path)
+        if (chmodLock) appendLine("[ -e $qpath ] && ( chmod 666 $qpath ) 2>/dev/null")
+        appendLine("[ -e $qpath ] && ( printf %s '$khz' > $qpath ) 2>/dev/null")
+        if (chmodLock) appendLine("[ -e $qpath ] && ( chmod 444 $qpath ) 2>/dev/null")
     }
 
     private fun StringBuilder.emitGovernorWrite(policyId: Int, governor: String) {
@@ -228,13 +232,15 @@ class AynScriptGenerator @Inject constructor() {
         // Governors aren't policed by perfd the way freq caps are, so no
         // chmod sandwich needed. Subshell-wrap so a redirect-create
         // failure (EINVAL: governor not in this kernel) stays quiet.
-        // shellSingleQuote() ensures a governor name with shell metacharacters
-        // cannot break out of the single-quote context.
-        appendLine("[ -e $path ] && ( printf %s ${shellSingleQuote(governor)} > $path ) 2>/dev/null")
+        // Shell-quote BOTH the path (defence-in-depth; it's policy-derived but
+        // quoting consistently is good audit hygiene) and the governor value
+        // (shellSingleQuote prevents metacharacter injection from user/profile strings).
+        val qpath = shellSingleQuote(path)
+        appendLine("[ -e $qpath ] && ( printf %s ${shellSingleQuote(governor)} > $qpath ) 2>/dev/null")
     }
 
     /**
-     * Generic sysfs write: existence guard + chmod sandwich + shell-escaped value.
+     * Generic sysfs write: existence guard + chmod sandwich + shell-escaped path and value.
      *
      * Used for every entry in [Preset.extraSysfs] — governor tunables, VM
      * sysctls, I/O scheduler, schedtune/uclamp, input boost, DDR, etc.
@@ -243,13 +249,16 @@ class AynScriptGenerator @Inject constructor() {
      * doesn't enforce a read-only mode it's a harmless no-op; on nodes where
      * perfd/DCVS races the write (e.g. CPU cpufreq) it keeps the value sticky.
      *
-     * [shellSingleQuote] ensures the value cannot escape its shell context even
-     * if it contains apostrophes, dollar signs, semicolons, or backticks.
+     * Both the PATH and the VALUE are single-quote-escaped via [shellSingleQuote]:
+     * the path has already been validated by [TunableMetadata.validateCustomSysfsPath]
+     * (which rejects shell metacharacters), but we quote it here too for
+     * defence-in-depth and consistency with the other emit* helpers.
      */
     internal fun StringBuilder.emitSysfsWrite(path: String, value: String) {
-        appendLine("[ -e $path ] && ( chmod 666 $path ) 2>/dev/null")
-        appendLine("[ -e $path ] && ( printf %s ${shellSingleQuote(value)} > $path ) 2>/dev/null")
-        appendLine("[ -e $path ] && ( chmod 444 $path ) 2>/dev/null")
+        val qpath = shellSingleQuote(path)
+        appendLine("[ -e $qpath ] && ( chmod 666 $qpath ) 2>/dev/null")
+        appendLine("[ -e $qpath ] && ( printf %s ${shellSingleQuote(value)} > $qpath ) 2>/dev/null")
+        appendLine("[ -e $qpath ] && ( chmod 444 $qpath ) 2>/dev/null")
     }
 
     private fun StringBuilder.emitGpuWrite(gpuRoot: String, relativePath: String, value: String) {
@@ -259,10 +268,12 @@ class AynScriptGenerator @Inject constructor() {
         // unconditionally for safety — chmod-on-non-existent path is
         // a harmless error. Subshell-wrap the write so a redirect-create
         // failure stays out of the runner output.
-        // shellSingleQuote() ensures that gpuGovernor (a user/profile string)
-        // cannot inject shell commands even if it contains metacharacters.
-        appendLine("[ -e $path ] && ( chmod 666 $path ) 2>/dev/null")
-        appendLine("[ -e $path ] && ( printf %s ${shellSingleQuote(value)} > $path ) 2>/dev/null")
-        appendLine("[ -e $path ] && ( chmod 444 $path ) 2>/dev/null")
+        // Single-quote BOTH the path (gpuRoot comes from a device probe, so
+        // quoting is defence-in-depth) and the value (user/profile string —
+        // shellSingleQuote prevents metacharacter injection).
+        val qpath = shellSingleQuote(path)
+        appendLine("[ -e $qpath ] && ( chmod 666 $qpath ) 2>/dev/null")
+        appendLine("[ -e $qpath ] && ( printf %s ${shellSingleQuote(value)} > $qpath ) 2>/dev/null")
+        appendLine("[ -e $qpath ] && ( chmod 444 $qpath ) 2>/dev/null")
     }
 }

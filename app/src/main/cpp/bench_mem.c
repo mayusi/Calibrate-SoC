@@ -5,10 +5,17 @@
 
 int64_t calibratesoc_bench_mem_triad(int32_t array_mb, int32_t iters) {
     if (array_mb < 1) array_mb = 1;
+    /* Clamp to 8 GiB so a corrupt caller cannot trigger a multi-gigabyte
+     * malloc that OOM-kills the process. Real benchmark configs use ≤256 MB. */
+    if (array_mb > 8192) array_mb = 8192;
     if (iters < 1) iters = 1;
 
-    /* N elements per array. 8 bytes per double. */
-    const size_t bytes = (size_t)array_mb * 1024u * 1024u;
+    /* N elements per array. 8 bytes per double.
+     * Use (size_t) casts for both multipliers so the entire multiplication
+     * is performed in size_t arithmetic — avoids 32-bit overflow on ILP32
+     * targets where 1024u * 1024u = 1048576 fits, but the product with a
+     * large array_mb could wrap before the (size_t) cast was applied. */
+    const size_t bytes = (size_t)array_mb * (size_t)1024 * (size_t)1024;
     const size_t n = bytes / sizeof(double);
 
     double *a = (double *)malloc(bytes);

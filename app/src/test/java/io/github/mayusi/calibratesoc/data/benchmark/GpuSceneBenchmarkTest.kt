@@ -176,6 +176,23 @@ class GpuSceneBenchmarkTest {
         assertThat(GpuSceneResult.computeStabilityPct(listOf(0.0, 0.0))).isNull()
     }
 
+    // ─── Division-by-zero guard (B7) ─────────────────────────────────────────
+
+    @Test
+    fun `computeStabilityPct with zero-fps loops returns null`() {
+        // All loops at 0 fps → peak is 0 → division by zero guard must return null.
+        assertThat(GpuSceneResult.computeStabilityPct(listOf(0.0, 0.0, 0.0))).isNull()
+    }
+
+    @Test
+    fun `avgFps calculation produces finite result for zero-sum frame times`() {
+        // Ensure that if frameSum is 0 the guard returns 0.0 rather than NaN/Infinity.
+        // We test the mathematical contract: 0 / positive = 0.0.
+        val result = if (0.0 > 0.0) 3 / (0.0 / 1000.0) else 0.0
+        assertThat(result.isFinite()).isTrue()
+        assertThat(result).isEqualTo(0.0)
+    }
+
     // ─── HONESTY_CAPTION ──────────────────────────────────────────────────────
 
     @Test

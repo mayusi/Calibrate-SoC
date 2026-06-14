@@ -1,8 +1,11 @@
 package io.github.mayusi.calibratesoc.data.tunables.writer
 
+import android.content.Context
 import android.os.IBinder
 import android.os.Parcel
+import android.provider.Settings
 import android.util.Log
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.BuildConfig
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
@@ -54,9 +57,24 @@ private const val TAG = "CalibrateSoC-PServer"
  * everything.
  */
 @Singleton
-class PServerWriter @Inject constructor() : SysfsWriter {
+class PServerWriter @Inject constructor(
+    @ApplicationContext private val context: Context,
+) : SysfsWriter {
 
-    override suspend fun read(id: TunableId): String? = null
+    /**
+     * Read the current value of a SETTINGS_SYSTEM tunable.
+     *
+     * Used by [io.github.mayusi.calibratesoc.data.tunables.TunableWriter] to
+     * capture the pre-write snapshot before PServer applies a change, enabling
+     * boot-revert to restore the original value. Returns null for non-SETTINGS_SYSTEM
+     * tunables (PServerWriter only handles that kind) and on any error.
+     */
+    override suspend fun read(id: TunableId): String? {
+        if (id.kind != TunableKind.SETTINGS_SYSTEM) return null
+        return runCatching {
+            Settings.System.getString(context.contentResolver, id.target)
+        }.getOrNull()
+    }
 
     override suspend fun canWrite(id: TunableId): Boolean {
         if (id.kind != TunableKind.SETTINGS_SYSTEM) return false
@@ -66,6 +84,17 @@ class PServerWriter @Inject constructor() : SysfsWriter {
     override suspend fun write(id: TunableId, value: String): WriteResult {
         if (id.kind != TunableKind.SETTINGS_SYSTEM) {
             return WriteResult.CapabilityDenied(id, "PServerWriter handles SETTINGS_SYSTEM only.")
+        }
+        // Guard the Settings key name: valid Settings.System keys are always simple tokens
+        // ([A-Za-z0-9_.]+). Anything else (spaces, shell metacharacters, etc.) is either
+        // a programming error or an injection attempt — reject it before building the command.
+        if (!id.target.matches(Regex("[a-zA-Z0-9_.]+"))) {
+            return WriteResult.Rejected(
+                id = id,
+                errno = -1,
+                message = "Settings key '${id.target}' contains disallowed characters " +
+                    "(only [A-Za-z0-9_.] are valid Settings.System key characters).",
+            )
         }
         return withContext(Dispatchers.IO) {
             if (BuildConfig.DEBUG) Log.i(TAG, "write(): target=${id.target} value=$value")
@@ -79,7 +108,12 @@ class PServerWriter @Inject constructor() : SysfsWriter {
             }
             if (BuildConfig.DEBUG) Log.i(TAG, "write(): got binder, transacting...")
 
-            val cmd = "settings put system ${id.target} $value"
+            // Shell-quote both the key and the value so that a value containing spaces,
+            // quotes, dollar signs, or other metacharacters cannot inject additional shell
+            // commands into the `settings put system` invocation (which runs as root via
+            // PServer). The key has already been validated to [A-Za-z0-9_.] above, so
+            // quoting it is purely defence-in-depth; quoting the value is necessary.
+            val cmd = "settings put system ${id.target.shellQuote()} ${value.shellQuote()}"
             val (status, stdout) = try {
                 transact(binder, cmd)
             } catch (se: SecurityException) {
@@ -239,4 +273,19 @@ class PServerWriter @Inject constructor() : SysfsWriter {
         const val BINDER_NAME = "PServerBinder"
         const val TRANSACT_CODE_EXEC = 1
     }
+
+    // ── Shell quoting ─────────────────────────────────────────────────────────
+
+    /**
+     * POSIX single-quote escaping for a shell argument.
+     *
+     * Identical in logic to [AynScriptGenerator.shellSingleQuote] and
+     * [RootWriter.shellQuote]. Defined here so [PServerWriter] is self-contained
+     * and does not need to depend on the script-generator package.
+     *
+     * The resulting string is always safe to embed between outer single quotes
+     * in a generated shell command, even if [this] contains single-quotes,
+     * dollar signs, backticks, semicolons, or any other shell-special character.
+     */
+    private fun String.shellQuote(): String = "'" + replace("'", "'\\''") + "'"
 }

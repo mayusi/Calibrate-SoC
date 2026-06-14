@@ -5,6 +5,7 @@ import android.os.Environment
 import com.topjohnwu.superuser.Shell
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.util.toSafeFilename
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -38,7 +39,7 @@ class AynScriptDeployer @Inject constructor(
      * surfaces an explanatory dialog).
      */
     fun deploy(preset: Preset, scriptBody: String): Deployed {
-        val filename = "${preset.name.toSafeFilename()}.sh"
+        val filename = "${toSafeFilename(preset.name, "preset")}.sh"
 
         // Preferred: /sdcard/CalibrateSoC/<filename> — visible to every
         // file-picker on the device.
@@ -65,7 +66,7 @@ class AynScriptDeployer @Inject constructor(
      */
     suspend fun deployForBoot(preset: Preset, scriptBody: String): BootDeployed =
         withContext(Dispatchers.IO) {
-            val filename = "calibratesoc-${preset.id.toSafeFilename()}.sh"
+            val filename = "calibratesoc-${toSafeFilename(preset.id, "preset")}.sh"
             val candidates = listOf(
                 "/data/adb/service.d" to "Magisk",
                 "/data/adb/ksu/post-fs-data.d" to "KernelSU",
@@ -80,9 +81,14 @@ class AynScriptDeployer @Inject constructor(
                     scriptBody.toByteArray(Charsets.UTF_8),
                     android.util.Base64.NO_WRAP,
                 )
+                // Single-quote the target path: toSafeFilename() already strips most hostile
+                // characters, but single-quoting is defence-in-depth and ensures the path
+                // is safe even if a future caller passes an unsanitised filename, or if the
+                // sanitiser logic ever changes. The base64 blob is already protected by the
+                // surrounding single-quote in `echo '$b64'`.
                 val res = Shell.cmd(
-                    "echo '$b64' | base64 -d > $target",
-                    "chmod 755 $target",
+                    "echo '$b64' | base64 -d > '$target'",
+                    "chmod 755 '$target'",
                 ).exec()
                 return@withContext if (res.isSuccess) {
                     BootDeployed(path = target, manager = manager, success = true, error = null)
@@ -102,14 +108,6 @@ class AynScriptDeployer @Inject constructor(
                 error = "No Magisk or KernelSU service directory found. Install one of them (or use Apply once and run via Odin Settings each boot).",
             )
         }
-
-    /** Strip filesystem-hostile characters from preset names. The
-     *  result is safe for VFAT (sdcard), ext4, and Android's
-     *  MediaStore. Empty-result fallback: "preset". */
-    private fun String.toSafeFilename(): String {
-        val cleaned = trim().replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_')
-        return cleaned.ifBlank { "preset" }
-    }
 
     data class Deployed(
         val path: String,

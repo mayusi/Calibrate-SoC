@@ -194,6 +194,72 @@ class BenchRatingTest {
         assertThat(rating.abortReason).contains("thermal")
     }
 
+    // ─── B2 honest rename: ABORTED_BATTERY_TEMP ──────────────────────
+
+    @Test
+    fun `ABORTED_BATTERY_TEMP abortReason mentions battery hot not low battery`() {
+        val report = reportWithSoc("Qualcomm", "Snapdragon 8 Gen 2")
+        val run = BenchRun(
+            id = 2L,
+            name = "test",
+            flavor = BenchFlavor.FULL,
+            startedAtMs = 0L,
+            durationMs = 10_000L,
+            snapshot = SystemSnapshot(
+                capturedAtMs = 0L,
+                deviceModel = "Test",
+                socModel = "Snapdragon 8 Gen 2",
+                androidVersion = "14",
+                privilegeTier = "NONE",
+                cpuPolicies = emptyList(),
+                gpuMinHz = null,
+                gpuMaxHz = null,
+                gpuGovernor = null,
+                appVersion = "0.1.9",
+            ),
+            kernels = KernelScores(cpuIntegerSingle = 1000L),
+            throttleSamples = emptyList(),
+            outcome = BenchOutcome.ABORTED_BATTERY_TEMP,
+        )
+        val rating = BenchRating.rate(run, report)
+        assertThat(rating.word).isNull()
+        assertThat(rating.abortReason).isNotNull()
+        // Must say "hot" — not the old misleading "low battery".
+        assertThat(rating.abortReason).ignoringCase().contains("hot")
+        assertThat(rating.abortReason).ignoringCase().doesNotContain("low battery")
+    }
+
+    @Test
+    fun `legacy ABORTED_BATTERY also shows hot not low battery`() {
+        // Rows stored before the rename must not display "low battery" either.
+        val report = reportWithSoc("Qualcomm", "Snapdragon 8 Gen 2")
+        val run = BenchRun(
+            id = 3L,
+            name = "test",
+            flavor = BenchFlavor.FULL,
+            startedAtMs = 0L,
+            durationMs = 10_000L,
+            snapshot = SystemSnapshot(
+                capturedAtMs = 0L,
+                deviceModel = "Test",
+                socModel = "Snapdragon 8 Gen 2",
+                androidVersion = "14",
+                privilegeTier = "NONE",
+                cpuPolicies = emptyList(),
+                gpuMinHz = null,
+                gpuMaxHz = null,
+                gpuGovernor = null,
+                appVersion = "0.1.8",
+            ),
+            kernels = KernelScores(cpuIntegerSingle = 1000L),
+            throttleSamples = emptyList(),
+            outcome = BenchOutcome.ABORTED_BATTERY,
+        )
+        val rating = BenchRating.rate(run, report)
+        assertThat(rating.abortReason).isNotNull()
+        assertThat(rating.abortReason).ignoringCase().doesNotContain("low battery")
+    }
+
     // ─── Helper builders ──────────────────────────────────────────────
 
     private fun reportWithSoc(

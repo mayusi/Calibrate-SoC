@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.data.tunables
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.profiles.ProfileApplier
@@ -12,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+private const val TAG = "BootRevertReceiver"
 
 /**
  * On BOOT_COMPLETED we replay the snapshot journal in reverse to undo
@@ -47,7 +50,17 @@ class BootRevertReceiver : BroadcastReceiver() {
                 // sysfs values don't survive reboot, so the journal
                 // either matches reality (we wrote them, they're
                 // still in place) or the revert no-ops.
-                tunableWriter.revertAll(report)
+                val revertSummary = tunableWriter.revertAll(report)
+                if (revertSummary.failed == 0) {
+                    Log.i(TAG, "Boot revert complete: ${revertSummary.ok}/${revertSummary.totalEntries} entries reverted successfully.")
+                } else {
+                    Log.w(
+                        TAG,
+                        "Boot revert partial: ${revertSummary.ok} succeeded, " +
+                            "${revertSummary.failed} FAILED of ${revertSummary.totalEntries} total entries. " +
+                            "Journal retained for next boot retry.",
+                    )
+                }
                 // Then re-apply any profile the user asked to persist.
                 // Last write wins on conflicting policies.
                 val applyAtBoot = profileRepository.snapshot().profiles

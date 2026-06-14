@@ -262,23 +262,86 @@ class SysfsProber @Inject constructor(
 
     // --- Thermal ---------------------------------------------------------
 
-    fun probeThermalZones(): List<ThermalZoneProbe> {
+    /**
+     * Cached list of (tempPath, id, typeName, role) built once on first call.
+     * Hot-added zones (e.g. USB-C dock insertion) will be missed until the
+     * JVM process restarts — acceptable: zone topology is stable during a game
+     * session and the old comment acknowledged re-enumeration was speculative.
+     * A 30-second TTL refreshes the list occasionally in case of kernel quirks.
+     */
+    private data class ThermalZoneEntry(
+        val id: Int,
+        val typeName: String,
+        val tempPath: Path,
+        val role: ThermalRole,
+    )
+
+    @Volatile private var thermalZoneCache: List<ThermalZoneEntry>? = null
+    @Volatile private var thermalZoneCacheBuiltAt: Long = 0L
+
+    private fun buildThermalZoneCache(): List<ThermalZoneEntry> {
         val root = "/sys/class/thermal".toPath()
         return listOrEmpty(root)
             .filter { it.name.startsWith("thermal_zone") }
             .mapNotNull { zone ->
-                val idStr = zone.name.removePrefix("thermal_zone")
-                val id = idStr.toIntOrNull() ?: return@mapNotNull null
+                val id = zone.name.removePrefix("thermal_zone").toIntOrNull() ?: return@mapNotNull null
                 val type = readStringOrNull(zone / "type").orEmpty()
-                val temp = readIntOrNull(zone / "temp") ?: return@mapNotNull null
-                ThermalZoneProbe(
+                ThermalZoneEntry(
                     id = id,
-                    type = type,
-                    currentTempMilliC = temp,
+                    typeName = type,
+                    tempPath = zone / "temp",
                     role = classifyZone(type),
                 )
             }
             .sortedBy { it.id }
+    }
+
+    private fun thermalZones(): List<ThermalZoneEntry> {
+        val now = System.currentTimeMillis()
+        val cached = thermalZoneCache
+        if (cached != null && (now - thermalZoneCacheBuiltAt) < THERMAL_ZONE_CACHE_TTL_MS) {
+            return cached
+        }
+        val fresh = buildThermalZoneCache()
+        thermalZoneCache = fresh
+        thermalZoneCacheBuiltAt = now
+        return fresh
+    }
+
+    /**
+     * Full probe: enumerates zones, reads types AND current temps. Used for the
+     * initial capability report and by [probeThermalExtras].
+     */
+    fun probeThermalZones(): List<ThermalZoneProbe> {
+        return thermalZones().mapNotNull { entry ->
+            val temp = readIntOrNull(entry.tempPath) ?: return@mapNotNull null
+            ThermalZoneProbe(
+                id = entry.id,
+                type = entry.typeName,
+                currentTempMilliC = temp,
+                role = entry.role,
+            )
+        }
+    }
+
+    /**
+     * Lightweight hot-path read: uses the cached zone list and only re-reads
+     * the temperature files. Call this from [MonitorService]'s tick instead of
+     * [probeThermalZones] to avoid re-enumerating the directory every sample.
+     *
+     * Zones whose temp file returns null (kernel removed the node mid-session)
+     * are silently skipped — the caller sees a shorter list rather than a crash.
+     */
+    fun readThermalZoneTemps(): List<ThermalZoneProbe> {
+        return thermalZones().mapNotNull { entry ->
+            val temp = readIntOrNull(entry.tempPath) ?: return@mapNotNull null
+            ThermalZoneProbe(
+                id = entry.id,
+                type = entry.typeName,
+                currentTempMilliC = temp,
+                role = entry.role,
+            )
+        }
     }
 
     private fun classifyZone(type: String): ThermalRole {
@@ -645,6 +708,14 @@ class SysfsProber @Inject constructor(
     private fun parseSpaceSeparatedStrings(p: Path): List<String> =
         readStringOrNull(p)?.split(Regex("\\s+"))?.filter { it.isNotBlank() } ?: emptyList()
 
+    // parseSpaceSeparatedInts already ends in .sorted(); no second sort needed.
     private fun parseRelatedCpus(p: Path): List<Int> =
-        parseSpaceSeparatedInts(p).sorted()
+        parseSpaceSeparatedInts(p)
+
+    companion object {
+        /** How long the thermal zone directory enumeration is cached (ms).
+         *  30 s is long enough to avoid per-tick I/O; short enough to catch
+         *  a dock insertion within the first sample after the user plugs in. */
+        private const val THERMAL_ZONE_CACHE_TTL_MS = 30_000L
+    }
 }

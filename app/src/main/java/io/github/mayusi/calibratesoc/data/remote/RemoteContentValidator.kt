@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc.data.remote
 
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
 
 /**
  * Pure-Kotlin (no Android runtime) validator for remote OTA content.
@@ -23,25 +24,21 @@ internal object RemoteContentValidator {
     const val PRESETS_URL  = "$BASE/presets.json"
 
     // ── Validation regexes ────────────────────────────────────────────────────
+    //
+    // Canonical definitions live in [ValidationRegexes]; these aliases keep the
+    // public API surface stable so any existing call-sites outside this file
+    // continue to compile without change.
 
-    /** Shell metacharacters and ASCII control chars. Matches BackupManager.validateProfile.
-     *  Applied to fields that can reach a generated root SCRIPT (governor, sysfs
-     *  targets/values, daemon names) where an unescaped metacharacter would be a real
-     *  injection risk. */
-    val SHELL_META: Regex       = Regex("""['"`${'$'};&|<>(){}]|\p{Cntrl}""")
-    /** DISPLAY-only fields (preset/adapter name + description + notes) are never fed to a
-     *  shell — the script generator [commentSafe]/[shellSingleQuote]-escapes everything it
-     *  emits. So these only need protection against control chars + line breaks (which
-     *  could break a single-line UI label or comment). Punctuation like `/ ( ) & —` is
-     *  legitimate in a human-readable name ("RP6 — PS2 / GameCube (Sustained)") and must
-     *  be allowed, or our own honest preset names would be rejected. */
-    val DISPLAY_UNSAFE: Regex   = Regex("""[\p{Cntrl}\n\r]""")
-    /** Governor names additionally reject whitespace and '/'. */
-    val GOVERNOR_INVALID: Regex = Regex("""['"`${'$'};&|<>(){}]|\p{Cntrl}|[\s/]""")
-    /** Adapter keys are restricted to lowercase identifier chars. */
-    val KEY_PATTERN: Regex      = Regex("""^[a-z0-9_]+$""")
-    /** Daemon names must not contain shell-dangerous chars or whitespace. */
-    val DAEMON_INVALID: Regex   = Regex("""['"`${'$'};&|<>(){}]|\p{Cntrl}|[\s]""")
+    /** @see ValidationRegexes.SHELL_META */
+    val SHELL_META: Regex       get() = ValidationRegexes.SHELL_META
+    /** @see ValidationRegexes.DISPLAY_UNSAFE */
+    val DISPLAY_UNSAFE: Regex   get() = ValidationRegexes.DISPLAY_UNSAFE
+    /** @see ValidationRegexes.GOVERNOR_INVALID */
+    val GOVERNOR_INVALID: Regex get() = ValidationRegexes.GOVERNOR_INVALID
+    /** @see ValidationRegexes.KEY_PATTERN */
+    val KEY_PATTERN: Regex      get() = ValidationRegexes.KEY_PATTERN
+    /** @see ValidationRegexes.DAEMON_INVALID */
+    val DAEMON_INVALID: Regex   get() = ValidationRegexes.DAEMON_INVALID
 
     /**
      * Validates a remote [DeviceAdapter]. Returns null if valid, or a human-readable
@@ -102,6 +99,23 @@ internal object RemoteContentValidator {
         preset.gpuGovernor?.let { gov ->
             if (GOVERNOR_INVALID.containsMatchIn(gov)) return "gpuGovernor '$gov' contains disallowed characters"
             if (gov.isBlank()) return "gpuGovernor must not be blank"
+        }
+        // Validate extraSysfs entries — both the path key and the value.
+        //
+        // Path: delegated to TunableMetadata.validateCustomSysfsPath() which enforces the
+        // /sys/ or /proc/ prefix, rejects traversal and dangerous nodes, and (after S0(a))
+        // rejects all shell metacharacters.
+        //
+        // Value: control chars and SHELL_META characters are rejected as defence-in-depth.
+        // The script generator (emitSysfsWrite) wraps values in shellSingleQuote() already,
+        // but a control char (e.g. a NUL or ESC) in the value has no legitimate use and
+        // could confuse kernel parsers or audit log consumers even within a quoted context.
+        for ((key, value) in preset.extraSysfs) {
+            val pathErr = TunableMetadata.validateCustomSysfsPath(key)
+            if (pathErr != null) return "extraSysfs path '$key' is invalid: $pathErr"
+            if (SHELL_META.containsMatchIn(value)) {
+                return "extraSysfs value for '$key' contains disallowed characters"
+            }
         }
         return null
     }

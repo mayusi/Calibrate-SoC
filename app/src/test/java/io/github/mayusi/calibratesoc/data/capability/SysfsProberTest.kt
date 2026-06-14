@@ -471,6 +471,26 @@ class SysfsProberTest {
         assertThat(up.governor).isEqualTo("msm-adreno-tz")
     }
 
+    // --- related_cpus ordering (B15 regression) --------------------------
+
+    @Test
+    fun `probeCpuPolicies returns onlineCores in sorted order from unordered related_cpus`() {
+        // related_cpus written in non-ascending order — result must still be sorted.
+        val root = "/sys/devices/system/cpu/cpufreq/policy4".toPath()
+        write(root / "related_cpus", "7 4 5 6")
+        write(root / "scaling_available_frequencies", "1000000 2000000")
+        write(root / "scaling_min_freq", "1000000")
+        write(root / "scaling_max_freq", "2000000")
+        write(root / "scaling_governor", "schedutil")
+
+        val policies = prober.probeCpuPolicies()
+
+        assertThat(policies).hasSize(1)
+        // parseRelatedCpus previously called .sorted() twice (redundant second sort in
+        // parseRelatedCpus); after removing the outer sort the result must still be ordered.
+        assertThat(policies.first().onlineCores).containsExactly(4, 5, 6, 7).inOrder()
+    }
+
     // --- Helpers --------------------------------------------------------
 
     private fun write(path: okio.Path, contents: String) {

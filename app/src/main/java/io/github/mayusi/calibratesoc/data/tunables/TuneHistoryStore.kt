@@ -67,8 +67,13 @@ class TuneHistoryStore @Inject constructor(
         val tmp = File(context.filesDir, "$FILE_NAME.tmp")
         tmp.writeText(json.encodeToString(TuneHistory(entries = next)))
         if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
-            tmp.delete()
+            // renameTo failed (e.g. cross-filesystem move). Fall back to copy +
+            // delete, but guarantee the temp file is removed even if copyTo throws.
+            try {
+                tmp.copyTo(file, overwrite = true)
+            } finally {
+                tmp.delete()
+            }
         }
         _entries.value = next
     }

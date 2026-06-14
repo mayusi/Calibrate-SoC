@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.data.capability
 import android.content.Context
 import android.content.Intent
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.mayusi.calibratesoc.data.util.toSafeFilename
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -54,10 +55,7 @@ class DeviceReportExporter @Inject constructor(
      * AYN Thor, etc.) and pasting each one in turn.
      */
     fun writeToDisk(report: CapabilityReport): String? = runCatching {
-        val safeModel = report.device.model
-            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
-            .trim('_')
-            .ifBlank { "unknown" }
+        val safeModel = toSafeFilename(report.device.model, "unknown")
         @Suppress("DEPRECATION")
         val pub = android.os.Environment.getExternalStorageDirectory()
         val dir = java.io.File(pub, "CalibrateSoC").apply { mkdirs() }

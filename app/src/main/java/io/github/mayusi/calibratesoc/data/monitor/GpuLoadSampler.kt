@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc.data.monitor
 
 import io.github.mayusi.calibratesoc.data.capability.GpuFamily
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
+import io.github.mayusi.calibratesoc.data.util.readSysfsString
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import javax.inject.Inject
@@ -59,9 +60,7 @@ class GpuLoadSampler @Inject constructor(
         return ((parts[0].toDouble() / parts[1]) * 100.0).toInt().coerceIn(0, 100)
     }
 
-    private fun readString(p: okio.Path): String? = runCatching {
-        fs.read(p) { readUtf8() }.trim().ifBlank { null }
-    }.getOrNull()
+    private fun readString(p: okio.Path): String? = fs.readSysfsString(p)
 
     /**
      * Adreno's `gpu_busy_percentage` emits values like "1 %" — the leading

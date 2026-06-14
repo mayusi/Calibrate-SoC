@@ -118,6 +118,16 @@ enum class BenchFlavor {
 enum class BenchOutcome {
     COMPLETED,
     ABORTED_TEMP,
+    /**
+     * The battery got TOO HOT (temperature ≥ 45 °C) during the sustained
+     * throttle test. This is a THERMAL condition on the battery, not a
+     * low-charge condition. Renamed from the legacy ABORTED_BATTERY value
+     * for honesty; ABORTED_BATTERY is kept below for DB backward-compatibility
+     * (rows written before this rename deserialise without crashing).
+     */
+    ABORTED_BATTERY_TEMP,
+    /** Legacy name kept for backward-compatibility with persisted DB rows. Do
+     *  not use in new code — emit [ABORTED_BATTERY_TEMP] instead. */
     ABORTED_BATTERY,
     ABORTED_DURATION,
     ABORTED_USER,

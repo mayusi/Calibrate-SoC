@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.data.tunables.writer
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import io.github.mayusi.calibratesoc.data.util.readSysfsString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okio.FileSystem
@@ -35,11 +36,7 @@ class ShizukuWriter @Inject constructor(
     override suspend fun read(id: TunableId): String? {
         if (id.kind != TunableKind.SYSFS) return null
         return withContext(Dispatchers.IO) {
-            runCatching {
-                val path = id.target.toPath()
-                if (!fs.exists(path)) null
-                else fs.read(path) { readUtf8() }.trim().ifBlank { null }
-            }.getOrNull()
+            fs.readSysfsString(id.target.toPath())
         }
     }
 

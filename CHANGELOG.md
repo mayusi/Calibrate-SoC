@@ -11,6 +11,38 @@ Nothing yet.
 
 ---
 
+## [0.1.14-alpha] — 2026-06-14
+
+Six-dimension audit (bugs, security, perf, robustness, quality, features) with adversarial verification: ~30 fixes + 4 features. 599 unit tests green (was 460).
+
+### Security
+- **Root-script injection hardened (defence-in-depth).** `TunableMetadata.validateCustomSysfsPath` now rejects the full shell-metacharacter set (`; \` $ | & ( ) < > { } [ ] * ? ! ~` + control/NUL), and `AynScriptGenerator` single-quotes every sysfs **path** it emits (previously only the value was quoted). `RemoteContentValidator.validatePreset` now validates `extraSysfs` keys (via the path validator) and values — closing the OTA vector. `PServerWriter` now shell-quotes the Settings key + value and rejects non-`[a-zA-Z0-9_.]` keys. `AynScriptDeployer` quotes the deployed `$target` path. `UpdateChecker` validates the release asset URL at the trust boundary (fail-fast).
+- Shared the validation regexes (`ValidationRegexes`) across `BackupManager` + `RemoteContentValidator` so the security rules can't silently diverge.
+
+### Fixed
+- `PServerWriter.read()` returned null unconditionally → AYN Settings.System tunables never boot-reverted. Now reads the real value via `Settings.System.getString`.
+- HUD `cycleNextProfile` modulo-by-zero crash on rapid taps; sticky `flashActionMessage` during rapid taps (token-based clear); swallowed `updateViewLayout`/session-stop exceptions now logged; DragHandler Choreographer callback removed in `onDestroy` (leak on OOM-kill).
+- Divide-by-zero guards in `GpuSceneBenchmark`/`GpuTriangleStorm`; `bench_mem.c` size_t overflow + bound.
+- Orphaned `.tmp` cleanup in `TunableSnapshotStore`/`TuneHistoryStore`; `BootRevertReceiver` now logs the revert summary.
+- **Honesty:** benchmark `ABORTED_BATTERY` actually checked battery *temperature* → renamed `ABORTED_BATTERY_TEMP` + honest label. (Real charge-% abort is a follow-up.)
+
+### Performance
+- `MonitorService`/`SysfsProber` cache the thermal-zone list and re-read only temps each tick (was a full `/sys/class/thermal` enumeration at 1–4 Hz). `GameFpsSampler` caches its layer-resolution dumpsys (TTL + display-change) and hoists its whitespace regex. Independent monitor samplers now read in parallel. `@Immutable` on `HudUiState`.
+
+### Refactor / Quality
+- Extracted `OverlayService.stepBigCoreMhz` (136-line god-method) into `executeStepWrite` + `buildChmodSandwich` + `cpuFreqMaxPath` (behavior-preserving). Shared utils: `SysfsIo.readSysfsString`, `Units` (khz/hz/milliC conversions), `FileNameUtils.toSafeFilename`.
+
+### Added — Features
+- **Thermal Event Timeline** — annotates session recordings with throttle events vs FPS dips (honest heuristic, labelled).
+- **Per-App Performance Dashboard** — saved sessions grouped by app: avg FPS / peak temp / avg watts (missing metrics shown as "—", single-session apps flagged).
+- **Comparative A/B Benchmark** — run the same benchmark under two profiles; gated honestly on whether each profile actually applied (no-root → "may not have applied" badge, not a fake result).
+- **Baseline Degradation Report** — compares current clock ceilings vs factory baseline; honestly returns "insufficient data" + teaches what would enable wear detection, never guesses.
+
+### Deferred to a tested follow-up
+- TLS certificate pinning (OTA/update fetches), symlink-resolve in path validation, real battery-state-of-charge benchmark abort — all need on-device verification across the 3 handhelds.
+
+---
+
 ## [0.1.13-alpha] — 2026-06-14
 
 Hotfix for the OTA community presets shipped in 0.1.12.

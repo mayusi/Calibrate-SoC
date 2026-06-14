@@ -169,7 +169,8 @@ class GpuTriangleStorm @Inject constructor() {
         }
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         val elapsedSec = (System.nanoTime() - start) / 1_000_000_000.0
-        return calls / elapsedSec
+        // Guard against division by zero (matches pattern in renderLoopFrames/renderLoopFramesStress).
+        return if (elapsedSec > 0) calls / elapsedSec else 0.0
     }
 
     private fun renderLoopFrames(durationMs: Long): GpuFrameResult {

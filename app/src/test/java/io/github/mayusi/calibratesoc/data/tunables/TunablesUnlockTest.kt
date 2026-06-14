@@ -238,8 +238,10 @@ class TunablesUnlockTest {
             ),
         )
         val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter)
-        // Every extraSysfs write must be wrapped in an existence check
-        assertThat(sh).contains("[ -e /sys/devices/system/cpu/cpufreq/policy0/scaling_governor ]")
+        // Every extraSysfs write must be wrapped in an existence check. The path is
+        // now single-quoted (defence-in-depth against a metacharacter-bearing path),
+        // so the guard reads `[ -e '/sys/...' ]`.
+        assertThat(sh).contains("[ -e '/sys/devices/system/cpu/cpufreq/policy0/scaling_governor' ]")
     }
 
     @Test

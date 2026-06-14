@@ -52,6 +52,7 @@ import io.github.mayusi.calibratesoc.ui.capability.CapabilityReportScreen
 import io.github.mayusi.calibratesoc.ui.dashboard.DashboardScreen
 import io.github.mayusi.calibratesoc.ui.hardware.HardwareScreen
 import io.github.mayusi.calibratesoc.ui.profiles.ProfilesScreen
+import io.github.mayusi.calibratesoc.ui.session.AppStatsScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionDetailScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionsScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
@@ -110,11 +111,12 @@ fun CalibrateSocApp(
                                     Destination.Settings -> Icons.Outlined.Settings
                                     Destination.DeviceInfo -> Icons.Outlined.Info
                                     Destination.TuneHistory -> Icons.Outlined.Bookmarks
-                                    // Sessions/SessionDetail/AdvancedTuning are not in the
-                                    // bottom bar; these arms keep the sealed-class exhaustive.
+                                    // Sessions/SessionDetail/AdvancedTuning/AppStats are not
+                                    // in the bottom bar; these arms keep the when exhaustive.
                                     Destination.Sessions -> Icons.Outlined.BarChart
                                     Destination.SessionDetail -> Icons.Outlined.BarChart
                                     Destination.AdvancedTuning -> Icons.Outlined.Tune
+                                    Destination.AppStats -> Icons.Outlined.BarChart
                                 },
                                 contentDescription = dest.label,
                             )
@@ -155,6 +157,7 @@ fun CalibrateSocApp(
                 composable(Destination.Sessions.route) {
                     SessionsScreen(
                         onOpenDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
                         onBack = { nav.popBackStack() },
                     )
                 }
@@ -164,6 +167,9 @@ fun CalibrateSocApp(
                         sessionId = sessionId,
                         onBack = { nav.popBackStack() },
                     )
+                }
+                composable(Destination.AppStats.route) {
+                    AppStatsScreen(onBack = { nav.popBackStack() })
                 }
             }
 

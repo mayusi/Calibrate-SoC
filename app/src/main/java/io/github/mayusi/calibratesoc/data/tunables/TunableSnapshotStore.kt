@@ -72,8 +72,13 @@ class TunableSnapshotStore @Inject constructor(
         // visible to a concurrent reader. Critical because the boot
         // receiver fires while the journal is still hot.
         if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
-            tmp.delete()
+            // renameTo failed (e.g. cross-filesystem move). Fall back to copy +
+            // delete, but guarantee the temp file is removed even if copyTo throws.
+            try {
+                tmp.copyTo(file, overwrite = true)
+            } finally {
+                tmp.delete()
+            }
         }
     }
 

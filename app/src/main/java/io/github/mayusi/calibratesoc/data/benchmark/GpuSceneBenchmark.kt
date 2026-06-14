@@ -531,8 +531,11 @@ class GpuSceneBenchmark @Inject constructor(
         }
 
         val frames = allFrameTimes.toFloatArray()
+        val frameSum = allFrameTimes.sumOf { it.toDouble() }
         val summary = GpuFrameSummary.from(
-            avgFps = allFrameTimes.size / (allFrameTimes.sumOf { it.toDouble() } / 1000.0),
+            // Guard: if frameSum is 0 (all zero-duration frames — shouldn't happen,
+            // but defensive against corrupt timing data), return 0.0 instead of NaN/∞.
+            avgFps = if (frameSum > 0.0) allFrameTimes.size / (frameSum / 1000.0) else 0.0,
             frames = frames,
             downsampleTo = 600,
         )

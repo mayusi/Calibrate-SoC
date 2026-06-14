@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +54,7 @@ import java.util.Locale
 fun SessionsScreen(
     viewModel: SessionsViewModel = hiltViewModel(),
     onOpenDetail: (Long) -> Unit,
+    onOpenAppStats: () -> Unit,
     onBack: () -> Unit,
 ) {
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
@@ -65,6 +68,16 @@ fun SessionsScreen(
                         Icon(Icons.Outlined.SportsEsports, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    // App dashboard button — always available so users can navigate
+                    // even before any sessions exist (the dashboard shows an empty state).
+                    IconButton(onClick = onOpenAppStats) {
+                        Icon(
+                            Icons.Outlined.BarChart,
+                            contentDescription = "Per-app performance dashboard",
+                        )
+                    }
+                },
             )
         },
     ) { padding ->
@@ -74,6 +87,13 @@ fun SessionsScreen(
                 title = "No sessions yet",
                 body = "Start a session from the Dashboard or the HUD Record button, play for a while, then stop. Your session timeline will appear here.",
                 modifier = Modifier.padding(padding),
+                action = {
+                    FilledTonalButton(onClick = onOpenAppStats) {
+                        Icon(Icons.Outlined.BarChart, contentDescription = null)
+                        Spacer(Modifier.width(Spacing.dense))
+                        Text("App dashboard")
+                    }
+                },
             )
         } else {
             LazyColumn(
@@ -85,6 +105,9 @@ fun SessionsScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(Spacing.item),
             ) {
+                item {
+                    AppDashboardBanner(onOpenAppStats = onOpenAppStats)
+                }
                 items(sessions, key = { it.id }) { session ->
                     SessionRow(
                         session = session,
@@ -93,6 +116,41 @@ fun SessionsScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Small inline banner above the session list pointing users to the app stats screen.
+ * Keeps it discoverable without cluttering the TopAppBar label.
+ */
+@Composable
+private fun AppDashboardBanner(onOpenAppStats: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenAppStats)
+            .padding(vertical = Spacing.dense),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+    ) {
+        Icon(
+            Icons.Outlined.BarChart,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Per-app performance dashboard",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "Avg FPS, peak temps and power across all your recorded apps.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

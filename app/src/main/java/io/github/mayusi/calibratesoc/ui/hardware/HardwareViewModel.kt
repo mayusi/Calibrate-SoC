@@ -3,6 +3,10 @@ package io.github.mayusi.calibratesoc.ui.hardware
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.github.mayusi.calibratesoc.data.baseline.BaselineDegradation
+import io.github.mayusi.calibratesoc.data.baseline.DegradationReport
+import io.github.mayusi.calibratesoc.data.baseline.FactoryBaselineRecorder
+import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.hardware.HardwareReport
 import io.github.mayusi.calibratesoc.data.hardware.HardwareScanner
 import io.github.mayusi.calibratesoc.data.hardware.MemoryBandwidthTester
@@ -30,6 +34,8 @@ class HardwareViewModel @Inject constructor(
     private val storageTester: StorageSpeedTester,
     private val memoryTester: MemoryBandwidthTester,
     private val networkTester: NetworkSpeedTester,
+    private val capabilityProbe: CapabilityProbe,
+    private val baselineRecorder: FactoryBaselineRecorder,
 ) : ViewModel() {
 
     private val _report = MutableStateFlow<HardwareReport?>(null)
@@ -38,7 +44,23 @@ class HardwareViewModel @Inject constructor(
     private val _testState = MutableStateFlow(TestState())
     val testState: StateFlow<TestState> = _testState.asStateFlow()
 
-    init { rescan() }
+    private val _degradationReport = MutableStateFlow<DegradationReport?>(null)
+    /** Baseline-degradation analysis; null while loading or when no baseline exists. */
+    val degradationReport: StateFlow<DegradationReport?> = _degradationReport.asStateFlow()
+
+    init {
+        rescan()
+        refreshDegradation()
+    }
+
+    /** Re-run the baseline comparison against the latest capability snapshot. */
+    fun refreshDegradation() {
+        viewModelScope.launch {
+            val baseline = baselineRecorder.existing() ?: return@launch
+            val current = capabilityProbe.report.value ?: return@launch
+            _degradationReport.value = BaselineDegradation.analyze(baseline, current)
+        }
+    }
 
     fun rescan() {
         viewModelScope.launch {

@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BatteryChargingFull
 import androidx.compose.material.icons.outlined.Brightness6
 import androidx.compose.material.icons.outlined.DeveloperBoard
+import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.SettingsInputAntenna
 import androidx.compose.material.icons.outlined.Storage
@@ -35,6 +36,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.baseline.BaselineDegradation
+import io.github.mayusi.calibratesoc.data.baseline.DegradationReport
+import io.github.mayusi.calibratesoc.data.baseline.DegradationStatus
 import io.github.mayusi.calibratesoc.data.hardware.BatteryInfo
 import io.github.mayusi.calibratesoc.data.hardware.Confidence
 import io.github.mayusi.calibratesoc.data.hardware.DisplayInfo
@@ -44,6 +48,8 @@ import io.github.mayusi.calibratesoc.data.hardware.NetworkTestResult
 import io.github.mayusi.calibratesoc.data.hardware.RadioInfo
 import io.github.mayusi.calibratesoc.data.hardware.SocInfo
 import io.github.mayusi.calibratesoc.data.hardware.StorageVolume
+import io.github.mayusi.calibratesoc.ui.components.AlertCard
+import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
@@ -56,6 +62,7 @@ import io.github.mayusi.calibratesoc.ui.theme.Spacing
 fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
     val report by viewModel.report.collectAsStateWithLifecycle()
     val tests by viewModel.testState.collectAsStateWithLifecycle()
+    val degradation by viewModel.degradationReport.collectAsStateWithLifecycle()
 
     val r = report
     if (r == null) {
@@ -80,6 +87,9 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
                 )
             }
         }
+
+        // Baseline degradation card — shown whenever a baseline exists.
+        degradation?.let { item { BaselineDegradationCard(it) } }
 
         item { SocCard(r.soc) }
         item {
@@ -110,6 +120,131 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
         item { DisplayCard(r.display) }
         item { BatteryCard(r.battery) }
         item { RadioCard(r.radios) }
+    }
+}
+
+// --- Baseline Degradation Card -----------------------------------
+
+/**
+ * Shows the result of comparing the factory-baseline clock ceilings
+ * against the device's current state.
+ *
+ * Status colours:
+ *   OK              → tertiary (green)
+ *   MINOR           → secondary (amber)
+ *   DEGRADED        → error (red)
+ *   INSUFFICIENT_DATA → muted (onSurfaceVariant) with a teaching message
+ */
+@Composable
+private fun BaselineDegradationCard(report: DegradationReport) {
+    SectionCard(
+        title = "Baseline health check",
+        explainer = "Compares current clock ceilings against your factory baseline.",
+        icon = Icons.Outlined.HealthAndSafety,
+    ) {
+        when (report.status) {
+            DegradationStatus.INSUFFICIENT_DATA -> {
+                Text(
+                    "Not enough data to compare",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                report.insufficientDataReason?.let { reason ->
+                    Text(
+                        reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            DegradationStatus.OK -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "OK — clock ceilings match factory baseline",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+                report.findings.forEach { finding ->
+                    DegradationFindingRow(finding)
+                }
+                report.limitationNote?.let { note ->
+                    Text(
+                        note,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            DegradationStatus.MINOR -> {
+                AlertCard(
+                    type = AlertType.WARNING,
+                    title = "Minor clock drift detected",
+                    message = "One or more clock ceilings are 1–10 % below the factory baseline. " +
+                        "This may indicate an OTA tuned the OPP table slightly, or a third-party " +
+                        "tool adjusted limits before the baseline was captured.",
+                )
+                report.findings.forEach { finding ->
+                    DegradationFindingRow(finding)
+                }
+            }
+
+            DegradationStatus.DEGRADED -> {
+                AlertCard(
+                    type = AlertType.ERROR,
+                    title = "Clock ceiling dropped > 10 % from baseline",
+                    message = "One or more clock ceilings are significantly lower than what was " +
+                        "observed on first launch. This most commonly means a vendor OTA silently " +
+                        "reduced an OPP table entry, or a tuning tool wrote a permanent cap before " +
+                        "the factory baseline was captured. It does NOT directly measure thermal " +
+                        "paste dry-out or battery wear — run a Full benchmark for that.",
+                )
+                report.findings.forEach { finding ->
+                    DegradationFindingRow(finding)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DegradationFindingRow(finding: io.github.mayusi.calibratesoc.data.baseline.DegradationFinding) {
+    val valueColor = when {
+        finding.isDrop && finding.changePct >= BaselineDegradation.DEGRADED_THRESHOLD_PCT ->
+            MaterialTheme.colorScheme.error
+        finding.isDrop && finding.changePct >= BaselineDegradation.MINOR_THRESHOLD_PCT ->
+            MaterialTheme.colorScheme.secondary
+        else ->
+            MaterialTheme.colorScheme.tertiary
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                finding.signal,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "${finding.baselineValue} → ${finding.currentValue}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Text(
+            finding.formattedPct,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+            color = valueColor,
+        )
     }
 }
 

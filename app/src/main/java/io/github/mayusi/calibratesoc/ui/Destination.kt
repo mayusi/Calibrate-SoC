@@ -25,6 +25,9 @@ sealed class Destination(val route: String, val label: String) {
     /** Advanced Tuning — sub-screen reached from the Tune tab. Not in
      *  the bottom bar; accessed via the "Advanced tuning →" button. */
     data object AdvancedTuning : Destination("advanced_tuning", "Advanced Tuning")
+    /** Per-App Performance Dashboard — sub-screen reachable from Sessions list.
+     *  Not in the bottom bar; aggregates all saved sessions by app label. */
+    data object AppStats : Destination("app_stats", "App Stats")
 
     companion object {
         /** Six-tab bottom bar. Device Info is reachable as a deep-link

@@ -35,6 +35,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.atomic.AtomicLong
+import androidx.compose.runtime.Immutable
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.R
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
@@ -111,6 +113,7 @@ class OverlayService :
     private var windowManager: WindowManager? = null
     private var composeView: ComposeView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var dragHandler: DragHandler? = null
 
     private val hudState = MutableStateFlow(HudUiState())
     private val frameRateSampler = HudFrameRateSampler()
@@ -162,6 +165,9 @@ class OverlayService :
                 if (params.preferredDisplayModeId != newId) {
                     params.preferredDisplayModeId = newId
                     runCatching { windowManager?.updateViewLayout(view, params) }
+                        .onFailure { e ->
+                            hudEventLog.add(HudEventLog.Level.WARN, "refreshRate updateViewLayout failed: ${e.message}")
+                        }
                 }
             }
         }
@@ -188,10 +194,15 @@ class OverlayService :
         if (sessionRecorder.isRecording.value) {
             kotlinx.coroutines.runBlocking(Dispatchers.IO) {
                 runCatching { sessionRecorder.stop("hud_stop") }
+                    .onFailure { e ->
+                        hudEventLog.add(HudEventLog.Level.WARN, "sessionRecorder.stop failed: ${e.message}")
+                    }
             }
         }
         frameRateSampler.stop()
         gameFpsSampler.stop()
+        dragHandler?.stop()
+        dragHandler = null
         runCatching {
             composeView?.let { windowManager?.removeView(it) }
         }
@@ -332,11 +343,11 @@ class OverlayService :
         }
         composeView = view
 
-        view.setOnTouchListener(
-            DragHandler(params, wm, view, density) { xDp, yDp ->
-                lifecycleScope.launch { hudPrefs.setPosition(xDp, yDp) }
-            },
-        )
+        val handler = DragHandler(params, wm, view, density) { xDp, yDp ->
+            lifecycleScope.launch { hudPrefs.setPosition(xDp, yDp) }
+        }
+        dragHandler = handler
+        view.setOnTouchListener(handler)
 
         wm.addView(view, params)
     }
@@ -489,6 +500,120 @@ class OverlayService :
         }
     }
 
+    // -------------------------------------------------------------------------
+    // CPU-freq write helpers — shared between stepBigCoreMhz paths
+    // -------------------------------------------------------------------------
+
+    /** Canonical sysfs path for a CPU frequency policy's scaling_max_freq. */
+    private fun cpuFreqMaxPath(policyId: Int): String =
+        "/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq"
+
+    /**
+     * Return the shell command list that implements a chmod-666 → write →
+     * chmod-444 sandwich for [path]/[value]. The sandwich keeps vendor
+     * perfd from clamping the value back between our write and the next
+     * kernel governor tick.
+     *
+     * @param suppressErrors when true append `2>/dev/null` to the chmod
+     *   lines (used by the PServer path whose shell is already in a
+     *   permissive domain; libsu's shell doesn't need it).
+     * @param lock when false the device adapter opted out of the sandwich
+     *   (some devices lock up if sysfs modes are changed from userspace).
+     */
+    private fun buildChmodSandwich(
+        path: String,
+        value: String,
+        lock: Boolean,
+        suppressErrors: Boolean,
+    ): List<String> {
+        val redir = if (suppressErrors) " 2>/dev/null" else ""
+        return buildList {
+            if (lock) add("chmod 666 $path$redir")
+            add("printf %s '$value' > $path")
+            if (lock) add("chmod 444 $path$redir")
+        }
+    }
+
+    /** Result returned by [executeStepWrite]. */
+    private data class StepWriteResult(
+        val applied: Boolean,
+        val via: String,
+        val failureReason: String?,
+    )
+
+    /**
+     * Attempt to write [perPolicyNewKhz] to sysfs through all available
+     * pathways, in priority order:
+     *   1. Direct sysfs FileWriter (works when our UID has world-write)
+     *   2. PServer binder (Odin vendor service running permissive SELinux)
+     *   3. libsu root shell (Magisk / KernelSU)
+     *   4. Script-per-tap fallback
+     *
+     * Returns a [StepWriteResult] describing which pathway succeeded (or why
+     * all failed). The caller ([stepBigCoreMhz]) is responsible for all
+     * hudEventLog / flashActionMessage / history calls — this function only
+     * writes and reports.
+     */
+    private suspend fun executeStepWrite(
+        perPolicyNewKhz: Map<Int, Int>,
+        report: io.github.mayusi.calibratesoc.data.capability.CapabilityReport,
+        summary: String,
+        deltaMhz: Int,
+        rootAvailable: Boolean,
+    ): StepWriteResult {
+        // --- Path 1: direct sysfs write ---
+        var failureReason: String? = null
+        val directOk = runCatching { tryDirectSysfsWrite(perPolicyNewKhz) }.getOrElse {
+            hudEventLog.add(HudEventLog.Level.ERROR, "sysfs write threw: ${it.message}")
+            failureReason = it.message ?: "sysfs write threw an exception"
+            false
+        }
+        if (directOk) return StepWriteResult(applied = true, via = "direct", failureReason = null)
+
+        // --- Path 2: PServer binder ---
+        val pserverOk = runCatching {
+            tryPServerWrite(perPolicyNewKhz, report, summary)
+        }.getOrElse {
+            hudEventLog.add(HudEventLog.Level.ERROR, "PServer write threw: ${it.message}")
+            failureReason = it.message ?: "PServer write threw an exception"
+            false
+        }
+        if (pserverOk) return StepWriteResult(applied = true, via = "pserver", failureReason = null)
+
+        // --- Path 3: libsu root ---
+        if (rootAvailable) {
+            // Look up the device adapter ONCE for use in this branch.
+            val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+            val lock = adapter?.chmodLockCpuFreqWrites ?: true
+            val cmds = mutableListOf<String>()
+            adapter?.perfDaemonsToStopOnWrite?.forEach { cmds += "stop $it" }
+            for ((pid, khz) in perPolicyNewKhz) {
+                val path = cpuFreqMaxPath(pid)
+                cmds += buildChmodSandwich(path, khz.toString(), lock, suppressErrors = false)
+            }
+            val res = com.topjohnwu.superuser.Shell.cmd(*cmds.toTypedArray()).exec()
+            return if (res.isSuccess) {
+                StepWriteResult(applied = true, via = "libsu", failureReason = null)
+            } else {
+                val err = res.err.joinToString("; ").ifBlank { "exit ${res.code}" }
+                StepWriteResult(applied = false, via = "libsu", failureReason = err)
+            }
+        }
+
+        // --- Path 4: script-per-tap fallback ---
+        val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+        val preset = io.github.mayusi.calibratesoc.data.presets.Preset(
+            id = "hud_step_${System.currentTimeMillis()}",
+            name = "HUD step (${if (deltaMhz >= 0) "+" else ""}$deltaMhz)",
+            description = "Stepped: $summary MHz",
+            verification = io.github.mayusi.calibratesoc.data.presets.VerificationTier.USER_CUSTOM,
+            cpuPolicyMaxKhz = perPolicyNewKhz,
+        )
+        val body = scriptGenerator.generate(preset, report, adapter)
+        scriptDeployer.deploy(preset, body)
+        return StepWriteResult(applied = false, via = "script", failureReason = failureReason)
+    }
+
     /**
      * Step the chosen CPU policies by ±[deltaMhz]. Honors the per-policy
      * chip toggles (defaults to all policies on). Snaps to nearest OPP-
@@ -506,6 +631,7 @@ class OverlayService :
      */
     private fun stepBigCoreMhz(deltaMhz: Int) {
         serviceScope.launch {
+            // --- (1) Input validation ---
             val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
             if (report.cpuPolicies.isEmpty()) {
                 hudEventLog.add(HudEventLog.Level.WARN, "No CPU policy found for stepping")
@@ -521,7 +647,7 @@ class OverlayService :
                 return@launch
             }
 
-            // Per-policy snap to nearest OPP entry.
+            // --- (2) OPP-snapping ---
             val perPolicyNewKhz = mutableMapOf<Int, Int>()
             val perPolicyOldKhz = mutableMapOf<Int, Int>()
             for (p in targets) {
@@ -537,78 +663,41 @@ class OverlayService :
                 "p${it.key}=${it.value / 1000}"
             }
 
-            // Write strategy, in priority order:
-            //   1. Direct sysfs write — works on rooted devices or when
-            //      our app's UID has SELinux + POSIX write access (rare).
-            //   2. PServer binder — Odin's vendor service runs in a
-            //      permissive SELinux domain when Force SELinux is ON.
-            //      We send shell commands and PServer executes them as
-            //      root. No Odin Settings UI, no script-per-tap.
-            //   3. Root via libsu (if Magisk/KernelSU active).
-            //   4. Script-per-tap fallback (no PServer / no root).
+            // --- (3) Multi-path write dispatch (priority: direct → PServer → libsu → script) ---
             lastWriteFailureReason = null
-            val directOk = runCatching { tryDirectSysfsWrite(perPolicyNewKhz) }.getOrElse {
-                hudEventLog.add(HudEventLog.Level.ERROR, "sysfs write threw: ${it.message}")
-                lastWriteFailureReason = it.message ?: "sysfs write threw an exception"
-                false
-            }
-            val pserverOk = !directOk && runCatching {
-                tryPServerWrite(perPolicyNewKhz, report, summary)
-            }.getOrElse {
-                hudEventLog.add(HudEventLog.Level.ERROR, "PServer write threw: ${it.message}")
-                lastWriteFailureReason = it.message ?: "PServer write threw an exception"
-                false
-            }
-            if (directOk) {
-                hudEventLog.add(HudEventLog.Level.ACTION, "direct write OK ($summary)")
-                flashActionMessage("Applied: $summary MHz")
-            } else if (pserverOk) {
-                hudEventLog.add(HudEventLog.Level.ACTION, "PServer write OK ($summary)")
-                flashActionMessage("Applied: $summary MHz")
-            } else if (rootAvailable) {
-                // Direct sysfs write via libsu. Apply the same chmod
-                // sandwich the generator uses so vendor perfd can't
-                // clobber.
-                val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
-                val lock = adapter?.chmodLockCpuFreqWrites ?: true
-                val cmds = mutableListOf<String>()
-                adapter?.perfDaemonsToStopOnWrite?.forEach { cmds += "stop $it" }
-                for ((pid, khz) in perPolicyNewKhz) {
-                    val path = "/sys/devices/system/cpu/cpufreq/policy$pid/scaling_max_freq"
-                    if (lock) cmds += "chmod 666 $path"
-                    cmds += "printf %s '$khz' > $path"
-                    if (lock) cmds += "chmod 444 $path"
+            val result = executeStepWrite(perPolicyNewKhz, report, summary, deltaMhz, rootAvailable)
+            lastWriteFailureReason = result.failureReason
+
+            // --- (4) UI feedback ---
+            when {
+                result.applied && result.via == "direct" -> {
+                    hudEventLog.add(HudEventLog.Level.ACTION, "direct write OK ($summary)")
+                    flashActionMessage("Applied: $summary MHz")
                 }
-                val res = com.topjohnwu.superuser.Shell.cmd(*cmds.toTypedArray()).exec()
-                if (res.isSuccess) {
+                result.applied && result.via == "pserver" -> {
+                    hudEventLog.add(HudEventLog.Level.ACTION, "PServer write OK ($summary)")
+                    flashActionMessage("Applied: $summary MHz")
+                }
+                result.applied && result.via == "libsu" -> {
                     hudEventLog.add(HudEventLog.Level.ACTION, "root write OK ($summary)")
                     flashActionMessage("Applied: $summary MHz")
-                } else {
-                    val err = res.err.joinToString("; ").ifBlank { "exit ${res.code}" }
+                }
+                !result.applied && result.via == "libsu" -> {
+                    val err = result.failureReason ?: "unknown"
                     hudEventLog.add(HudEventLog.Level.ERROR, "root write failed: $err")
                     flashActionMessage("Root write failed: $err")
                 }
-            } else {
-                // No root — deploy a one-off script.
-                val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
-                val preset = io.github.mayusi.calibratesoc.data.presets.Preset(
-                    id = "hud_step_${System.currentTimeMillis()}",
-                    name = "HUD step (${if (deltaMhz >= 0) "+" else ""}$deltaMhz)",
-                    description = "Stepped: $summary MHz",
-                    verification = io.github.mayusi.calibratesoc.data.presets.VerificationTier.USER_CUSTOM,
-                    cpuPolicyMaxKhz = perPolicyNewKhz,
-                )
-                val body = scriptGenerator.generate(preset, report, adapter)
-                scriptDeployer.deploy(preset, body)
-                hudEventLog.add(HudEventLog.Level.WARN, "no root — script written ($summary)")
-                val reason = lastWriteFailureReason
-                flashActionMessage(
-                    if (reason != null) {
-                        "Write failed — $reason. Need root or run setup script (Settings → Unlock HUD)."
-                    } else {
-                        "No root — need to run setup script. See Settings → Unlock HUD."
-                    }
-                )
+                result.via == "script" -> {
+                    hudEventLog.add(HudEventLog.Level.WARN, "no root — script written ($summary)")
+                    val reason = result.failureReason
+                    flashActionMessage(
+                        if (reason != null) {
+                            "Write failed — $reason. Need root or run setup script (Settings → Unlock HUD)."
+                        } else {
+                            "No root — need to run setup script. See Settings → Unlock HUD."
+                        }
+                    )
+                }
             }
 
             // Update HUD's notion of current freqs.
@@ -624,15 +713,14 @@ class OverlayService :
                     presetName = "HUD step ${if (deltaMhz >= 0) "+" else ""}$deltaMhz MHz",
                     presetDescription = summary,
                     pathway = when {
-                        directOk -> io.github.mayusi.calibratesoc.data.tunables.ApplyPathway.DIRECT_ROOT
-                        pserverOk -> io.github.mayusi.calibratesoc.data.tunables.ApplyPathway.DIRECT_ROOT
-                        rootAvailable -> io.github.mayusi.calibratesoc.data.tunables.ApplyPathway.DIRECT_ROOT
+                        result.applied && result.via != "script" ->
+                            io.github.mayusi.calibratesoc.data.tunables.ApplyPathway.DIRECT_ROOT
                         else -> io.github.mayusi.calibratesoc.data.tunables.ApplyPathway.GENERATED_SCRIPT
                     },
-                    notes = when {
-                        directOk -> "HUD stepper (chmod direct)"
-                        pserverOk -> "HUD stepper (PServer binder)"
-                        rootAvailable -> "HUD stepper (libsu root)"
+                    notes = when (result.via) {
+                        "direct" -> "HUD stepper (chmod direct)"
+                        "pserver" -> "HUD stepper (PServer binder)"
+                        "libsu" -> "HUD stepper (libsu root)"
                         else -> "HUD stepper (script fallback)"
                     },
                     cpuPolicyMaxKhz = perPolicyNewKhz,
@@ -698,10 +786,8 @@ class OverlayService :
         val parts = mutableListOf<String>()
         daemons.forEach { parts += "stop $it 2>/dev/null" }
         for ((policyId, khz) in perPolicyKhz) {
-            val path = "/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq"
-            if (lock) parts += "chmod 666 $path 2>/dev/null"
-            parts += "printf %s '$khz' > $path"
-            if (lock) parts += "chmod 444 $path 2>/dev/null"
+            val path = cpuFreqMaxPath(policyId)
+            parts += buildChmodSandwich(path, khz.toString(), lock, suppressErrors = true)
         }
         val command = parts.joinToString(" ; ")
         val result = pServerWriter.executeShell(command) ?: run {
@@ -731,7 +817,7 @@ class OverlayService :
     private fun tryDirectSysfsWrite(perPolicyKhz: Map<Int, Int>): Boolean {
         if (perPolicyKhz.isEmpty()) return false
         for ((policyId, khz) in perPolicyKhz) {
-            val path = java.io.File("/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq")
+            val path = java.io.File(cpuFreqMaxPath(policyId))
             val outcome = runCatching {
                 path.bufferedWriter().use { it.write(khz.toString()) }
             }
@@ -753,7 +839,7 @@ class OverlayService :
      * Used to decide canTuneLive without arming the PServer breaker.
      */
     private fun probeSinglePolicyWritable(policyId: Int): Boolean {
-        val path = java.io.File("/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq")
+        val path = java.io.File(cpuFreqMaxPath(policyId))
         return runCatching {
             if (!path.exists()) return false
             val current = path.readText().trim()
@@ -770,6 +856,9 @@ class OverlayService :
      * tapping the same button to try every saved tune.
      */
     private fun cycleNextProfile() {
+        // Capture chips once so the isEmpty guard and the modulo use the same
+        // snapshot — prevents a TOCTOU divide-by-zero if the flow updates in
+        // between.
         val chips = hudState.value.quickProfiles
         if (chips.isEmpty()) {
             flashActionMessage("No saved profiles to cycle through.")
@@ -777,12 +866,14 @@ class OverlayService :
             return
         }
         // Find last-applied profile by walking back through the log.
+        // indexOfFirst returns -1 when lastAppliedId is null or not found —
+        // that is the correct starting point: (−1 + 1) % size == 0 → first chip.
         val lastAppliedId = hudEventLog.entries.value
             .firstNotNullOfOrNull { entry ->
                 Regex("^apply ([^ ]+) ").find(entry.message)?.groupValues?.getOrNull(1)
             }
-        val idx = chips.indexOfFirst { it.first == lastAppliedId }
-        val next = chips[(idx + 1) % chips.size]
+        val idx = chips.indexOfFirst { it.first == lastAppliedId }.takeIf { it >= 0 } ?: -1
+        val next = chips[(idx + 1).coerceAtLeast(0) % chips.size]
         hudEventLog.add(HudEventLog.Level.ACTION, "apply ${next.first} (${next.second})")
         applyProfileViaScript(next.first)
     }
@@ -795,11 +886,24 @@ class OverlayService :
      */
     private var lastWriteFailureReason: String? = null
 
+    /**
+     * Monotonic token for [flashActionMessage]. Incremented on every call so
+     * the delayed-clear coroutine only clears the message it originally set,
+     * even if two rapid taps arrive before the 6-second window expires.
+     * Without this a second tap's message is cleared the moment the FIRST
+     * tap's delay fires (the string-equality guard is racy when both messages
+     * happen to be equal, e.g. two identical step taps).
+     */
+    private val flashToken = AtomicLong(0L)
+
     private fun flashActionMessage(msg: String) {
+        // Grab a unique token for this invocation BEFORE updating state,
+        // so the clear coroutine only clears if nothing has since overwritten it.
+        val token = flashToken.incrementAndGet()
         hudState.value = hudState.value.copy(lastActionMessage = msg)
         serviceScope.launch {
             kotlinx.coroutines.delay(6_000)
-            if (hudState.value.lastActionMessage == msg) {
+            if (flashToken.get() == token) {
                 hudState.value = hudState.value.copy(lastActionMessage = null)
             }
         }
@@ -886,6 +990,9 @@ class OverlayService :
                     p.x = (xDp * density).roundToInt()
                     p.y = (yDp * density).roundToInt()
                     runCatching { windowManager?.updateViewLayout(view, p) }
+                        .onFailure { e ->
+                            hudEventLog.add(HudEventLog.Level.WARN, "updateViewLayout failed: ${e.message}")
+                        }
                 }
         }
     }
@@ -916,6 +1023,15 @@ class OverlayService :
         private val touchSlopPx = (8 * density)
         private val frameChoreographer = android.view.Choreographer.getInstance()
         private var pendingFrame = false
+
+        // Store the FrameCallback reference explicitly so stop() can remove it
+        // from the Choreographer if the service is destroyed while a frame is
+        // pending. Without this the callback leaks and holds a reference to wm,
+        // view, and params after the WindowManager has already detached them.
+        private val frameCallback = android.view.Choreographer.FrameCallback {
+            pendingFrame = false
+            runCatching { wm.updateViewLayout(view, params) }
+        }
 
         override fun onTouch(v: View, ev: MotionEvent): Boolean {
             when (ev.action) {
@@ -958,10 +1074,13 @@ class OverlayService :
         private fun scheduleLayout() {
             if (pendingFrame) return
             pendingFrame = true
-            frameChoreographer.postFrameCallback {
-                pendingFrame = false
-                runCatching { wm.updateViewLayout(view, params) }
-            }
+            frameChoreographer.postFrameCallback(frameCallback)
+        }
+
+        /** Cancel any pending Choreographer frame callback. Call from onDestroy. */
+        fun stop() {
+            frameChoreographer.removeFrameCallback(frameCallback)
+            pendingFrame = false
         }
     }
 
@@ -990,7 +1109,12 @@ class OverlayService :
  * Snapshot of telemetry the HUD draws. Kept flat (no nested objects)
  * to make Compose recomposition tracking cheap — every field is a
  * primitive or simple list.
+ *
+ * @Immutable: all fields are primitives, enums, nullable value types,
+ * or read-only Kotlin collections (List/Set/Pair). Compose can skip
+ * recomposition of subtrees that receive an unchanged HudUiState.
  */
+@Immutable
 data class HudUiState(
     val profile: HudProfile = HudProfile.COMPACT,
     val cpuMaxMhz: Int = 0,

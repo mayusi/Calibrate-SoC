@@ -1,3 +1,28 @@
+## [0.1.14-alpha] — 2026-06-14
+
+A big audit-and-harden pass — dozens of fixes plus four new features. Nothing you do day-to-day changes; the app is just safer, lighter, and more useful.
+
+### Security
+- **Hardened the root-script generator** so a custom tuning path or a community preset can never sneak a shell command into a script that runs as root — kernel paths are now fully escaped and validated, and remote presets are checked for this too. Also tightened the vendor-settings write path and the boot-script deployer the same way.
+
+### Fixed
+- **AYN vendor fan/perf settings now revert on reboot** like everything else (they were silently sticking before).
+- **Benchmark "battery" abort is honest now** — it was actually reacting to battery *temperature*, not low charge, but said "low battery". It now says the battery got too hot. (A real low-charge check is coming next.)
+- Fixed a rare crash when rapidly cycling profiles from the floating HUD, a sticky HUD status message during fast taps, a couple of silently-swallowed HUD errors, and a possible overlay leak if the HUD service was killed.
+- Added missing safety guards against divide-by-zero in the GPU benchmark math and an integer-overflow guard in the native memory test.
+- Temp files from saving your tune snapshots/history are always cleaned up now.
+
+### Performance (smoother in-game HUD)
+- The live monitor no longer re-scans every thermal sensor from scratch each tick — it caches the sensor list and only reads temperatures, cutting I/O on the gaming hot path.
+- The in-game FPS reader caches its expensive lookups instead of re-running them twice a second.
+- Independent sensor reads now run in parallel each tick instead of one after another.
+
+### Added — Features
+- **Thermal Event Timeline** in your gaming session recordings: see exactly when the device throttled and how it lined up with FPS dips — proof a cooler tune actually helped.
+- **Per-App Performance Dashboard**: your saved sessions grouped by game, with average FPS, peak temperature, and average power per app — see which game needs tuning.
+- **Comparative A/B Benchmark**: pick two profiles and run the same benchmark under each, then see a side-by-side score/throttle comparison. If a profile can't actually apply on your device, it tells you honestly instead of faking the result.
+- **Baseline Degradation check** on the Hardware screen: compares your device now against its factory baseline. (Today it honestly tells you it needs a richer baseline to detect wear — it never guesses.)
+
 ## [0.1.13-alpha] — 2026-06-14
 
 ### Fixed

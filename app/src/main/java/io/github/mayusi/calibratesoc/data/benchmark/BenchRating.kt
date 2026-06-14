@@ -119,7 +119,10 @@ object BenchRating {
         // ── Aborted runs ──────────────────────────────────────────────
         val abortReason: String? = when (run.outcome) {
             BenchOutcome.ABORTED_TEMP -> "Aborted — thermal limit reached"
-            BenchOutcome.ABORTED_BATTERY -> "Aborted — low battery"
+            BenchOutcome.ABORTED_BATTERY_TEMP -> "Aborted — battery got too hot (≥ 45 °C)"
+            // Legacy DB rows written before the rename still deserialise as ABORTED_BATTERY;
+            // display the honest label so old records don't claim "low battery" either.
+            BenchOutcome.ABORTED_BATTERY -> "Aborted — battery got too hot (≥ 45 °C)"
             BenchOutcome.ABORTED_DURATION -> "Aborted — time limit"
             BenchOutcome.ABORTED_USER -> "Aborted by user"
             BenchOutcome.FAILED_NATIVE -> "Benchmark failed (native crash)"

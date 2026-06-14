@@ -112,29 +112,35 @@ fun BenchmarkScreen(viewModel: BenchmarkViewModel = hiltViewModel()) {
             SegmentedButton(
                 selected = tab == 0,
                 onClick = { tab = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 5),
             ) { Text("Benchmark") }
             SegmentedButton(
                 selected = tab == 1,
                 onClick = { tab = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 5),
             ) { Text("Stability") }
             SegmentedButton(
                 selected = tab == 2,
                 onClick = { tab = 2 },
-                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 5),
             ) { Text("Trends") }
             SegmentedButton(
                 selected = tab == 3,
                 onClick = { tab = 3 },
-                shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+                shape = SegmentedButtonDefaults.itemShape(index = 3, count = 5),
             ) { Text("Hub") }
+            SegmentedButton(
+                selected = tab == 4,
+                onClick = { tab = 4 },
+                shape = SegmentedButtonDefaults.itemShape(index = 4, count = 5),
+            ) { Text("A/B") }
         }
         when (tab) {
             0 -> BenchmarkContent(viewModel)
             1 -> StabilityScreen()
             2 -> BenchTrendScreen()
-            else -> BenchmarkHubScreen()
+            3 -> BenchmarkHubScreen()
+            else -> ComparativeABScreen()
         }
     }
 }

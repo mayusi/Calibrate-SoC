@@ -63,6 +63,12 @@ class GameFpsSampler @Inject constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var displayListener: DisplayManager.DisplayListener? = null
 
+    // P2: Cache the resolved SurfaceFlinger layer name per package so we avoid
+    // running the expensive `dumpsys SurfaceFlinger --list | grep` every tick.
+    // The cache entry is invalidated on display-mode change or after LAYER_CACHE_TTL_MS.
+    private data class LayerCacheEntry(val pkg: String, val layerName: String, val resolvedAtMs: Long)
+    @Volatile private var layerCache: LayerCacheEntry? = null
+
     fun start(scope: CoroutineScope) {
         if (displayListener != null) return
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
@@ -74,7 +80,12 @@ class GameFpsSampler @Inject constructor(
             override fun onDisplayAdded(displayId: Int) = Unit
             override fun onDisplayRemoved(displayId: Int) = Unit
             override fun onDisplayChanged(displayId: Int) {
-                if (displayId == Display.DEFAULT_DISPLAY) publishCurrentRate(dm)
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    // Display mode change may mean a different frame-rate lock;
+                    // invalidate the layer cache so we re-resolve on the next tick.
+                    layerCache = null
+                    publishCurrentRate(dm)
+                }
             }
         }
         dm.registerDisplayListener(listener, mainHandler)
@@ -105,22 +116,42 @@ class GameFpsSampler @Inject constructor(
     /**
      * Pull SurfaceFlinger frame timestamps for the foreground app's
      * layer via PServer. We run `dumpsys SurfaceFlinger --list` to
-     * find the layer name, then `--latency '<layer>'` to get per-frame
-     * timestamps. PServer runs in a permissive domain that can read
-     * SurfaceFlinger frame data even for Vulkan-direct apps like
-     * PPSSPP — something a normal app UID never could.
+     * find the layer name (cached for [LAYER_CACHE_TTL_MS]), then
+     * `--latency '<layer>'` to get per-frame timestamps. PServer runs
+     * in a permissive domain that can read SurfaceFlinger frame data
+     * even for Vulkan-direct apps like PPSSPP — something a normal app
+     * UID never could.
+     *
+     * The expensive `--list | grep` step is cached: once we resolve the
+     * layer name for a package we reuse it for [LAYER_CACHE_TTL_MS] ms.
+     * The cache is invalidated on display-mode change (the set of active
+     * layers may have changed) and when the foreground package changes.
      */
     private suspend fun sampleRealFpsFor(pkg: String): Int? {
-        val findLayer = "dumpsys SurfaceFlinger --list | grep '$pkg' | grep -v 'animation-leash' | head -1"
-        val layerResult = pServerWriter.executeShell(findLayer) ?: return null
-        val (_, layerOut) = layerResult
-        // Lines from --list look like "SurfaceView[com.foo/.Bar]#0" or
-        // "cb4035 com.foo/com.foo.BarActivity#4262" — take the first
-        // non-empty line.
-        val layerName = layerOut.lineSequence()
-            .map { it.trim() }
-            .firstOrNull { it.isNotEmpty() && !it.startsWith("---") }
-            ?: return null
+        // Resolve layer name from cache or via fresh dumpsys --list.
+        val now = System.currentTimeMillis()
+        val cached = layerCache
+        val layerName: String = if (
+            cached != null &&
+            cached.pkg == pkg &&
+            (now - cached.resolvedAtMs) < LAYER_CACHE_TTL_MS
+        ) {
+            cached.layerName
+        } else {
+            // Cache miss or TTL expired: re-enumerate.
+            val findLayer = "dumpsys SurfaceFlinger --list | grep '$pkg' | grep -v 'animation-leash' | head -1"
+            val layerResult = pServerWriter.executeShell(findLayer) ?: return null
+            val (_, layerOut) = layerResult
+            // Lines from --list look like "SurfaceView[com.foo/.Bar]#0" or
+            // "cb4035 com.foo/com.foo.BarActivity#4262" — take the first
+            // non-empty line.
+            val resolved = layerOut.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("---") }
+                ?: return null
+            layerCache = LayerCacheEntry(pkg = pkg, layerName = resolved, resolvedAtMs = now)
+            resolved
+        }
 
         // Some shells quote the layer name oddly. Strip outer quotes
         // and escape inner single quotes for the shell argument.
@@ -143,7 +174,8 @@ class GameFpsSampler @Inject constructor(
         val timestamps = mutableListOf<Long>()
         // Skip first line (refresh interval).
         for (i in 1 until lines.size) {
-            val cols = lines[i].split(Regex("\\s+"))
+            // P3: use hoisted WHITESPACE instead of allocating a new Regex per line.
+            val cols = lines[i].split(WHITESPACE)
             if (cols.size < 3) continue
             val v = cols[1].toLongOrNull() ?: continue
             if (v > 0) timestamps += v
@@ -165,6 +197,17 @@ class GameFpsSampler @Inject constructor(
         job = null
         _fps.value = null
         _foregroundPkg.value = null
+        layerCache = null
+    }
+
+    companion object {
+        /** Whitespace splitter — hoisted to avoid per-line Regex allocation in parseSurfaceFlingerLatency. */
+        private val WHITESPACE = Regex("""\s+""")
+
+        /** How long the resolved SurfaceFlinger layer name is cached per package (ms).
+         *  4 seconds is long enough to avoid redundant --list calls across many 500 ms ticks
+         *  while still being short enough to recover if the app restarts its surface mid-session. */
+        private const val LAYER_CACHE_TTL_MS = 4_000L
     }
 
     private fun publishCurrentRate(dm: DisplayManager) {

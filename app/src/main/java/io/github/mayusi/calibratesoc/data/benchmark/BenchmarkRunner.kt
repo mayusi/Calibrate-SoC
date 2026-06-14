@@ -366,8 +366,8 @@ class BenchmarkRunner @Inject constructor(
                     outcome = BenchOutcome.ABORTED_TEMP
                     return@withTimeoutOrNull
                 }
-                if (config.respectBatteryFloor && lowBatteryDuringRun(last)) {
-                    outcome = BenchOutcome.ABORTED_BATTERY
+                if (config.respectBatteryFloor && batteryTooHotDuringRun(last)) {
+                    outcome = BenchOutcome.ABORTED_BATTERY_TEMP
                     return@withTimeoutOrNull
                 }
             }
@@ -389,7 +389,13 @@ class BenchmarkRunner @Inject constructor(
 
     private fun preflightCheck(config: BenchConfig): BenchOutcome? = null
 
-    private fun lowBatteryDuringRun(sample: ThrottleSample): Boolean =
+    /**
+     * Returns true when the battery is TOO HOT to continue the sustained
+     * throttle test. The check is on battery TEMPERATURE (≥ 45 °C), NOT on
+     * battery charge level — the old name `lowBatteryDuringRun` was dishonest.
+     * The outcome is reported as [BenchOutcome.ABORTED_BATTERY_TEMP].
+     */
+    private fun batteryTooHotDuringRun(sample: ThrottleSample): Boolean =
         sample.batteryTempC >= 45f
 
     private data class ThrottleResult(

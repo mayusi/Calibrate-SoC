@@ -59,11 +59,20 @@ class UpdateChecker @Inject constructor(
             val remoteVersion = release.tag_name.removePrefix("v")
             val apkAsset = release.assets.firstOrNull { it.name.endsWith(".apk") }
 
+            // Validate the download URL at the trust boundary, before storing it in
+            // UpdateInfo where it could be passed to a downloader or shown in UI.
+            // ApkDownloader.isAllowedUrl enforces HTTPS + GitHub-host allowlist.
+            // If the asset URL fails validation we store null (no download link) rather
+            // than carrying an unvalidated URL; the UI falls back to the Releases page.
+            val validatedApkUrl = apkAsset?.browser_download_url?.let { rawUrl ->
+                if (ApkDownloader.isAllowedUrl(rawUrl)) rawUrl else null
+            }
+
             UpdateInfo(
                 versionName = remoteVersion,
                 tag = release.tag_name,
                 notes = release.body ?: "",
-                apkUrl = apkAsset?.browser_download_url,
+                apkUrl = validatedApkUrl,
                 apkSize = apkAsset?.size ?: 0L,
                 isNewer = isNewer(remoteVersion, BuildConfig.VERSION_NAME),
             )

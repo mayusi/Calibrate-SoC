@@ -76,15 +76,17 @@ class AynScriptGeneratorTest {
         assertThat(sh).contains("'2390000'")
 
         // chmod sandwich present (perfd can't clobber after seal).
-        assertThat(sh).contains("chmod 666 /sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq")
-        assertThat(sh).contains("chmod 444 /sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq")
+        // After S0(b), paths are single-quoted in command position.
+        assertThat(sh).contains("chmod 666 '/sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq'")
+        assertThat(sh).contains("chmod 444 '/sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq'")
     }
 
     @Test
     fun `every write is guarded on path existence and error-tolerant`() {
         val sh = AynScriptGenerator().generate(balanced, report, adapter)
         // A missing policy node on a 2-cluster device must not abort.
-        assertThat(sh).contains("[ -e /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq ]")
+        // After S0(b), paths are single-quoted — the existence test uses the quoted form.
+        assertThat(sh).contains("[ -e '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq' ]")
         // perfd stop is error-tolerant.
         assertThat(sh).contains("stop perfd 2>/dev/null")
     }
@@ -105,8 +107,8 @@ class AynScriptGeneratorTest {
         )
         val sh = AynScriptGenerator().generate(dangerous, report, adapter)
         assertThat(sh).contains("SAFETY: skipping min for policy7")
-        // Must NOT emit a real min write of 3 GHz.
-        assertThat(sh).doesNotContain("printf %s '3000000' > /sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq")
+        // Must NOT emit a real min write of 3 GHz (path is now single-quoted too).
+        assertThat(sh).doesNotContain("printf %s '3000000' > '/sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq'")
     }
 
     @Test
@@ -114,9 +116,10 @@ class AynScriptGeneratorTest {
         val sh = AynScriptGenerator().generate(balanced, report, adapter)
         // The low-floor min write (300000) precedes the max write,
         // which precedes the target min write.
-        val lowMinIdx = sh.indexOf("printf %s '300000' > /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq")
-        val maxIdx = sh.indexOf("'1613000' > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq")
-        val targetMinIdx = sh.indexOf("'307200' > /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq")
+        // After S0(b), paths are single-quoted in the printf redirect target.
+        val lowMinIdx = sh.indexOf("printf %s '300000' > '/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'")
+        val maxIdx = sh.indexOf("'1613000' > '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+        val targetMinIdx = sh.indexOf("'307200' > '/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq'")
         assertThat(lowMinIdx).isGreaterThan(-1)
         assertThat(maxIdx).isGreaterThan(lowMinIdx)
         assertThat(targetMinIdx).isGreaterThan(maxIdx)
@@ -231,8 +234,8 @@ class AynScriptGeneratorTest {
         assertThat(sh).contains("'\\''")
         // 2. The raw injection sequence (close quote then command) must not appear.
         assertThat(sh).doesNotContain("1209600' ;")
-        // 3. Every extraSysfs write must be existence-guarded.
-        assertThat(sh).contains("[ -e /sys/module/cpu_boost/parameters/input_boost_freq ]")
+        // 3. Every extraSysfs write must be existence-guarded (path now single-quoted).
+        assertThat(sh).contains("[ -e '/sys/module/cpu_boost/parameters/input_boost_freq' ]")
     }
 
     @Test
@@ -245,17 +248,17 @@ class AynScriptGeneratorTest {
         )
         val sh = AynScriptGenerator().generate(preset, report, adapter)
 
-        // Existence guard present for each path.
-        assertThat(sh).contains("[ -e /proc/sys/vm/swappiness ]")
-        assertThat(sh).contains("[ -e /sys/module/cpu_boost/parameters/input_boost_ms ]")
+        // Existence guard present for each path (after S0(b), path is single-quoted).
+        assertThat(sh).contains("[ -e '/proc/sys/vm/swappiness' ]")
+        assertThat(sh).contains("[ -e '/sys/module/cpu_boost/parameters/input_boost_ms' ]")
 
-        // Value emitted correctly (single-quoted).
-        assertThat(sh).contains("printf %s '60' > /proc/sys/vm/swappiness")
-        assertThat(sh).contains("printf %s '40' > /sys/module/cpu_boost/parameters/input_boost_ms")
+        // Value emitted correctly (single-quoted value) with single-quoted path.
+        assertThat(sh).contains("printf %s '60' > '/proc/sys/vm/swappiness'")
+        assertThat(sh).contains("printf %s '40' > '/sys/module/cpu_boost/parameters/input_boost_ms'")
 
-        // chmod sandwich applied.
-        assertThat(sh).contains("chmod 666 /proc/sys/vm/swappiness")
-        assertThat(sh).contains("chmod 444 /proc/sys/vm/swappiness")
+        // chmod sandwich applied (path is single-quoted).
+        assertThat(sh).contains("chmod 666 '/proc/sys/vm/swappiness'")
+        assertThat(sh).contains("chmod 444 '/proc/sys/vm/swappiness'")
     }
 
     @Test
@@ -268,8 +271,9 @@ class AynScriptGeneratorTest {
 
         // Must be skipped with a comment, not emitted as a command.
         assertThat(sh).contains("# SKIPPED (invalid path)")
-        // The raw path must not appear in any executable context.
-        assertThat(sh).doesNotContain("printf %s '1' > /data/dangerous_path")
+        // The raw path must not appear in any executable context (unquoted or quoted).
+        assertThat(sh).doesNotContain("printf %s '1' > '/data/dangerous_path'")
+        assertThat(sh).doesNotContain("[ -e '/data/dangerous_path' ]")
         assertThat(sh).doesNotContain("[ -e /data/dangerous_path ]")
     }
 
@@ -281,6 +285,41 @@ class AynScriptGeneratorTest {
         val sh = AynScriptGenerator().generate(preset, report, adapter)
 
         assertThat(sh).contains("# SKIPPED (invalid path)")
+        assertThat(sh).doesNotContain("printf %s 'root' > '/sys/../../etc/shadow'")
         assertThat(sh).doesNotContain("printf %s 'root' > /sys/../../etc/shadow")
+    }
+
+    // ── S0(b) path-quoting tests ─────────────────────────────────────────────
+
+    @Test
+    fun `paths are single-quoted in existence guard and chmod sandwich for cpu freq`() {
+        // After S0(b), the path in every shell command is wrapped in single-quotes
+        // (shellSingleQuote), not left bare. This test locks in the quoted form for
+        // a well-known policy path so regressions are caught immediately.
+        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+
+        // The path must appear quoted in the existence guard, chmod, and redirect.
+        val policyPath = "'/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'"
+        assertThat(sh).contains("[ -e $policyPath ]")
+        assertThat(sh).contains("chmod 666 $policyPath")
+        assertThat(sh).contains("chmod 444 $policyPath")
+        assertThat(sh).contains("> $policyPath")
+
+        // The path must NOT appear in an unquoted form in command position.
+        // (It may appear unquoted in comments or the verification echo, which is fine.)
+        assertThat(sh).doesNotContain("[ -e /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq ]")
+    }
+
+    @Test
+    fun `paths are single-quoted for extraSysfs write`() {
+        val preset = balanced.copy(
+            extraSysfs = mapOf("/proc/sys/vm/swappiness" to "60"),
+        )
+        val sh = AynScriptGenerator().generate(preset, report, adapter)
+
+        assertThat(sh).contains("[ -e '/proc/sys/vm/swappiness' ]")
+        assertThat(sh).contains("chmod 666 '/proc/sys/vm/swappiness'")
+        assertThat(sh).contains("printf %s '60' > '/proc/sys/vm/swappiness'")
+        assertThat(sh).contains("chmod 444 '/proc/sys/vm/swappiness'")
     }
 }

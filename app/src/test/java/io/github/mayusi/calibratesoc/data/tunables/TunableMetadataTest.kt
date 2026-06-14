@@ -184,6 +184,79 @@ class TunableMetadataTest {
     }
 
     // =========================================================================
+    // validateCustomSysfsPath — shell-metacharacter rejection (S0a security fix)
+    // =========================================================================
+
+    @Test
+    fun `custom sysfs path rejects semicolon`() {
+        // ; chains commands — a path containing ; could inject a second shell command.
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda;rm -rf /")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects backtick`() {
+        // Backtick triggers command substitution in the shell even inside some quoting contexts.
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/`whoami`")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects dollar sign`() {
+        // $ triggers variable expansion.
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/\$HOME")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects pipe`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda|cat /etc/passwd")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects ampersand`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda&evil")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects less-than`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda<evil")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects greater-than`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda>evil")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects open parenthesis`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/(evil)")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects close parenthesis`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/evil)cmd")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path rejects NUL byte`() {
+        // NUL is the classic string-terminator injection.
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda evil")).isNotNull()
+    }
+
+    @Test
+    fun `custom sysfs path still accepts a normal scaling_max_freq path`() {
+        // Normal, well-formed sysfs path must still pass after the metachar fix.
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun `custom sysfs path still accepts a normal proc sysctl path`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/vm/swappiness")).isNull()
+    }
+
+    // =========================================================================
     // KernelTunables.customSysfsRule — throws on invalid path
     // =========================================================================
 
