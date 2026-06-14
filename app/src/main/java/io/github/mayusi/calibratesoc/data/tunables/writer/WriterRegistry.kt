@@ -4,6 +4,7 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
+import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -37,6 +38,7 @@ class WriterRegistry @Inject constructor(
     private val settings: SettingsKeyWriter,
     private val pserver: PServerWriter,
     private val noop: NoopWriter,
+    private val unlockedFile: UnlockedFileWriter,
 ) {
     fun writerFor(id: TunableId, report: CapabilityReport): SysfsWriter =
         when (id.kind) {
@@ -55,7 +57,18 @@ class WriterRegistry @Inject constructor(
                 PrivilegeTier.ROOT -> root
                 PrivilegeTier.SHIZUKU -> shizuku
                 PrivilegeTier.AYN_SETTINGS,
-                PrivilegeTier.NONE -> noop
+                PrivilegeTier.NONE -> {
+                    // Unlock-script tier: the chmod 666 the script applied made
+                    // certain nodes app-UID-writable without root. Route those to
+                    // UnlockedFileWriter; everything else stays at NoopWriter
+                    // (will produce a CapabilityDenied that the UI shows as
+                    // "script-only" rather than a live write attempt).
+                    if (report.sysfsDirectlyWritable && Tunables.isUnlockCoveredNode(id.target)) {
+                        unlockedFile
+                    } else {
+                        noop
+                    }
+                }
             }
         }
 }

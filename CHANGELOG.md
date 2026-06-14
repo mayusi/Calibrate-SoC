@@ -11,6 +11,50 @@ Nothing yet.
 
 ---
 
+## [0.1.12-alpha] — 2026-06-14
+
+Audit-driven quality pass on presets, benchmark, and Advanced Tuning. 460 tests green.
+
+### Fixed
+- **Preset governor bug** — Battery Saver used the `powersave` governor, which pins
+  the CPU to its lowest OPP permanently → emulator stutter + audio crackle. Removed
+  `powersave` from all gaming presets (enforced at the GovernorMap level + tested);
+  battery presets now use `conservative` (defaults low, ramps on load).
+
+### Changed — presets
+- Replaced the 4 abstract built-ins with a **use-case taxonomy**: Cool & Quiet,
+  Light Emulation (N64/PSP/Dreamcast), PS2 / GameCube — Sustained, Switch / Heavy,
+  **Anti-Throttle — Sustained Max** (new; caps below the throttle point for steadier
+  sustained perf — the TheOldTaylor underclock philosophy), Stock (undo). Each
+  description states workload, hardware effect, thermal/battery tradeoff.
+- **Smarter generator**: per-cluster-tier caps (prime/gold/little), sustained mode
+  leaves ≥1 OPP step headroom, OPP-knee heuristic, CPU min always at OPP floor.
+- Seeded `content/presets.json` (manifest v2) with verified RP6/Thor/Odin3 presets
+  (TheOldTaylor numbers attributed) — delivered via OTA, no app release.
+
+### Changed — benchmark
+- **Bottleneck diagnosis** (`BenchBottleneck`): every result gets a plain-language
+  verdict (GPU-bound / CPU-limited / thermal-throttle / memory-bound) + which knob
+  helps, from existing measured data. The "makes it researchable" feature.
+- 3D scene integrated into Standard runs; per-loop FPS bar chart; thermal-over-time
+  chart; auto "vs your last run" delta; storage read in Standard; scene visual
+  identity (skybox + ground + per-instance color + 2nd mesh + fill light); fixed the
+  backwards draw-call-ceiling explainer. Rides in kernelsJson (no schema bump).
+
+### Changed — Advanced Tuning (usable on stock no-root)
+- **Script-builder reframe**: on no-root devices, every knob stages into a pending set
+  and Generate Script packages them into the existing "Run as Root" `.sh` pipeline
+  (via the already-built `extraSysfs` emit) — turning a 0%-usable screen into a fully
+  configurable one. Was: 0 of ~50 controls worked on stock RP6.
+- **Tier detection fix**: after the one-time unlock (chmod), covered nodes go LIVE via
+  a new `UnlockedFileWriter` (plain file write, no su) — `whyWriteDenied` now returns
+  null for unlock-covered nodes when `sysfsDirectlyWritable`.
+- **Extended unlock script** to chmod more nodes (DDR devfreq, I/O queue, Adreno
+  extras, CPU governor-tunable dirs, input boost). procfs/cgroup/thermal stay
+  script-only or root-only, honestly labelled — never a dead greyed slider.
+
+---
+
 ## [0.1.11-alpha] — 2026-06-14
 
 The big "all-in-one" round: deep kernel clocking + a benchmark hub. Built across

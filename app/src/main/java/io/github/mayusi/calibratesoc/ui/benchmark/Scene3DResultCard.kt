@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.mayusi.calibratesoc.data.benchmark.GpuSceneResult
+import io.github.mayusi.calibratesoc.ui.benchmark.PerLoopFpsBarChart
 import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
@@ -170,13 +171,12 @@ fun Scene3DResultCard(
 
         if (result.loopResults.size >= 2) {
             Text(
-                "Per-loop avg FPS — flat = sustained, falling = throttling.",
+                "Per-loop avg FPS — green = within 5% of peak, amber = mild drop, red = significant throttle.",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            MetricLineChart(
-                points = result.loopResults.sortedBy { it.loopIndex }
-                    .map { it.avgFps.toFloat() },
+            PerLoopFpsBarChart(
+                loopResults = result.loopResults,
                 heightDp = 130,
             )
         }

@@ -1,3 +1,22 @@
+## [0.1.12-alpha] — 2026-06-14
+
+Big quality pass on the things that matter most: presets that make sense, a benchmark that teaches, and Advanced Tuning you can actually use without root.
+
+### Fixed
+- **Battery preset no longer breaks emulators** — the old "Battery Saver" used a governor that pinned the CPU to its slowest speed, which made emulators stutter and crackle audio. Replaced with one that stays low but ramps up when a game needs it.
+
+### Changed — Presets (the core of the app)
+- **Use-case presets** instead of abstract percentages: Cool & Quiet (battery/2D retro), Light Emulation (N64/PSP/Dreamcast), PS2 / GameCube — Sustained, Switch / Heavy, **Anti-Throttle — Sustained Max** (the new "underclock for steadier performance" tune), and Stock (undo). Each tells you what it's for, what it does, and the heat/battery tradeoff.
+- **Smarter tuning** — presets are derived from your device's real frequency table and cluster layout (little/big/prime), and the sustained ones cap *below* the throttle point so you get steadier framerates over a long session than running flat-out.
+- **Verified device presets** (Retroid Pocket 6, Thor, Odin 3) delivered through the live content channel — no app update needed.
+
+### Changed — Benchmark (now teaches, not just a number)
+- **Bottleneck diagnosis** — every result now tells you WHY your score is what it is: CPU-bound, GPU-bound, or thermal-throttled, and which tune helps.
+- The heavy 3D test now runs as part of a Standard benchmark (not hidden), with a clearer scene, per-loop bar chart, throttle-over-time graph, storage speed, and an automatic "vs your last run" comparison.
+
+### Changed — Advanced Tuning (usable without root now)
+- On a no-root device, Advanced Tuning becomes a **script builder**: configure any knob, then Generate Script and run it via your device's "Run as Root" — so it actually does something instead of greying out. Run the one-time unlock and many knobs become live-adjustable. Controls that genuinely need root are clearly labelled, never faked.
+
 ## [0.1.11-alpha] — 2026-06-14
 
 The big one — deep clocking + an all-in-one benchmark hub.

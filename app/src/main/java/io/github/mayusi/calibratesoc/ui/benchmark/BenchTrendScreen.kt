@@ -13,8 +13,10 @@ import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -107,8 +109,8 @@ fun BenchTrendScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    MetricLineChart(
-                        points   = activeSeries.map { it.score.toFloat() },
+                    TrendChartWithDates(
+                        series   = activeSeries,
                         heightDp = 180,
                     )
 
@@ -333,4 +335,53 @@ private fun TrendEmptyState() {
                 "Try running a Standard benchmark before and after a tune.",
         modifier = Modifier.padding(top = 32.dp),
     )
+}
+
+// ─── Trend chart with date labels ────────────────────────────────────
+// Reuses MetricLineChart (the shared chart component) and adds an x-axis
+// date legend below it, since Vico's ValueFormatter API varies across
+// versions and we want to stay compatible with the project's pinned version.
+
+@Composable
+private fun TrendChartWithDates(
+    series: List<BenchTrend.Point>,
+    heightDp: Int = 180,
+) {
+    if (series.size < 2) return
+
+    val dateFmt = remember { SimpleDateFormat("MMM d", Locale.getDefault()) }
+
+    // The chart itself (score values as floats)
+    MetricLineChart(
+        points   = series.map { it.score.toFloat() },
+        heightDp = heightDp,
+    )
+
+    // Date legend below the chart — show first, middle, and last dates as axis labels
+    if (series.size >= 2) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 2.dp, start = 4.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                dateFmt.format(Date(series.first().startedAtMs)),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (series.size >= 3) {
+                Text(
+                    dateFmt.format(Date(series[series.size / 2].startedAtMs)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                dateFmt.format(Date(series.last().startedAtMs)),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }

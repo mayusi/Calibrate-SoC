@@ -1,8 +1,11 @@
 package io.github.mayusi.calibratesoc.ui.benchmark
 
 import android.content.Intent
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,12 +15,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -45,6 +50,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -55,13 +63,17 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.benchmark.BenchBottleneck
 import io.github.mayusi.calibratesoc.data.benchmark.BenchFlavor
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRating
 import io.github.mayusi.calibratesoc.data.benchmark.BenchRun
 import io.github.mayusi.calibratesoc.data.benchmark.BenchScores
 import io.github.mayusi.calibratesoc.data.benchmark.BenchmarkRunner
 import io.github.mayusi.calibratesoc.data.benchmark.GpuSceneResult
+import io.github.mayusi.calibratesoc.data.benchmark.SceneLoopResult
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
+import io.github.mayusi.calibratesoc.data.benchmark.ThrottleSample
+import io.github.mayusi.calibratesoc.data.hardware.StorageClassNames
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import kotlinx.serialization.json.Json
 import io.github.mayusi.calibratesoc.ui.components.KvRow
@@ -142,6 +154,21 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
         }
     }
 
+    // Build a map: runId → previous same-flavor completed run's overallScore.
+    // Used for the auto-delta headline in each RunCard.
+    val prevScoreByRun = remember(history) {
+        val byFlavor = history
+            .filter { it.outcome == io.github.mayusi.calibratesoc.data.benchmark.BenchOutcome.COMPLETED }
+            .sortedBy { it.startedAtMs }
+            .groupBy { it.flavor }
+        byFlavor.values.flatMap { runs ->
+            runs.mapIndexedNotNull { idx, run ->
+                if (idx == 0) null
+                else run.id to (runs[idx - 1].overallScore)
+            }
+        }.toMap()
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -175,6 +202,7 @@ private fun BenchmarkContent(viewModel: BenchmarkViewModel) {
                     selected = run.id in selection,
                     onToggleSelection = { viewModel.toggleSelection(run.id) },
                     onDelete = { viewModel.delete(run.id) },
+                    prevSameFlavorScore = prevScoreByRun[run.id],
                 )
             }
         }
@@ -282,23 +310,48 @@ private fun RunControls(
                         },
                     )
                     FlavorButton(
-                        title = "Quick",
-                        subtitle = "~20 s · single-thread CPU integer. Best for quick before/after checks.",
+                        title = "Quick  (~20 s)",
+                        subtitle = "Single-thread CPU integer — lightweight before/after check when iterating a tune.",
+                        learnBullets = listOf(
+                            "Peak per-core integer speed",
+                            "Fastest way to spot CPU clock regressions",
+                            "No GPU, memory, or multi-thread data",
+                        ),
                         onClick = { onRun(BenchFlavor.QUICK, name) },
                     )
                     FlavorButton(
-                        title = "Standard",
-                        subtitle = "~1 min · full suite: CPU int (single + multi) + float + AES + RAM + GPU.",
+                        title = "Standard  (~2 min)",
+                        subtitle = "Full suite: CPU int + float + AES + RAM + GPU triangle storm + 3D scene + storage probe.",
+                        learnBullets = listOf(
+                            "Single- and multi-thread CPU throughput",
+                            "GPU fill rate + frame pacing (triangle storm)",
+                            "Bottleneck diagnosis — GPU-bound vs CPU-limited",
+                            "3D scene: 3-loop sustained FPS + stability%",
+                            "Storage read speed (UFS class indication)",
+                        ),
                         onClick = { onRun(BenchFlavor.STANDARD, name) },
                     )
                     FlavorButton(
-                        title = "Full",
-                        subtitle = "~3 min · Standard + 2-min sustained throttle curve. Shows how the chip behaves under heat.",
+                        title = "Full  (~5 min)",
+                        subtitle = "Standard + 2-min sustained throttle curve. The only mode that shows your under-heat clock floor.",
+                        learnBullets = listOf(
+                            "Everything Standard gives you",
+                            "Peak vs sustained CPU clock (throttle floor)",
+                            "Time-to-throttle: how long the chip holds peak clock",
+                            "Thermal headroom: margin below the 85°C kill threshold",
+                            "Power draw and energy used under sustained load",
+                        ),
                         onClick = { onRun(BenchFlavor.FULL, name) },
                     )
                     FlavorButton(
-                        title = "GPU 3D",
-                        subtitle = "~3 min · Heavy sustained 3D scene at 1440p. GPU-only: FPS + thermal stability across loops.",
+                        title = "GPU 3D  (~3 min)",
+                        subtitle = "Heavy sustained 1440p scene — 10 loops × 20 s. GPU-only: FPS stability across loops.",
+                        learnBullets = listOf(
+                            "Sustained GPU FPS over 10 loops (real gaming load)",
+                            "Stability%: how much FPS drops as thermals rise",
+                            "Per-loop bar chart — spot exactly when throttling starts",
+                            "Frame pacing: 1% low, p99, consistency%",
+                        ),
                         onClick = { onRun(BenchFlavor.SCENE_3D, name) },
                     )
                 }
@@ -330,11 +383,52 @@ private fun RunControls(
 }
 
 @Composable
-private fun FlavorButton(title: String, subtitle: String, onClick: () -> Unit) {
-    Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-        Column {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.labelSmall)
+private fun FlavorButton(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    learnBullets: List<String> = emptyList(),
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column {
+        Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (learnBullets.isNotEmpty()) {
+            TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.padding(start = 4.dp),
+            ) {
+                Text(
+                    if (expanded) "Hide details" else "What will this measure?",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    learnBullets.forEach { bullet ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "•",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                bullet,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -348,10 +442,24 @@ private fun RunCard(
     selected: Boolean,
     onToggleSelection: () -> Unit,
     onDelete: () -> Unit,
+    prevSameFlavorScore: Long? = null,
 ) {
     val dateFmt = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
     val rating = remember(run, report) {
         if (report != null) BenchRating.rate(run, report) else null
+    }
+    val throttle = remember(run) { ThrottleAnalysis.from(run.throttleSamples, killTempC = 85f) }
+    val bottleneck = remember(run, throttle) {
+        if (run.outcome == io.github.mayusi.calibratesoc.data.benchmark.BenchOutcome.COMPLETED) {
+            BenchBottleneck.diagnose(run.kernels, throttle)
+        } else null
+    }
+    val sceneResult = remember(run.kernels.sceneJson) {
+        run.kernels.sceneJson?.let { json ->
+            runCatching {
+                Json { ignoreUnknownKeys = true }.decodeFromString<GpuSceneResult>(json)
+            }.getOrNull()
+        }
     }
 
     Card(
@@ -379,9 +487,12 @@ private fun RunCard(
                 FlavorChip(run.flavor)
             }
 
-            // ── Headline score + rating ──────────────────────────
+            // ── Bottleneck verdict (P1 — THE key card, shown first) ──
+            bottleneck?.let { BottleneckCard(it) }
+
+            // ── Headline score + rating + auto-delta vs prev run ─────
             run.overallScore?.let { score ->
-                HeadlineScoreCard(score, rating)
+                HeadlineScoreCard(score, rating, prevSameFlavorScore)
             }
 
             // ── Category sub-scores (CPU / GPU / Memory) ─────────
@@ -389,20 +500,13 @@ private fun RunCard(
 
             // ── Category cards ───────────────────────────────────
             CpuCard(run)
-            if (run.kernels.memoryBandwidthMBps != null) MemoryCard(run)
+            if (run.kernels.memoryBandwidthMBps != null || run.kernels.storageReadMBps != null) MemoryCard(run)
             if (run.kernels.gpuFps != null || run.kernels.cpuDrawCallFps != null) GpuDetailCard(run)
             if (run.throttleSamples.isNotEmpty()) PowerThermalCard(run)
 
-            // ── SCENE_3D result card ─────────────────────────────
-            if (run.flavor == BenchFlavor.SCENE_3D && run.kernels.sceneJson != null) {
-                val sceneResult = remember(run.kernels.sceneJson) {
-                    runCatching {
-                        Json { ignoreUnknownKeys = true }.decodeFromString<GpuSceneResult>(
-                            run.kernels.sceneJson
-                        )
-                    }.getOrNull()
-                }
-                sceneResult?.let { Scene3DResultCard(it) }
+            // ── Scene result card (SCENE_3D standalone OR embedded in STANDARD/FULL)
+            if (sceneResult != null) {
+                Scene3DResultCard(sceneResult)
             }
 
             // ── Snapshot context ─────────────────────────────────
@@ -439,12 +543,101 @@ private fun RunCard(
     }
 }
 
+// ─── Bottleneck verdict card ──────────────────────────────────────────
+
+@Composable
+private fun BottleneckCard(verdict: BenchBottleneck.BottleneckVerdict) {
+    val accentColor = when (verdict.type) {
+        BenchBottleneck.BottleneckType.GPU_BOUND         -> Color(0xFFA78BFA) // purple
+        BenchBottleneck.BottleneckType.CPU_DRAW_CALL     -> Color(0xFF60A5FA) // blue
+        BenchBottleneck.BottleneckType.THERMAL_THROTTLE  -> MaterialTheme.colorScheme.error
+        BenchBottleneck.BottleneckType.MEMORY_BOUND      -> Color(0xFF34D399) // green
+        BenchBottleneck.BottleneckType.BALANCED          -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val typeLabel = when (verdict.type) {
+        BenchBottleneck.BottleneckType.GPU_BOUND         -> "GPU-bound"
+        BenchBottleneck.BottleneckType.CPU_DRAW_CALL     -> "CPU-limited"
+        BenchBottleneck.BottleneckType.THERMAL_THROTTLE  -> "Thermal throttle"
+        BenchBottleneck.BottleneckType.MEMORY_BOUND      -> "Memory-bound"
+        BenchBottleneck.BottleneckType.BALANCED          -> "Balanced"
+    }
+    var expanded by remember { mutableStateOf(false) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.BugReport,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = accentColor,
+                )
+                Text(
+                    "Bottleneck: $typeLabel",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = accentColor,
+                )
+                val confLabel = when (verdict.confidence) {
+                    BenchBottleneck.BottleneckVerdict.Confidence.HIGH   -> ""
+                    BenchBottleneck.BottleneckVerdict.Confidence.MEDIUM -> " (medium confidence)"
+                    BenchBottleneck.BottleneckVerdict.Confidence.LOW    -> " (low confidence)"
+                }
+                if (confLabel.isNotEmpty()) {
+                    Text(
+                        confLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                verdict.headline,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+            )
+            TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.padding(0.dp),
+            ) {
+                Text(
+                    if (expanded) "Hide detail" else "Why? What to change?",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (expanded) {
+                Text(
+                    verdict.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Knob: ${verdict.knob}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                )
+            }
+        }
+    }
+}
+
 // ─── Headline score card ──────────────────────────────────────────────
 
 @Composable
 private fun HeadlineScoreCard(
     score: Long,
     rating: BenchRating.Rating?,
+    prevScore: Long? = null,
 ) {
     val ratingColor = rating?.let { r ->
         when (r.color) {
@@ -456,6 +649,14 @@ private fun HeadlineScoreCard(
     }
 
     val clipboardManager = LocalClipboardManager.current
+    // Auto-delta vs previous same-flavor run
+    val deltaStr = if (prevScore != null && prevScore > 0) {
+        val pct = (score - prevScore) * 100.0 / prevScore
+        "%+.1f%% vs last".format(pct)
+    } else null
+    val deltaColor = if (prevScore != null && score > prevScore)
+        Color(0xFF34D399) else MaterialTheme.colorScheme.error
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -498,6 +699,14 @@ private fun HeadlineScoreCard(
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = ratingColor ?: MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    deltaStr?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = deltaColor,
                         )
                     }
                 }
@@ -636,19 +845,38 @@ private fun CpuCard(run: BenchRun) {
 
 @Composable
 private fun MemoryCard(run: BenchRun) {
-    val bw = run.kernels.memoryBandwidthMBps ?: return
-    SectionCard("Memory") {
+    val bw = run.kernels.memoryBandwidthMBps
+    val storageMBps = run.kernels.storageReadMBps
+    if (bw == null && storageMBps == null) return
+    SectionCard("Memory & Storage") {
         Text(
-            "How quickly the CPU can read/write RAM. " +
+            "How quickly the CPU can read/write RAM and internal flash. " +
                 "Higher bandwidth = smoother texture streaming and large-data workloads.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        KvRow(
-            label = "RAM bandwidth",
-            value = "%.1f MB/s".format(bw),
-            explainer = "Sequential read/write throughput. Affects game asset loading.",
-        )
+        bw?.let {
+            KvRow(
+                label = "RAM bandwidth",
+                value = "%.1f MB/s".format(it),
+                explainer = "Sequential read/write throughput (STREAM Triad). Affects game asset loading.",
+            )
+        }
+        storageMBps?.let { mbps ->
+            val storageClass = when {
+                mbps >= 3000 -> "UFS 3.1+ class"
+                mbps >= 1500 -> "UFS 3.0 class"
+                mbps >= 800  -> "UFS 2.1 class"
+                mbps >= 300  -> "UFS 2.0 / eMMC 5.1 class"
+                else         -> "slow / eMMC class"
+            }
+            KvRow(
+                label = "Storage read speed",
+                value = "%.0f MB/s — $storageClass".format(mbps),
+                explainer = "Sequential read from internal flash (32 MB probe, kernel cache included). " +
+                    "Compare your own runs — stock firmware may serve from page cache.",
+            )
+        }
     }
 }
 
@@ -699,18 +927,27 @@ private fun GpuDetailCard(run: BenchRun) {
                 fraction = (pct / 100.0).toFloat().coerceIn(0f, 1f),
             )
         }
-        k.cpuDrawCallFps?.let {
+        k.cpuDrawCallFps?.let { dcFps ->
+            val gpuFps = k.gpuFps
+            val headroom = if (gpuFps != null && gpuFps > 0) {
+                " (${(dcFps / gpuFps).let { "%.1fx".format(it) }} above GPU FPS)"
+            } else ""
             KvRow(
                 label = "CPU draw-call ceiling",
-                value = "%.0f calls/s".format(it),
-                explainer = "If lower than GPU FPS, your games may be CPU-bottlenecked.",
+                value = "%.0f calls/s$headroom".format(dcFps),
+                explainer = "How many draw commands/s the CPU can submit to the GPU. " +
+                    "Divide by typical draw-calls-per-frame (~100–500) to estimate whether " +
+                    "the CPU can keep the GPU fed. If this is close to GPU FPS, the CPU is " +
+                    "the bottleneck — raising CPU clock / governor helps more than GPU clock.",
             )
         }
         k.cpuUsageDuringGpuPct?.let { pct ->
             val hint = when {
-                pct >= 70 -> "CPU was heavily loaded during GPU test — likely CPU-limited."
-                pct <= 30 -> "CPU was idle during GPU test — pure GPU-bound workload."
-                else -> "Mixed CPU/GPU load during GPU test."
+                pct >= 70 -> "CPU was $pct% busy — the GPU bench was likely CPU-limited, not GPU-bound. " +
+                    "Raising CPU clock will improve this score."
+                pct <= 30 -> "CPU was only $pct% busy — pure GPU-bound. " +
+                    "Raising GPU clock directly improves this score."
+                else -> "CPU was $pct% busy during the GPU test — mixed CPU/GPU load."
             }
             KvRow(
                 label = "CPU usage during GPU test",
@@ -799,20 +1036,177 @@ private fun PowerThermalCard(run: BenchRun) {
             )
         }
 
+        // ── Combined MHz + temperature chart (P2) ───────────────
         Text(
-            "Sustained CPU MHz over time — flat = no throttle, sloping down = throttling.",
+            "CPU MHz over time — flat = no throttle, dropping = throttling under heat.",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        MetricLineChart(samples.map { it.cpuMaxMhz.toFloat() })
-
-        Text(
-            "CPU temperature over time.",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        ThermalMhzCombinedChart(
+            samples = samples,
+            timeToThrottleMs = a.timeToThrottleMs,
         )
-        MetricLineChart(samples.map { it.cpuMaxTempC })
     }
+}
+
+// ─── Per-loop FPS bar chart ────────────────────────────────────────────
+// 3DMark-style: each loop = a bar, green within 5% of peak, amber/red below,
+// dashed stability-threshold line, peak+sustained annotation.
+
+@Composable
+fun PerLoopFpsBarChart(
+    loopResults: List<SceneLoopResult>,
+    modifier: Modifier = Modifier,
+    heightDp: Int = 150,
+) {
+    if (loopResults.size < 2) return
+    val sorted = loopResults.sortedBy { it.loopIndex }
+    val peakFps = sorted.maxOf { it.avgFps }
+    val tailFrom = (sorted.size * 0.25).toInt().coerceAtMost(sorted.size - 1)
+    val sustainedFps = sorted.drop(tailFrom).map { it.avgFps }.average()
+    val stabilityThreshold = peakFps * 0.90 // 90% of peak = dashed line
+
+    // Colors
+    val green  = Color(0xFF34D399)
+    val amber  = Color(0xFFFBBF24)
+    val red    = Color(0xFFF87171)
+    val dashColor  = Color(0xFF94A3B8)
+
+    Canvas(modifier = modifier.fillMaxWidth().height(heightDp.dp)) {
+        if (peakFps <= 0) return@Canvas
+        val barCount = sorted.size
+        val gapFraction = 0.15f
+        val barWidth = size.width / barCount * (1f - gapFraction)
+        val gap = size.width / barCount * gapFraction
+
+        sorted.forEachIndexed { i, loop ->
+            val frac = (loop.avgFps / peakFps).toFloat().coerceIn(0f, 1f)
+            val barH = size.height * frac
+            val x = i * (barWidth + gap)
+            val color = when {
+                loop.avgFps >= peakFps * 0.95 -> green
+                loop.avgFps >= peakFps * 0.80 -> amber
+                else -> red
+            }
+            drawRect(
+                color = color,
+                topLeft = Offset(x, size.height - barH),
+                size = Size(barWidth, barH),
+            )
+        }
+
+        // Dashed stability threshold line at 90% of peak
+        val lineY = size.height * (1f - (stabilityThreshold / peakFps).toFloat().coerceIn(0f, 1f))
+        drawLine(
+            color = dashColor,
+            start = Offset(0f, lineY),
+            end = Offset(size.width, lineY),
+            strokeWidth = 2.dp.toPx(),
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f)),
+        )
+    }
+}
+
+// ─── Combined MHz + temperature chart ─────────────────────────────────
+// Two overlay lines on one chart (MHz primary axis scaled, temp secondary).
+// Dashed vertical marker at timeToThrottleMs; amber region post-throttle.
+
+@Composable
+private fun ThermalMhzCombinedChart(
+    samples: List<ThrottleSample>,
+    timeToThrottleMs: Long?,
+    modifier: Modifier = Modifier,
+    heightDp: Int = 180,
+) {
+    if (samples.size < 2) return
+    val peakMhz = samples.maxOf { it.cpuMaxMhz }.toFloat().coerceAtLeast(1f)
+    val peakTemp = samples.maxOf { it.cpuMaxTempC }.coerceAtLeast(1f)
+    val totalMs = (samples.last().elapsedMs - samples.first().elapsedMs).toFloat().coerceAtLeast(1f)
+    Column(modifier = modifier) {
+
+    val mhzColor   = Color(0xFF60A5FA) // blue
+    val tempColor  = Color(0xFFF97316) // orange
+    val throttleLineColor = Color(0xFFFBBF24) // amber dashed
+    val amberFill  = Color(0xFFFBBF24).copy(alpha = 0.12f)
+
+    Canvas(modifier = modifier.fillMaxWidth().height(heightDp.dp)) {
+        val w = size.width
+        val h = size.height
+
+        // Determine throttle x position
+        val throttleX: Float? = timeToThrottleMs?.let { ttMs ->
+            val firstMs = samples.first().elapsedMs
+            ((ttMs - firstMs).toFloat() / totalMs * w).coerceIn(0f, w)
+        }
+
+        // Amber shaded post-throttle region
+        if (throttleX != null) {
+            drawRect(
+                color = amberFill,
+                topLeft = Offset(throttleX, 0f),
+                size = Size(w - throttleX, h),
+            )
+        }
+
+        // Draw MHz line
+        for (i in 1 until samples.size) {
+            val prev = samples[i - 1]
+            val cur  = samples[i]
+            val x1 = ((prev.elapsedMs - samples.first().elapsedMs).toFloat() / totalMs * w)
+            val x2 = ((cur.elapsedMs  - samples.first().elapsedMs).toFloat() / totalMs * w)
+            val y1 = h - (prev.cpuMaxMhz.toFloat() / peakMhz * h)
+            val y2 = h - (cur.cpuMaxMhz.toFloat()  / peakMhz * h)
+            drawLine(mhzColor, Offset(x1, y1), Offset(x2, y2), strokeWidth = 2.dp.toPx())
+        }
+
+        // Draw temperature line
+        for (i in 1 until samples.size) {
+            val prev = samples[i - 1]
+            val cur  = samples[i]
+            val x1 = ((prev.elapsedMs - samples.first().elapsedMs).toFloat() / totalMs * w)
+            val x2 = ((cur.elapsedMs  - samples.first().elapsedMs).toFloat() / totalMs * w)
+            val y1 = h - (prev.cpuMaxTempC / peakTemp * h)
+            val y2 = h - (cur.cpuMaxTempC  / peakTemp * h)
+            drawLine(tempColor, Offset(x1, y1), Offset(x2, y2), strokeWidth = 2.dp.toPx())
+        }
+
+        // Dashed vertical throttle marker
+        if (throttleX != null) {
+            drawLine(
+                color = throttleLineColor,
+                start = Offset(throttleX, 0f),
+                end = Offset(throttleX, h),
+                strokeWidth = 2.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 5f)),
+            )
+        }
+    }
+    // Legend
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.padding(top = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.size(10.dp).height(2.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Color(0xFF60A5FA)))
+            }
+            Text("CPU MHz", style = MaterialTheme.typography.labelSmall, color = Color(0xFF60A5FA))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.size(10.dp).height(2.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(2.dp).background(Color(0xFFF97316)))
+            }
+            Text("CPU Temp", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF97316))
+        }
+        if (timeToThrottleMs != null) {
+            Text(
+                "-- throttle point",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFFBBF24),
+            )
+        }
+    }
+    } // end Column
 }
 
 /** KvRow plus a thin progress bar where a true 0..1 fraction is meaningful

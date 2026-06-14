@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Storage
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -41,6 +44,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -69,6 +73,7 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.CoolingDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.DevfreqDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
+import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.capability.SchedBoostInterface
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
 import io.github.mayusi.calibratesoc.data.capability.VmSysctlsProbe
@@ -80,6 +85,7 @@ import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata.ValueKind
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.VoltageControl
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
@@ -108,6 +114,8 @@ fun AdvancedTuningScreen(
     val report by viewModel.capability.collectAsStateWithLifecycle()
     val lastResult by viewModel.lastResult.collectAsStateWithLifecycle()
     val customHistory by viewModel.customRuleHistory.collectAsStateWithLifecycle()
+    val pendingAdvanced by viewModel.pendingAdvanced.collectAsStateWithLifecycle()
+    val lastDeploy by viewModel.lastDeploy.collectAsStateWithLifecycle()
 
     val r = report
     if (r == null) {
@@ -116,6 +124,13 @@ fun AdvancedTuningScreen(
         }
         return
     }
+
+    // Script-builder mode: stock device (AYN_SETTINGS or NONE) AND no
+    // sysfsDirectlyWritable. In this mode controls stage knobs instead of
+    // writing directly. Even in script-builder mode, nodes that the unlock
+    // script covered AND the unlock was run go live (isScriptBuilderMode
+    // returns false for those).
+    val globalScriptBuilderMode = r.privilege != PrivilegeTier.ROOT
 
     // Dangerous-section expander state (collapsed by default for safety).
     var dangerousExpanded by rememberSaveable { mutableStateOf(false) }
@@ -127,10 +142,24 @@ fun AdvancedTuningScreen(
     ) {
         // ── Page header ───────────────────────────────────────────────────
         item {
-            AdvancedHeader(report = r, onBack = onBack)
+            AdvancedHeader(
+                report = r,
+                onBack = onBack,
+                scriptBuilderMode = globalScriptBuilderMode,
+                stagedCount = pendingAdvanced.size,
+                onGenerateScript = { viewModel.generateAdvancedScript() },
+                onClearStaged = { viewModel.clearPendingAdvanced() },
+            )
         }
 
-        // ── Last write result feedback ────────────────────────────────────
+        // ── Script deploy result ──────────────────────────────────────────
+        lastDeploy?.let { deployed ->
+            item {
+                ScriptDeployedCard(deployed = deployed, onDismiss = viewModel::clearLastDeploy)
+            }
+        }
+
+        // ── Last write result feedback (live-write mode) ──────────────────
         lastResult?.let { result ->
             item {
                 WriteResultCard(result = result, onDismiss = viewModel::clearLastResult)
@@ -138,15 +167,20 @@ fun AdvancedTuningScreen(
         }
 
         // ── 1. CPU CORES ──────────────────────────────────────────────────
-        // Always render: every device has at least one CPU. cpu0 is shown
-        // but its offline toggle is permanently disabled with a DANGEROUS
-        // risk label and explanation.
         item {
             CpuCoresSection(
                 report = r,
+                pending = pendingAdvanced,
                 onWrite = { id, value, reason ->
-                    viewModel.write(id, value, reason)
+                    if (viewModel.isScriptBuilderMode(id, r)) {
+                        viewModel.stageAdvancedKnob(id, value)
+                    } else {
+                        viewModel.write(id, value, reason)
+                    }
                 },
+                onStage = { id, value -> viewModel.stageAdvancedKnob(id, value) },
+                onUnstage = { id -> viewModel.unstageAdvancedKnob(id) },
+                scriptBuilderMode = globalScriptBuilderMode,
             )
         }
 
@@ -155,9 +189,15 @@ fun AdvancedTuningScreen(
             item {
                 CpuGovernorTunablesSection(
                     report = r,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        if (viewModel.isScriptBuilderMode(id, r)) {
+                            viewModel.stageAdvancedKnob(id, value)
+                        } else {
+                            viewModel.write(id, value, reason)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
@@ -169,19 +209,29 @@ fun AdvancedTuningScreen(
                     report = r,
                     gpu = gpu,
                     adrenoExtras = r.adrenoExtras,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        if (viewModel.isScriptBuilderMode(id, r)) {
+                            viewModel.stageAdvancedKnob(id, value)
+                        } else {
+                            viewModel.write(id, value, reason)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
 
         // ── 4. SCHEDULER BOOST ───────────────────────────────────────────
+        // /dev/stune and /dev/cpuctl are cgroup paths — NOT scriptable from
+        // app UID. Show read-only info with honest "Root only" label on stock.
         if (r.schedBoostInterface != SchedBoostInterface.NONE && r.schedBoostValues.isNotEmpty()) {
             item {
                 SchedBoostSection(
                     report = r,
+                    scriptBuilderMode = globalScriptBuilderMode,
                     onWrite = { id, value, reason ->
+                        // cgroup paths are always root-only — write() will gate them
                         viewModel.write(id, value, reason)
                     },
                 )
@@ -193,9 +243,15 @@ fun AdvancedTuningScreen(
             item {
                 InputBoostSection(
                     report = r,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        if (viewModel.isScriptBuilderMode(id, r)) {
+                            viewModel.stageAdvancedKnob(id, value)
+                        } else {
+                            viewModel.write(id, value, reason)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
@@ -206,9 +262,15 @@ fun AdvancedTuningScreen(
                 MemoryBusSection(
                     report = r,
                     devices = r.devfreqDevices,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        if (viewModel.isScriptBuilderMode(id, r)) {
+                            viewModel.stageAdvancedKnob(id, value)
+                        } else {
+                            viewModel.write(id, value, reason)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
@@ -219,22 +281,37 @@ fun AdvancedTuningScreen(
                 IoSection(
                     report = r,
                     devices = r.blockDevices,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        if (viewModel.isScriptBuilderMode(id, r)) {
+                            viewModel.stageAdvancedKnob(id, value)
+                        } else {
+                            viewModel.write(id, value, reason)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
 
         // ── 8. VM / KERNEL ────────────────────────────────────────────────
+        // /proc/sys writes cannot be done from app UID under SELinux.
+        // These are SCRIPT-ONLY on stock (no live writes from app UID).
         r.vmSysctls?.let { vm ->
             item {
                 VmKernelSection(
                     report = r,
                     vm = vm,
+                    pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        viewModel.write(id, value, reason)
+                        // /proc/sys = script-only on stock (SELinux blocks app UID)
+                        if (r.privilege == PrivilegeTier.ROOT) {
+                            viewModel.write(id, value, reason)
+                        } else {
+                            viewModel.stageAdvancedKnob(id, value)
+                        }
                     },
+                    scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
@@ -244,6 +321,8 @@ fun AdvancedTuningScreen(
             CustomSysfsSection(
                 report = r,
                 history = customHistory,
+                pending = pendingAdvanced,
+                scriptBuilderMode = globalScriptBuilderMode,
                 onWrite = { path, value ->
                     viewModel.writeCustomRule(path, value)
                 },
@@ -256,7 +335,8 @@ fun AdvancedTuningScreen(
         }
 
         // ── DANGEROUS section — thermal gating ───────────────────────────
-        // Collapsed by default. Contains thermalExtras + coolingDevices.
+        // Thermal is NEVER scriptable (safety). Shows current values
+        // with an honest "Root only — thermal controls are never scriptable" label.
         if (r.thermalExtras.isNotEmpty() || r.coolingDevices.isNotEmpty()) {
             item {
                 DangerousExpander(
@@ -278,9 +358,20 @@ fun AdvancedTuningScreen(
             }
         }
 
+        // ── Bottom Generate Script CTA ────────────────────────────────────
+        if (globalScriptBuilderMode && pendingAdvanced.isNotEmpty()) {
+            item {
+                GenerateScriptCta(
+                    stagedCount = pendingAdvanced.size,
+                    onGenerate = { viewModel.generateAdvancedScript() },
+                    onClear = { viewModel.clearPendingAdvanced() },
+                )
+            }
+        }
+
         // ── Footer ───────────────────────────────────────────────────────
         item {
-            RevertFooter()
+            RevertFooter(scriptBuilderMode = globalScriptBuilderMode)
         }
     }
 }
@@ -290,7 +381,14 @@ fun AdvancedTuningScreen(
 // =============================================================================
 
 @Composable
-private fun AdvancedHeader(report: CapabilityReport, onBack: () -> Unit) {
+private fun AdvancedHeader(
+    report: CapabilityReport,
+    onBack: () -> Unit,
+    scriptBuilderMode: Boolean,
+    stagedCount: Int,
+    onGenerateScript: () -> Unit,
+    onClearStaged: () -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
@@ -302,24 +400,171 @@ private fun AdvancedHeader(report: CapabilityReport, onBack: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             )
         }
-        val denyReason = Tunables.whyWriteDenied(
-            KernelTunables.vmSwappiness(),
-            report,
-        )
-        if (denyReason != null) {
-            AlertCard(
-                type = AlertType.WARNING,
-                title = "Read-only — controls are greyed out",
-                message = denyReason,
-            )
-        } else {
-            AlertCard(
-                type = AlertType.INFO,
-                title = "Root tier active — writes go live immediately",
-                message = "Every change is snapshotted before writing and reverts automatically on the next reboot.",
+
+        when {
+            report.privilege == PrivilegeTier.ROOT -> {
+                AlertCard(
+                    type = AlertType.INFO,
+                    title = "Root tier active — writes go live immediately",
+                    message = "Every change is snapshotted before writing and reverts automatically on the next reboot.",
+                )
+            }
+            scriptBuilderMode && !report.sysfsDirectlyWritable -> {
+                // No unlock run. Show prominent script-builder explanation + unlock path.
+                AlertCard(
+                    type = AlertType.INFO,
+                    title = "Script builder — configure knobs, then Generate Script",
+                    message = "Nothing is written until you run the script via your device's Settings → Run script as Root. " +
+                        "Controls are enabled — select values, then tap Generate Script to bundle them into a runnable .sh file.",
+                )
+                // Surface the one-time unlock card: makes CPU/GPU/I/O controls live-writable.
+                UnlockBannerCard()
+            }
+            scriptBuilderMode && report.sysfsDirectlyWritable -> {
+                // Unlock ran. CPU/GPU/I/O knobs are now live; only procfs + cgroups are script-only.
+                AlertCard(
+                    type = AlertType.INFO,
+                    title = "Unlock active — CPU/GPU/I/O knobs write live",
+                    message = "The one-time unlock script has been run. CPU, GPU, DDR, I/O, and input-boost controls " +
+                        "write directly. Scheduler boost (cgroups) and VM sysctls are script-only — " +
+                        "stage them and use Generate Script.",
+                )
+            }
+            else -> {
+                // SHIZUKU or other
+                AlertCard(
+                    type = AlertType.WARNING,
+                    title = "Script builder — configure knobs, then Generate Script",
+                    message = "Direct sysfs writes are not available on this tier. Configure knobs and Generate Script to apply.",
+                )
+            }
+        }
+
+        // Generate Script CTA at the top (visible when knobs are staged).
+        if (scriptBuilderMode && stagedCount > 0) {
+            GenerateScriptCta(
+                stagedCount = stagedCount,
+                onGenerate = onGenerateScript,
+                onClear = onClearStaged,
             )
         }
     }
+}
+
+// =============================================================================
+// Unlock banner (one-time prompt to run the unlock script)
+// =============================================================================
+
+@Composable
+private fun UnlockBannerCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(
+            Modifier.padding(Spacing.card),
+            verticalArrangement = Arrangement.spacedBy(Spacing.dense),
+        ) {
+            Text(
+                "Run the one-time unlock to make CPU/GPU/I/O controls live-adjustable",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Text(
+                "Without the unlock: controls work as a Script Builder — configure values, Generate Script, run it once. " +
+                    "With the unlock: those same knobs write instantly without generating a script each time. " +
+                    "Go to the Tune screen → Advanced unlock → Generate + Run script.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+        }
+    }
+}
+
+// =============================================================================
+// Generate Script CTA
+// =============================================================================
+
+@Composable
+private fun GenerateScriptCta(
+    stagedCount: Int,
+    onGenerate: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+        ),
+    ) {
+        Column(
+            Modifier.padding(Spacing.card),
+            verticalArrangement = Arrangement.spacedBy(Spacing.group),
+        ) {
+            Text(
+                "$stagedCount knob${if (stagedCount != 1) "s" else ""} staged",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Text(
+                "Generate a script with all staged knobs, then run it via your device's Settings → Run script as Root.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+                Button(
+                    onClick = onGenerate,
+                    enabled = stagedCount > 0,
+                ) {
+                    Icon(
+                        Icons.Outlined.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Generate Script ($stagedCount)")
+                }
+                OutlinedButton(onClick = onClear) { Text("Clear") }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Script deploy feedback card (replaces transient dialog in script-builder mode)
+// =============================================================================
+
+@Composable
+private fun ScriptDeployedCard(
+    deployed: AynScriptDeployer.Deployed,
+    onDismiss: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    AlertCard(
+        type = AlertType.INFO,
+        title = "Script generated",
+        message = "Saved to: ${deployed.path}\n\n" +
+            if (deployed.visibleToOdinPicker) {
+                "Open your device Settings → Run script as Root → pick the .sh from the CalibrateSoC folder."
+            } else {
+                "The script is in the app-private folder — copy it to /sdcard/CalibrateSoC/ manually or grant storage permission."
+            },
+        action = {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+                if (deployed.visibleToOdinPicker) {
+                    TextButton(onClick = {
+                        io.github.mayusi.calibratesoc.data.vendor.OdinIntents
+                            .openVendorSettings(context)
+                    }) { Text("Open Settings") }
+                }
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+            }
+        },
+    )
 }
 
 // =============================================================================
@@ -397,13 +642,17 @@ private fun RiskBadge(risk: Risk) {
  * [TunableMetadata.ValueKind]. Validates before dispatching the write.
  * HIGH/DANGEROUS knobs require a confirm dialog first.
  *
- * @param id          The [TunableId] for this knob.
- * @param currentValue  String value currently in the kernel (from probe).
- * @param report      For privilege pre-flight.
- * @param onWrite     Callback returning an error string or null on success.
- * @param enumOptions Override the options list for ENUM controls that need
- *                    live values from the probe (e.g. governors). Pass null
- *                    to use the options from [TunableMetadata].
+ * @param id              The [TunableId] for this knob.
+ * @param currentValue    String value currently in the kernel (from probe).
+ * @param report          For privilege pre-flight.
+ * @param onWrite         Callback returning an error string or null on success.
+ *                        In script-builder mode this callback stages rather than writes.
+ * @param pending         The current [pendingAdvanced] map — used to show "staged" chip.
+ * @param scriptBuilderMode  If true the control is ENABLED even when [Tunables.whyWriteDenied]
+ *                        is non-null: the user can select values to stage for script generation.
+ * @param enumOptions     Override the options list for ENUM controls that need
+ *                        live values from the probe (e.g. governors). Pass null
+ *                        to use the options from [TunableMetadata].
  */
 @Composable
 private fun TunableControl(
@@ -411,19 +660,24 @@ private fun TunableControl(
     currentValue: String,
     report: CapabilityReport,
     onWrite: (TunableId, String, String) -> String?,
+    pending: Map<String, String> = emptyMap(),
+    scriptBuilderMode: Boolean = false,
     enumOptions: List<String>? = null,
     modifier: Modifier = Modifier,
 ) {
     val meta = TunableMetadata.forId(id)
     val denyReason = Tunables.whyWriteDenied(id, report)
-    val isDisabled = denyReason != null
+    // In script-builder mode, controls are ENABLED even without root.
+    // They stage knobs into pendingAdvanced instead of writing directly.
+    val isDisabled = if (scriptBuilderMode) false else denyReason != null
+    val isStaged = id.target in pending
 
     // Confirmation pending: used for HIGH/DANGEROUS controls.
     var pendingConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
     var inlineError by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-        // Header row: name + risk badge
+        // Header row: name + risk badge + staged chip
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -435,7 +689,22 @@ private fun TunableControl(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            RiskBadge(meta.risk)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isStaged) {
+                    AssistChip(
+                        onClick = {},
+                        label = { Text("staged", style = MaterialTheme.typography.labelSmall) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    )
+                }
+                RiskBadge(meta.risk)
+            }
         }
 
         // Description
@@ -445,13 +714,29 @@ private fun TunableControl(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        // Privilege denial notice
-        if (denyReason != null) {
-            Text(
-                "Write blocked: $denyReason",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+        // Privilege notice — honest context-sensitive label
+        when {
+            scriptBuilderMode && denyReason != null && !isStaged -> {
+                Text(
+                    "Will be included in generated script when staged",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            scriptBuilderMode && denyReason != null && isStaged -> {
+                Text(
+                    "Staged — will be written when you run the script",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+            denyReason != null -> {
+                Text(
+                    "Write blocked: $denyReason",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
 
         // Inline validation error
@@ -515,6 +800,7 @@ private fun TunableControl(
                         current = currentValue,
                         enabled = !isDisabled,
                         onCommit = { doWrite(it) },
+                        actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply",
                     )
                 }
             }
@@ -546,15 +832,18 @@ private fun TunableControl(
                     current = currentValue,
                     enabled = !isDisabled,
                     onCommit = { doWrite(it) },
+                    actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply",
                 )
             }
         }
     }
 
-    // Confirm dialog for HIGH/DANGEROUS knobs
+    // Confirm dialog for HIGH/DANGEROUS knobs.
+    // In script-builder mode the dialog says "add to script" instead of "apply".
     pendingConfirm?.let { action ->
         DangerousConfirmDialog(
             meta = meta,
+            scriptBuilderMode = scriptBuilderMode && denyReason != null,
             onConfirm = {
                 action()
                 pendingConfirm = null
@@ -699,6 +988,7 @@ private fun RawStringControl(
     current: String,
     enabled: Boolean,
     onCommit: (String) -> Unit,
+    actionLabel: String = "Apply",
 ) {
     var text by remember(current) { mutableStateOf(current) }
 
@@ -719,7 +1009,7 @@ private fun RawStringControl(
             onClick = { onCommit(text) },
             enabled = enabled && text.isNotBlank() && text != current,
         ) {
-            Text("Apply")
+            Text(actionLabel)
         }
     }
 }
@@ -733,6 +1023,7 @@ private fun DangerousConfirmDialog(
     meta: TunableMetadata.TunableInfo,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
+    scriptBuilderMode: Boolean = false,
 ) {
     val warningText = when {
         meta.name.contains("Throttling", ignoreCase = true) ->
@@ -785,7 +1076,7 @@ private fun DangerousConfirmDialog(
                     contentColor = MaterialTheme.colorScheme.onError,
                 ),
             ) {
-                Text("I understand — apply anyway")
+                Text(if (scriptBuilderMode) "I understand — add to script" else "I understand — apply anyway")
             }
         },
         dismissButton = {
@@ -854,7 +1145,11 @@ private fun ExpandableSectionCard(
 @Composable
 private fun CpuCoresSection(
     report: CapabilityReport,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    onStage: (TunableId, String) -> String?,
+    onUnstage: (TunableId) -> Unit,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("CPU Cores", Icons.Outlined.Speed) {
         Text(
@@ -863,10 +1158,6 @@ private fun CpuCoresSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        // Group cores by policy cluster so the user sees "Cluster 0 (cores 0–3)"
-        val policyByCoreRange = report.cpuPolicies.associate { policy ->
-            policy.policyId to policy.onlineCores
-        }
         val maxCore = report.cpuPolicies.flatMap { it.onlineCores }.maxOrNull() ?: 0
 
         for (coreIdx in 0..maxCore) {
@@ -875,6 +1166,8 @@ private fun CpuCoresSection(
             val id = KernelTunables.cpuOnline(coreIdx)
             val meta = TunableMetadata.forId(id)
             val isCpu0 = coreIdx == 0
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
 
             HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
             Row(
@@ -900,6 +1193,16 @@ private fun CpuCoresSection(
                             )
                         }
                         RiskBadge(meta.risk)
+                        if (isStaged) {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text("staged", style = MaterialTheme.typography.labelSmall) },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                ),
+                            )
+                        }
                     }
                     if (isCpu0) {
                         Text(
@@ -907,16 +1210,22 @@ private fun CpuCoresSection(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error,
                         )
+                    } else if (scriptBuilderMode && denyReason != null && !isStaged) {
+                        Text(
+                            "Will be included in generated script when staged",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
                 Switch(
-                    checked = true, // All listed cores are online per probe; probe only lists online cores
+                    checked = true, // All listed cores are online per probe
                     onCheckedChange = { wantOn ->
                         if (!isCpu0) {
                             onWrite(id, if (wantOn) "1" else "0", "CPU$coreIdx online")
                         }
                     },
-                    enabled = !isCpu0 && Tunables.whyWriteDenied(id, report) == null,
+                    enabled = !isCpu0 && (scriptBuilderMode || denyReason == null),
                 )
             }
         }
@@ -930,7 +1239,9 @@ private fun CpuCoresSection(
 @Composable
 private fun CpuGovernorTunablesSection(
     report: CapabilityReport,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("CPU Governor Tuning", Icons.Outlined.Settings) {
         Text(
@@ -957,6 +1268,8 @@ private fun CpuGovernorTunablesSection(
                     currentValue = currentValue,
                     report = report,
                     onWrite = onWrite,
+                    pending = pending,
+                    scriptBuilderMode = scriptBuilderMode,
                 )
             }
         }
@@ -972,7 +1285,9 @@ private fun GpuAdvancedSection(
     report: CapabilityReport,
     gpu: GpuProbe,
     adrenoExtras: AdrenoExtrasProbe?,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("GPU Advanced", Icons.Outlined.Bolt) {
         Text(
@@ -1021,7 +1336,7 @@ private fun GpuAdvancedSection(
                         max = numLevels - 1,
                         step = 1,
                         unit = "(lower=faster)",
-                        enabled = Tunables.whyWriteDenied(minId, report) == null,
+                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(minId, report) == null,
                         onCommit = { onWrite(minId, it.toString(), "GPU min power level") },
                     )
                 }
@@ -1050,7 +1365,7 @@ private fun GpuAdvancedSection(
                         max = numLevels - 1,
                         step = 1,
                         unit = "(lower=faster)",
-                        enabled = Tunables.whyWriteDenied(maxId, report) == null,
+                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(maxId, report) == null,
                         onCommit = { onWrite(maxId, it.toString(), "GPU max power level") },
                     )
                 }
@@ -1058,13 +1373,14 @@ private fun GpuAdvancedSection(
 
             // Default power level
             val defaultId = KernelTunables.adrenoDefaultPowerLevel(gpu.rootPath)
-            val defaultMeta = TunableMetadata.forId(defaultId)
             HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
             TunableControl(
                 id = defaultId,
                 currentValue = adrenoExtras.currentDefaultPwrLevel?.toString() ?: "—",
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // GPU throttling — HIGH risk, confirm-gated via TunableControl
@@ -1075,6 +1391,8 @@ private fun GpuAdvancedSection(
                 currentValue = if (adrenoExtras.throttlingEnabled == true) "1" else "0",
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // Force clocks on
@@ -1085,6 +1403,8 @@ private fun GpuAdvancedSection(
                 currentValue = if (adrenoExtras.forceClkOn == true) "1" else "0",
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // Idle timer
@@ -1095,6 +1415,8 @@ private fun GpuAdvancedSection(
                 currentValue = adrenoExtras.idleTimerMs?.toString() ?: "0",
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
 
@@ -1103,6 +1425,7 @@ private fun GpuAdvancedSection(
             HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
             val govId = Tunables.gpuGovernor(gpu.rootPath)
             val govMeta = TunableMetadata.forId(govId)
+            val govDenyReason = Tunables.whyWriteDenied(govId, report)
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1116,7 +1439,7 @@ private fun GpuAdvancedSection(
                 EnumDropdown(
                     current = gpu.currentGovernor,
                     options = gpu.availableGovernors,
-                    enabled = Tunables.whyWriteDenied(govId, report) == null,
+                    enabled = scriptBuilderMode || govDenyReason == null,
                     onSelect = { onWrite(govId, it, "GPU governor") },
                 )
             }
@@ -1138,6 +1461,8 @@ private fun GpuAdvancedSection(
                     currentValue = probe.currentValue,
                     report = report,
                     onWrite = onWrite,
+                    pending = pending,
+                    scriptBuilderMode = scriptBuilderMode,
                 )
             }
         }
@@ -1146,11 +1471,14 @@ private fun GpuAdvancedSection(
 
 // =============================================================================
 // Section: Scheduler Boost
+// Root-only: /dev/stune and /dev/cpuctl are cgroup paths — not scriptable.
+// On stock, show current values with honest "Root only" label.
 // =============================================================================
 
 @Composable
 private fun SchedBoostSection(
     report: CapabilityReport,
+    scriptBuilderMode: Boolean,
     onWrite: (TunableId, String, String) -> String?,
 ) {
     val iface = report.schedBoostInterface
@@ -1161,6 +1489,19 @@ private fun SchedBoostSection(
     }
 
     ExpandableSectionCard("Scheduler Boost ($ifaceLabel)", Icons.Outlined.Tune) {
+        // On stock: cgroup paths can't be written from app UID (SELinux blocks it)
+        // and can't be included in a generated script (cgroup writes unverified).
+        // Show current values as read-only info with an honest label.
+        if (scriptBuilderMode) {
+            AlertCard(
+                type = AlertType.WARNING,
+                title = "Root only — can't be applied via script on this device",
+                message = "Scheduler boost (schedtune/uclamp) controls cgroup hierarchies. " +
+                    "Writing cgroup files from app UID is blocked by SELinux on stock firmware. " +
+                    "These values are shown read-only. To change them, root the device (Magisk/KernelSU).",
+            )
+        }
+
         Text(
             when (iface) {
                 SchedBoostInterface.STUNE ->
@@ -1187,40 +1528,37 @@ private fun SchedBoostSection(
 
                 when (iface) {
                     SchedBoostInterface.STUNE -> {
-                        val boostId = KernelTunables.schedtuneBoost(probe.slice)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        TunableControl(
-                            id = boostId,
-                            currentValue = probe.boostOrUclampMin?.toString() ?: "0",
-                            report = report,
-                            onWrite = onWrite,
-                        )
-                        val idleId = KernelTunables.schedtunePreferIdle(probe.slice)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        TunableControl(
-                            id = idleId,
-                            currentValue = probe.preferIdleOrUclampMax?.toString() ?: "0",
-                            report = report,
-                            onWrite = onWrite,
-                        )
+                        // On stock: show as read-only current values only
+                        if (scriptBuilderMode) {
+                            Text(
+                                "Current boost: ${probe.boostOrUclampMin ?: 0} | prefer_idle: ${probe.preferIdleOrUclampMax ?: 0}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        } else {
+                            val boostId = KernelTunables.schedtuneBoost(probe.slice)
+                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
+                            TunableControl(id = boostId, currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
+                            val idleId = KernelTunables.schedtunePreferIdle(probe.slice)
+                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
+                            TunableControl(id = idleId, currentValue = probe.preferIdleOrUclampMax?.toString() ?: "0", report = report, onWrite = onWrite)
+                        }
                     }
                     SchedBoostInterface.UCLAMP -> {
-                        val minId = KernelTunables.uclampMin(probe.slice)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        TunableControl(
-                            id = minId,
-                            currentValue = probe.boostOrUclampMin?.toString() ?: "0",
-                            report = report,
-                            onWrite = onWrite,
-                        )
-                        val maxId = KernelTunables.uclampMax(probe.slice)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        TunableControl(
-                            id = maxId,
-                            currentValue = probe.preferIdleOrUclampMax?.toString() ?: "1024",
-                            report = report,
-                            onWrite = onWrite,
-                        )
+                        if (scriptBuilderMode) {
+                            Text(
+                                "Current uclamp.min: ${probe.boostOrUclampMin ?: 0} | uclamp.max: ${probe.preferIdleOrUclampMax ?: 1024}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        } else {
+                            val minId = KernelTunables.uclampMin(probe.slice)
+                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
+                            TunableControl(id = minId, currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
+                            val maxId = KernelTunables.uclampMax(probe.slice)
+                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
+                            TunableControl(id = maxId, currentValue = probe.preferIdleOrUclampMax?.toString() ?: "1024", report = report, onWrite = onWrite)
+                        }
                     }
                     SchedBoostInterface.NONE -> Unit
                 }
@@ -1235,7 +1573,9 @@ private fun SchedBoostSection(
 @Composable
 private fun InputBoostSection(
     report: CapabilityReport,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("Input Boost", Icons.Outlined.TouchApp) {
         Text(
@@ -1254,6 +1594,8 @@ private fun InputBoostSection(
             currentValue = boost?.inputBoostFreqRaw ?: "0",
             report = report,
             onWrite = onWrite,
+            pending = pending,
+            scriptBuilderMode = scriptBuilderMode,
         )
 
         val msId = KernelTunables.inputBoostMs()
@@ -1263,6 +1605,8 @@ private fun InputBoostSection(
             currentValue = boost?.inputBoostMs?.toString() ?: "0",
             report = report,
             onWrite = onWrite,
+            pending = pending,
+            scriptBuilderMode = scriptBuilderMode,
         )
     }
 }
@@ -1275,7 +1619,9 @@ private fun InputBoostSection(
 private fun MemoryBusSection(
     report: CapabilityReport,
     devices: List<DevfreqDeviceProbe>,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("Memory / Bus (devfreq)", Icons.Outlined.Memory) {
         Text(
@@ -1309,6 +1655,8 @@ private fun MemoryBusSection(
                     report = report,
                     onWrite = onWrite,
                     enumOptions = dev.availableGovernors,
+                    pending = pending,
+                    scriptBuilderMode = scriptBuilderMode,
                 )
             }
 
@@ -1320,6 +1668,8 @@ private fun MemoryBusSection(
                 currentValue = dev.minFreqHz.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // Max freq
@@ -1330,6 +1680,8 @@ private fun MemoryBusSection(
                 currentValue = dev.maxFreqHz.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
     }
@@ -1343,7 +1695,9 @@ private fun MemoryBusSection(
 private fun IoSection(
     report: CapabilityReport,
     devices: List<BlockDeviceProbe>,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("I/O", Icons.Outlined.Storage) {
         Text(
@@ -1371,6 +1725,8 @@ private fun IoSection(
                 report = report,
                 onWrite = onWrite,
                 enumOptions = dev.availableSchedulers.ifEmpty { null },
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // Read ahead
@@ -1381,6 +1737,8 @@ private fun IoSection(
                 currentValue = dev.readAheadKb.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
 
             // NR requests
@@ -1391,6 +1749,8 @@ private fun IoSection(
                 currentValue = dev.nrRequests.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
     }
@@ -1404,7 +1764,9 @@ private fun IoSection(
 private fun VmKernelSection(
     report: CapabilityReport,
     vm: VmSysctlsProbe,
+    pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
 ) {
     ExpandableSectionCard("VM / Kernel Sysctls", Icons.Outlined.Settings) {
         Text(
@@ -1412,6 +1774,16 @@ private fun VmKernelSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        // On stock: /proc/sys writes fail under SELinux from app UID, but are
+        // included in the generated script (run as root via device Settings).
+        if (scriptBuilderMode) {
+            Text(
+                "Script-builder: these procfs knobs go into the generated script and apply when you run it as Root.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         // Swappiness
         vm.swappiness?.let { current ->
@@ -1421,6 +1793,8 @@ private fun VmKernelSection(
                 currentValue = current.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
 
@@ -1432,6 +1806,8 @@ private fun VmKernelSection(
                 currentValue = current.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
 
@@ -1443,6 +1819,8 @@ private fun VmKernelSection(
                 currentValue = current.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
 
@@ -1454,6 +1832,8 @@ private fun VmKernelSection(
                 currentValue = current.toString(),
                 report = report,
                 onWrite = onWrite,
+                pending = pending,
+                scriptBuilderMode = scriptBuilderMode,
             )
         }
 
@@ -1471,6 +1851,8 @@ private fun VmKernelSection(
             currentValue = "",
             report = report,
             onWrite = onWrite,
+            pending = pending,
+            scriptBuilderMode = scriptBuilderMode,
         )
         HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
         TunableControl(
@@ -1478,6 +1860,8 @@ private fun VmKernelSection(
             currentValue = "",
             report = report,
             onWrite = onWrite,
+            pending = pending,
+            scriptBuilderMode = scriptBuilderMode,
         )
         HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
         TunableControl(
@@ -1485,6 +1869,8 @@ private fun VmKernelSection(
             currentValue = "",
             report = report,
             onWrite = onWrite,
+            pending = pending,
+            scriptBuilderMode = scriptBuilderMode,
         )
     }
 }
@@ -1497,6 +1883,8 @@ private fun VmKernelSection(
 private fun CustomSysfsSection(
     report: CapabilityReport,
     history: List<AdvancedTuningViewModel.CustomSysfsRule>,
+    pending: Map<String, String>,
+    scriptBuilderMode: Boolean,
     onWrite: (String, String) -> String?,
 ) {
     var path by rememberSaveable { mutableStateOf("") }
@@ -1506,9 +1894,14 @@ private fun CustomSysfsSection(
     ExpandableSectionCard("Custom Sysfs Rule", Icons.Outlined.Code) {
         AlertCard(
             type = AlertType.WARNING,
-            title = "Power user — your risk",
-            message = "Write ANY /sys or /proc path with any value. No validation beyond path safety. " +
-                "Wrong values can destabilise or crash the device. Everything reverts on reboot.",
+            title = if (scriptBuilderMode) "Power user — staged into script" else "Power user — your risk",
+            message = if (scriptBuilderMode) {
+                "Write ANY /sys or /proc path with any value. On this device the rule is STAGED " +
+                    "into the generated script rather than written live. No validation beyond path safety."
+            } else {
+                "Write ANY /sys or /proc path with any value. No validation beyond path safety. " +
+                    "Wrong values can destabilise or crash the device. Everything reverts on reboot."
+            },
         )
 
         Spacer(Modifier.height(Spacing.group))
@@ -1541,7 +1934,9 @@ private fun CustomSysfsSection(
             )
         }
 
-        val denyReason = if (path.isNotBlank()) {
+        // In script-builder mode the Apply button is ALWAYS enabled (writeCustomRule stages it).
+        // In live mode, show deny reason and gate the button on it.
+        val denyReason = if (!scriptBuilderMode && path.isNotBlank()) {
             val id = try {
                 KernelTunables.customSysfsRule(path)
             } catch (_: IllegalArgumentException) {
@@ -1558,23 +1953,33 @@ private fun CustomSysfsSection(
             )
         }
 
+        // Show staged indicator for the current path
+        val isStagedHere = pending.containsKey(path.trim())
+        if (scriptBuilderMode && isStagedHere) {
+            Text(
+                "Staged — will be included in Generate Script",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+
         Button(
             onClick = {
                 error = null
                 val err = onWrite(path.trim(), value.trim())
                 if (err != null) error = err
             },
-            enabled = path.isNotBlank() && value.isNotBlank() && denyReason == null,
+            enabled = path.isNotBlank() && value.isNotBlank() && (scriptBuilderMode || denyReason == null),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Apply custom rule")
+            Text(if (scriptBuilderMode) "Stage rule" else "Apply custom rule")
         }
 
-        // History — re-apply previously used rules
+        // History — re-apply or re-stage previously used rules
         if (history.isNotEmpty()) {
             HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
             Text(
-                "Previously applied this session:",
+                if (scriptBuilderMode) "Previously staged this session:" else "Previously applied this session:",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1602,8 +2007,8 @@ private fun CustomSysfsSection(
                             val err = onWrite(rule.path, rule.value)
                             if (err != null) error = err
                         },
-                        enabled = denyReason == null,
-                    ) { Text("Re-apply") }
+                        enabled = scriptBuilderMode || denyReason == null,
+                    ) { Text(if (scriptBuilderMode) "Re-stage" else "Re-apply") }
                 }
             }
         }
@@ -1801,7 +2206,7 @@ private fun ThermalDangerousSection(
 // =============================================================================
 
 @Composable
-private fun RevertFooter() {
+private fun RevertFooter(scriptBuilderMode: Boolean = false) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1816,8 +2221,13 @@ private fun RevertFooter() {
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            "All writes above are snapshotted before application and revert automatically on the next reboot. " +
-                "Nothing here persists permanently unless you install a boot script via the Tune screen.",
+            if (scriptBuilderMode) {
+                "Staged knobs are bundled into a shell script. Run it via your device's Settings → Run script as Root. " +
+                    "All kernel writes revert on reboot — nothing persists permanently without a boot script."
+            } else {
+                "All writes above are snapshotted before application and revert automatically on the next reboot. " +
+                    "Nothing here persists permanently unless you install a boot script via the Tune screen."
+            },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

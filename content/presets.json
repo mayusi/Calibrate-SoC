@@ -1,1 +1,71 @@
-[]
+[
+  {
+    "id": "rp6_ps2_gc_sustained",
+    "name": "RP6 — PS2 / GameCube Sustained",
+    "description": "Retroid Pocket 6 / AYN Thor (SD8Gen2 / kalama, 3-cluster). Caps little (policy0) to 1555 MHz, gold (policy3) to 1920 MHz, prime (policy7) to 2227 MHz — all one or two OPP steps below the thermal throttle trigger on this SoC. GPU ~70% (~476 MHz of 680 MHz max). Governor walt. This is the sustained-performance sweet spot: capping below the throttle trigger means the SoC holds its clocks indefinitely instead of boosting to 3187 MHz for 8 seconds then dropping to 1.2 GHz. Tested on RP6 by Calibrate-SoC community. Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/mayusi/Calibrate-SoC",
+    "cpuPolicyMaxKhz": { "0": 1555000, "3": 1920000, "7": 2227000 },
+    "cpuPolicyMinKhz": { "0": 307000, "3": 499000, "7": 595000 },
+    "cpuPolicyGovernor": { "0": "walt", "3": "walt", "7": "walt" },
+    "gpuMaxHz": 476000000,
+    "extraSysfs": {}
+  },
+  {
+    "id": "rp6_light_emulation",
+    "name": "RP6 — Light Emulation (N64 / PSP / Dreamcast)",
+    "description": "Retroid Pocket 6 / AYN Thor (SD8Gen2 / kalama, 3-cluster). Caps little (policy0) to 1228 MHz, gold (policy3) to 1536 MHz, prime (policy7) to 1363 MHz — roughly 60-65% of each cluster's ceiling. GPU ~60% (~407 MHz of 680 MHz). Governor schedutil. Designed for 5th/6th-gen emulators that need moderate single-thread performance but not the prime cluster at full tilt. Fan stays quiet in most environments. Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/mayusi/Calibrate-SoC",
+    "cpuPolicyMaxKhz": { "0": 1228000, "3": 1536000, "7": 1363000 },
+    "cpuPolicyMinKhz": { "0": 307000, "3": 499000, "7": 595000 },
+    "cpuPolicyGovernor": { "0": "schedutil", "3": "schedutil", "7": "schedutil" },
+    "gpuMaxHz": 407000000,
+    "extraSysfs": {}
+  },
+  {
+    "id": "rp6_cool_and_quiet",
+    "name": "RP6 — Cool & Quiet / Max Battery",
+    "description": "Retroid Pocket 6 / AYN Thor (SD8Gen2 / kalama, 3-cluster). Caps little (policy0) to 902 MHz (~45%), gold (policy3) to 844 MHz (~30%), prime (policy7) to 998 MHz (~31%). GPU ~45% (~306 MHz of 680 MHz). Governor conservative — scales up on real load, defaults to low clocks so the fan is silent and battery lasts ~2x longer. Best for menus, 2D retro, video streaming. NOT suitable for 3D emulation. Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/mayusi/Calibrate-SoC",
+    "cpuPolicyMaxKhz": { "0": 902000, "3": 844000, "7": 998000 },
+    "cpuPolicyMinKhz": { "0": 307000, "3": 499000, "7": 595000 },
+    "cpuPolicyGovernor": { "0": "conservative", "3": "conservative", "7": "conservative" },
+    "gpuMaxHz": 306000000,
+    "extraSysfs": {}
+  },
+  {
+    "id": "odin3_anti_throttle_small",
+    "name": "Odin 3 — Anti-Throttle / Small (TheOldTaylor)",
+    "description": "AYN Odin 3 (Snapdragon 8 Elite / SM8750, 2-cluster: policy0 6 cores max 3532.8 MHz, policy6 2 prime cores max 4320 MHz). TheOldTaylor's mildest underclock: policy0 → 2745.6 MHz (~78% of 3532.8), policy6 → 3072 MHz (~71% of 4320). This is the highest clock that remains thermally sustainable for long gaming sessions on the Odin 3, measured and reported by TheOldTaylor. Small thermal/power benefit with almost no performance loss vs stock. Three perfd daemons must be stopped and scaling_max_freq chmod-locked around writes (handled by the app). Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+    "cpuPolicyMaxKhz": { "0": 2745600, "6": 3072000 },
+    "cpuPolicyMinKhz": { "0": 384000, "6": 1017600 },
+    "cpuPolicyGovernor": { "0": "walt", "6": "walt" },
+    "extraSysfs": {}
+  },
+  {
+    "id": "odin3_ps2_gc_sustained_large",
+    "name": "Odin 3 — PS2 / GC Sustained / Large (TheOldTaylor)",
+    "description": "AYN Odin 3 (SD8 Elite, 2-cluster). TheOldTaylor's aggressive cap: policy0 → 1785.6 MHz (~51% of 3532.8), policy6 → 1958.4 MHz (~45% of 4320). At this cap ~14W from ~20W in 1080p AAA titles, temps 50-60°C from 90-100°C. Excellent for PS2/GC/Wii emulation where sustained 60fps beats burst-then-throttle. Fan noticeably quieter. Three perfd daemons stopped + chmod-lock required. Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+    "cpuPolicyMaxKhz": { "0": 1785600, "6": 1958400 },
+    "cpuPolicyMinKhz": { "0": 384000, "6": 1017600 },
+    "cpuPolicyGovernor": { "0": "walt", "6": "walt" },
+    "extraSysfs": {}
+  },
+  {
+    "id": "odin3_switch_medium",
+    "name": "Odin 3 — Switch / Medium (TheOldTaylor)",
+    "description": "AYN Odin 3 (SD8 Elite, 2-cluster). TheOldTaylor's middle preset: policy0 → 2227.2 MHz (~63% of 3532.8), policy6 → 2246.4 MHz (~52% of 4320). Balances headroom for Switch emulation against sustained thermal stability. Less power savings than Large but more headroom for demanding AAA titles. Three perfd daemons stopped + chmod-lock required. Does not persist across reboot.",
+    "verification": "COMMUNITY_TUNED",
+    "sourceUrl": "https://github.com/TheOldTaylor/Odin3-CPU-Underclock",
+    "cpuPolicyMaxKhz": { "0": 2227200, "6": 2246400 },
+    "cpuPolicyMinKhz": { "0": 384000, "6": 1017600 },
+    "cpuPolicyGovernor": { "0": "walt", "6": "walt" },
+    "extraSysfs": {}
+  }
+]

@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.data.benchmark
 
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
+import io.github.mayusi.calibratesoc.data.hardware.StorageSpeedTester
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,7 @@ class BenchmarkRunner @Inject constructor(
     private val monitorService: MonitorService,
     private val gpuStorm: GpuTriangleStorm,
     private val gpuScene: GpuSceneBenchmark,
+    private val storageTester: StorageSpeedTester,
     private val json: Json,
 ) {
 
@@ -85,8 +87,9 @@ class BenchmarkRunner @Inject constructor(
 
         val etaMs = when (flavor) {
             BenchFlavor.QUICK -> 20_000L
-            BenchFlavor.STANDARD -> 60_000L
-            BenchFlavor.FULL -> 60_000L + config.throttleDurationMs
+            // STANDARD now includes a short 3-loop scene phase (~45 s) + 1 s storage probe
+            BenchFlavor.STANDARD -> 60_000L + config.stdScene3dLoopCount * config.stdScene3dLoopMs + 5_000L
+            BenchFlavor.FULL -> 60_000L + config.stdScene3dLoopCount * config.stdScene3dLoopMs + 5_000L + config.throttleDurationMs
             BenchFlavor.SCENE_3D -> config.scene3dLoopCount * config.scene3dLoopMs
         }
         _state.value = State.Running(flavor, progress = 0f, etaMs = etaMs)
@@ -226,6 +229,23 @@ class BenchmarkRunner @Inject constructor(
                     .getOrNull()
             }
 
+            // ── Short 3D scene phase (P2 integration into STANDARD) ────────
+            // 3 loops × 15 s = ~45 s extra. Serialised into sceneJson so the
+            // Scene3DResultCard renders inline. Graceful: null on EGL failure.
+            val sceneResult = runCatching {
+                gpuScene.run(
+                    requestedTier = SceneTier.EXTREME,
+                    loopCount = config.stdScene3dLoopCount,
+                    loopMs = config.stdScene3dLoopMs,
+                    killTempC = config.killTempC,
+                )
+            }.getOrNull()
+            val sceneJson = sceneResult?.let { json.encodeToString(it) }
+
+            // ── Quick sequential-read storage probe ────────────────────────
+            // Best-effort: 1-second sequential read only (no full 4-pass test).
+            val storageReadMBps = runCatching { storageTester.quickSeqRead() }.getOrNull()
+
             KernelScores(
                 cpuIntegerSingle = cpuSingle,
                 cpuIntegerMulti = cpuMulti,
@@ -241,6 +261,8 @@ class BenchmarkRunner @Inject constructor(
                 gpuP99FrameMs = gpuSummary?.p99FrameMs,
                 gpuFrameConsistencyPct = gpuSummary?.consistencyPct,
                 gpuFrameTimesMs = gpuSummary?.frameTimesMsDownsampled,
+                sceneJson = sceneJson,
+                storageReadMBps = storageReadMBps,
             )
         }
 
@@ -412,8 +434,13 @@ data class BenchConfig(
     val killTempC: Float = 85f,
     val respectBatteryFloor: Boolean = true,
     // ── SCENE_3D flavor knobs ────────────────────────────────────────────────
-    /** Number of sustained loops for the heavy 3D scene benchmark. */
+    /** Number of sustained loops for the heavy 3D scene benchmark (standalone). */
     val scene3dLoopCount: Int = 10,
-    /** Duration of each scene benchmark loop, ms. */
+    /** Duration of each scene benchmark loop, ms (standalone). */
     val scene3dLoopMs: Long = 20_000L,
+    // ── Embedded scene phase inside STANDARD ────────────────────────────────
+    /** Number of scene loops run as part of STANDARD. Shorter than standalone. */
+    val stdScene3dLoopCount: Int = 3,
+    /** Duration of each embedded scene loop in STANDARD, ms. */
+    val stdScene3dLoopMs: Long = 15_000L,
 )

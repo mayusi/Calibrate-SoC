@@ -88,6 +88,13 @@ data class KernelScores(
      *   json.decodeFromString<GpuSceneResult>(kernels.sceneJson!!)
      */
     val sceneJson: String? = null,
+
+    /**
+     * Sequential read speed from the storage tester (MB/s), or null when
+     * the storage phase did not run (QUICK, SCENE_3D) or timed out.
+     * Nullable addition — rides in kernelsJson; no DB bump needed.
+     */
+    val storageReadMBps: Double? = null,
 )
 
 @Serializable

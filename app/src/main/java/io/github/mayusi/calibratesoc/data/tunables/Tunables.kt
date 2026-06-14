@@ -89,19 +89,63 @@ object Tunables {
      * privilege-tier reason if not. Lets the Tune UI grey out controls
      * with an explanation instead of letting the user mash a slider
      * that's going to silently no-op.
+     *
+     * UNLOCK TIER: when [CapabilityReport.sysfsDirectlyWritable] is true
+     * (the one-time unlock script ran + cpufreq nodes are chmod 666) AND
+     * the target path is one the unlock script actually chmod'd
+     * ([isUnlockCoveredNode]), we return null — the node is live-writable
+     * via [UnlockedFileWriter] without root.
      */
     fun whyWriteDenied(id: TunableId, report: CapabilityReport): String? {
-        return when (id.kind) {
-            TunableKind.SETTINGS_SYSTEM, TunableKind.VENDOR_INTENT -> null // always reachable
-            TunableKind.SYSFS -> when (report.privilege) {
-                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT -> null
-                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.AYN_SETTINGS ->
-                    "Direct sysfs writes need root. Use Generate AYN script and run it via Odin Settings."
-                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.SHIZUKU ->
-                    "Shizuku kernel writes pending UserService support — use Generate AYN script for now."
-                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.NONE ->
-                    "Needs root (Magisk / KernelSU), or use Generate AYN script and run via Odin Settings."
-            }
+        if (id.kind == TunableKind.SETTINGS_SYSTEM || id.kind == TunableKind.VENDOR_INTENT) {
+            return null // always reachable
         }
+        // TunableKind.SYSFS path:
+        if (report.sysfsDirectlyWritable && isUnlockCoveredNode(id.target)) {
+            // Unlock script has chmod'd this exact node family — live write allowed.
+            return null
+        }
+        return when (report.privilege) {
+            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT -> null
+            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.AYN_SETTINGS ->
+                "Direct sysfs writes need root. Use Generate script and run it via your device's Settings > Run script as Root."
+            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.SHIZUKU ->
+                "Shizuku kernel writes pending UserService support; use Generate script for now."
+            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.NONE ->
+                "Needs root (Magisk / KernelSU), or use Generate script and run via your device's Settings > Run script as Root."
+        }
+    }
+
+    /**
+     * Returns true when [path] is a node family that the unlock script
+     * (`AdvancedPermissionsScript.deploy()`) chmod 666s. Used by
+     * [whyWriteDenied] to route chmod'd nodes to [UnlockedFileWriter]
+     * instead of [NoopWriter] on the "unlocked but no root" tier.
+     *
+     * Keep in sync with the chmod blocks in AdvancedPermissionsScript.
+     *
+     * NOT included (script-only or root-only):
+     *   procfs (/proc/sys/vm, /proc/sys/kernel) — SELinux denial
+     *   cgroup (/dev/stune, /dev/cpuctl) — script route unverified
+     *   thermal (/sys/class/thermal) — never (hardware damage risk)
+     */
+    fun isUnlockCoveredNode(path: String): Boolean {
+        return path.matches(Regex("/sys/devices/system/cpu/cpufreq/policy\\d+/scaling_(max|min)_freq")) ||
+            path.matches(Regex("/sys/devices/system/cpu/cpufreq/policy\\d+/scaling_governor")) ||
+            path.matches(Regex("/sys/devices/system/cpu/cpu\\d+/online")) ||
+            // CPU governor tunable dirs: policy*/schedutil/*, policy*/walt/*, policy*/interactive/*
+            path.matches(Regex("/sys/devices/system/cpu/cpufreq/policy\\d+/[^/]+/[^/]+")) ||
+            // GPU devfreq (kgsl or mali)
+            path.matches(Regex("/sys/class/kgsl/kgsl-3d0/devfreq/(min_freq|max_freq|governor)")) ||
+            path.matches(Regex("/sys/class/devfreq/.*mali.*/\\w+")) ||
+            path.matches(Regex("/sys/class/kgsl/kgsl-3d0/(max_gpuclk|min_pwrlevel|max_pwrlevel)")) ||
+            // Adreno extras
+            path.matches(Regex("/sys/class/kgsl/kgsl-3d0/(throttling|force_clk_on|idle_timer|default_pwrlevel)")) ||
+            // DDR/bus devfreq
+            path.matches(Regex("/sys/class/devfreq/[^/]+/(min_freq|max_freq|governor)")) ||
+            // I/O block devices
+            path.matches(Regex("/sys/block/[^/]+/queue/(scheduler|read_ahead_kb|nr_requests)")) ||
+            // Input boost
+            path.matches(Regex("/sys/module/cpu_boost/parameters/(input_boost_freq|input_boost_ms)"))
     }
 }

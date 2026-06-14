@@ -37,6 +37,35 @@ class StorageSpeedTester @Inject constructor(
     @ApplicationContext private val context: Context,
     private val pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter,
 ) {
+    /**
+     * Quick sequential read probe for the Standard benchmark phase.
+     * Writes a 32 MB file and immediately reads it back — no page-cache drop
+     * attempt (that needs root), so on stock firmware the read measures the
+     * kernel cache + UFS stack, which is still meaningful as a relative number
+     * (compare your own runs). Returns MB/s or null on any error.
+     *
+     * Total wall-clock: ~0.5–2 s on UFS 3.x. Intentionally lightweight.
+     */
+    suspend fun quickSeqRead(): Double? = withContext(Dispatchers.IO) {
+        val file = File(context.filesDir, "quick-speed-test.bin")
+        try {
+            val chunk = ByteArray(CHUNK_SIZE).also { kotlin.random.Random.nextBytes(it) }
+            val smallBytes = QUICK_BYTES
+            val chunkCount = smallBytes / CHUNK_SIZE
+            // Write first so there's something to read
+            RandomAccessFile(file, "rw").use { raf ->
+                raf.setLength(0)
+                repeat(chunkCount) { raf.write(chunk) }
+                raf.fd.sync()
+            }
+            sequentialRead(file, smallBytes)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { file.delete() }
+        }
+    }
+
     suspend fun run(): Result = withContext(Dispatchers.IO) {
         val file = File(context.filesDir, "speed-test.bin")
         try {
@@ -88,7 +117,7 @@ class StorageSpeedTester @Inject constructor(
         return bytesPerNanoToMBps(TOTAL_BYTES.toLong(), nanos)
     }
 
-    private fun sequentialRead(target: File): Double {
+    private fun sequentialRead(target: File, totalBytes: Int = TOTAL_BYTES): Double {
         val buf = ByteArray(CHUNK_SIZE)
         val nanos = measureNanoTime {
             RandomAccessFile(target, "r").use { raf ->
@@ -96,7 +125,7 @@ class StorageSpeedTester @Inject constructor(
                 while (raf.read(buf) > 0) { /* discard */ }
             }
         }
-        return bytesPerNanoToMBps(TOTAL_BYTES.toLong(), nanos)
+        return bytesPerNanoToMBps(totalBytes.toLong(), nanos)
     }
 
     private fun randomRead(target: File): Int {
@@ -162,6 +191,9 @@ class StorageSpeedTester @Inject constructor(
         // RAM. We could write 2 GB to be sure but 512 keeps the test
         // under 2 seconds on UFS 3.1.
         const val TOTAL_BYTES = 512 * 1024 * 1024
+        // 32 MB write for the quick Standard-phase probe — small enough to
+        // finish in <1 s on UFS 3.x, large enough to be meaningful.
+        const val QUICK_BYTES = 32 * 1024 * 1024
         const val CHUNK_SIZE = 4 * 1024 * 1024
         const val BLOCK_4K = 4096
         const val RANDOM_DURATION_NS = 2_000_000_000L // 2s per random pass

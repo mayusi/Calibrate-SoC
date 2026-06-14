@@ -5,11 +5,17 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.presets.VerificationTier
+import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
+import io.github.mayusi.calibratesoc.data.script.AynScriptGenerator
+import io.github.mayusi.calibratesoc.data.tunables.KernelTunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
-import io.github.mayusi.calibratesoc.data.tunables.KernelTunables
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,33 +26,69 @@ import javax.inject.Inject
 /**
  * ViewModel for the Advanced Tuning screen.
  *
- * Design: every write is staged as a (TunableId, String) pair and
- * dispatched through [TunableWriter] — the ONLY write path. Validation
- * via [TunableMetadata] runs client-side before dispatch; if it fails
- * the write is rejected in the ViewModel and the error is surfaced to
- * the UI without touching the kernel.
+ * ## Privilege-tier modes
  *
- * Privilege pre-flight: [Tunables.whyWriteDenied] is exposed as
- * [whyWriteDenied] so the UI can grey out controls with an honest
- * explanation instead of silently failing.
+ * ### ROOT tier
+ * Every write dispatches immediately through [TunableWriter] → [RootWriter].
+ * The screen behaves as it always has: Apply = live kernel change.
  *
- * Custom sysfs rules are stored in [customRuleHistory] (in-memory list,
- * not persisted) so previously-typed rules can be re-applied in one tap.
+ * ### SYSFS_UNLOCKED tier (unlock script ran, cpufreq nodes are chmod 666)
+ * Nodes covered by the unlock script ([Tunables.isUnlockCoveredNode]) are
+ * live-writable via [UnlockedFileWriter] — [Tunables.whyWriteDenied] returns
+ * null for those. The screen writes them immediately just like ROOT.
+ * Nodes NOT covered (procfs, cgroups) switch to script-builder mode for
+ * those specific controls.
+ *
+ * ### AYN_SETTINGS / NONE / SHIZUKU (stock, no chmod) — SCRIPT-BUILDER MODE
+ * Controls become ENABLED for value selection.  Each interaction calls
+ * [stageAdvancedKnob] instead of [write]; the value lands in [pendingAdvanced].
+ * The user then taps "Generate Script" ([generateAdvancedScript]) which
+ * builds a [Preset] from [pendingAdvanced].extraSysfs and dispatches through
+ * [AynScriptGenerator] → [AynScriptDeployer].
+ *
+ * Custom sysfs rules: on stock, [writeCustomRule] also stages into pendingAdvanced.
+ *
+ * HIGH/DANGEROUS knobs still show a confirm dialog before staging (dialog
+ * text is re-worded to "add to script" in script-builder mode).
  */
 @HiltViewModel
 class AdvancedTuningViewModel @Inject constructor(
     private val capabilityProbe: CapabilityProbe,
     private val tunableWriter: TunableWriter,
+    private val scriptGenerator: AynScriptGenerator,
+    private val scriptDeployer: AynScriptDeployer,
+    private val deviceAdapterRegistry: DeviceAdapterRegistry,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
 
-    // ── last write result ────────────────────────────────────────────────────
+    // ── last write result (live-write mode only) ─────────────────────────────
 
     private val _lastResult = MutableStateFlow<WriteResult?>(null)
     val lastResult: StateFlow<WriteResult?> = _lastResult.asStateFlow()
 
     fun clearLastResult() { _lastResult.value = null }
+
+    // ── script-builder staging (pending staged knobs path→value) ─────────────
+
+    private val _pendingAdvanced = MutableStateFlow<Map<String, String>>(emptyMap())
+    val pendingAdvanced: StateFlow<Map<String, String>> = _pendingAdvanced.asStateFlow()
+
+    /** Count of staged knobs for the "Generate Script (N)" CTA badge. */
+    val pendingAdvancedCount: StateFlow<Int> = MutableStateFlow(0).also { counter ->
+        viewModelScope.launch {
+            _pendingAdvanced.collect { counter.value = it.size }
+        }
+    }
+
+    fun clearPendingAdvanced() { _pendingAdvanced.value = emptyMap() }
+
+    // ── last script deploy result ─────────────────────────────────────────────
+
+    private val _lastDeploy = MutableStateFlow<AynScriptDeployer.Deployed?>(null)
+    val lastDeploy: StateFlow<AynScriptDeployer.Deployed?> = _lastDeploy.asStateFlow()
+
+    fun clearLastDeploy() { _lastDeploy.value = null }
 
     // ── custom sysfs rule history (in-memory, this session only) ────────────
 
@@ -59,21 +101,50 @@ class AdvancedTuningViewModel @Inject constructor(
         val appliedAtMs: Long,
     )
 
+    // ── mode helpers ──────────────────────────────────────────────────────────
+
+    /**
+     * True when the screen should operate in SCRIPT-BUILDER mode:
+     *   - no root AND
+     *   - the target knob is not live-writable (not unlock-covered or unlock not run)
+     *
+     * Used by the UI to decide whether control interactions call
+     * [stageAdvancedKnob] or [write].
+     */
+    fun isScriptBuilderMode(id: TunableId, report: CapabilityReport): Boolean {
+        if (report.privilege == PrivilegeTier.ROOT) return false
+        // If whyWriteDenied returns null the node is live-writable (unlock covered it).
+        return Tunables.whyWriteDenied(id, report) != null
+    }
+
+    /**
+     * True when a node is completely unreachable from this app — neither
+     * live-writable NOR scriptable via the extraSysfs pipeline.
+     *
+     * These are: cgroup paths (/dev/stune, /dev/cpuctl) and
+     * /sys/class/thermal/ — the UI renders them as read-only info rows.
+     */
+    fun isRootOnlyNode(id: TunableId): Boolean {
+        val path = id.target
+        return path.startsWith("/dev/stune/") ||
+            path.startsWith("/dev/cpuctl/") ||
+            path.startsWith("/sys/class/thermal/")
+    }
+
     // ── privilege helpers ─────────────────────────────────────────────────────
 
-    /** Returns non-null string when a write to [id] would be denied.
-     *  The UI should grey the control and show this reason. */
+    /** Returns non-null string when a live write to [id] would be denied. */
     fun whyWriteDenied(id: TunableId, report: CapabilityReport): String? =
         Tunables.whyWriteDenied(id, report)
 
-    // ── single tunable write ──────────────────────────────────────────────────
+    // ── single tunable write (live-write mode) ─────────────────────────────────
 
     /**
      * Validate [value] against [TunableMetadata] for [id], then write
      * through [TunableWriter] if valid. Result stored in [lastResult].
      *
      * Returns the validation error string immediately (before any IO)
-     * when metadata rejects the value so the caller can show it inline.
+     * when metadata rejects the value.
      */
     fun write(id: TunableId, value: String, reason: String): String? {
         val meta = TunableMetadata.forId(id)
@@ -92,10 +163,74 @@ class AdvancedTuningViewModel @Inject constructor(
         return null
     }
 
+    // ── script-builder staging ─────────────────────────────────────────────────
+
     /**
-     * Apply a custom sysfs rule. Validates the path via
-     * [TunableMetadata.validateCustomSysfsPath] before constructing the id.
-     * Returns an error string on any validation failure.
+     * Stage a knob into [pendingAdvanced] for inclusion in the next
+     * Generate Script call. Validates via [TunableMetadata] before staging;
+     * returns an error string on validation failure (same API contract as [write]).
+     *
+     * Does NOT write anything to the kernel.
+     */
+    fun stageAdvancedKnob(id: TunableId, value: String): String? {
+        // Block root-only nodes from staging — they won't work in a script either.
+        if (isRootOnlyNode(id)) {
+            return "This knob can only be changed with root access — it cannot be included in a generated script."
+        }
+
+        val meta = TunableMetadata.forId(id)
+        val validationError = meta.validate(value)
+        if (validationError != null) return validationError
+
+        // Path-level validation (custom sysfs rules already do this, but apply universally).
+        val pathError = TunableMetadata.validateCustomSysfsPath(id.target)
+        if (pathError != null) return pathError
+
+        _pendingAdvanced.value = _pendingAdvanced.value + mapOf(id.target to value)
+        return null
+    }
+
+    /**
+     * Remove a previously-staged knob from [pendingAdvanced].
+     * No-op if the knob was not staged.
+     */
+    fun unstageAdvancedKnob(id: TunableId) {
+        _pendingAdvanced.value = _pendingAdvanced.value - id.target
+    }
+
+    /**
+     * Generate a script from [pendingAdvanced] and deploy it via [AynScriptDeployer].
+     * Builds a synthetic Preset with all staged knobs as extraSysfs entries.
+     * Result reported via [lastDeploy].
+     */
+    fun generateAdvancedScript() {
+        val staged = _pendingAdvanced.value
+        if (staged.isEmpty()) return
+        val report = capability.value ?: return
+        val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+
+        val ts = System.currentTimeMillis() / 1000
+        val preset = Preset(
+            id = "advanced_custom_$ts",
+            name = "Advanced Tuning (custom)",
+            description = "Custom knobs staged in Advanced Tuning — ${staged.size} knob(s).",
+            verification = VerificationTier.USER_CUSTOM,
+            extraSysfs = staged,
+        )
+
+        viewModelScope.launch {
+            val body = scriptGenerator.generate(preset, report, adapter)
+            _lastDeploy.value = scriptDeployer.deploy(preset, body)
+        }
+    }
+
+    // ── custom sysfs rule ──────────────────────────────────────────────────────
+
+    /**
+     * In LIVE mode (root / unlock covered): apply immediately.
+     * In SCRIPT-BUILDER mode (stock): stage into [pendingAdvanced].
+     *
+     * Returns an error string on validation failure.
      */
     fun writeCustomRule(path: String, value: String): String? {
         val pathError = TunableMetadata.validateCustomSysfsPath(path)
@@ -107,30 +242,40 @@ class AdvancedTuningViewModel @Inject constructor(
             return e.message ?: "Invalid sysfs path."
         }
 
-        // Validate value via metadata (RAW_STRING, so always passes — but
-        // it will catch any future tightening of the fallthrough case).
         val meta = TunableMetadata.forId(id)
         val valError = meta.validate(value)
         if (valError != null) return valError
 
         val report = capability.value ?: return "Device capability not yet loaded."
-        val denyReason = Tunables.whyWriteDenied(id, report)
-        if (denyReason != null) return denyReason
 
-        viewModelScope.launch {
-            val result = tunableWriter.write(
-                id = id,
-                value = value,
-                report = report,
-                reason = "Custom sysfs rule: $path",
-            )
-            _lastResult.value = result
-            if (result is WriteResult.Success) {
+        // Determine mode for this specific path.
+        val denyReason = Tunables.whyWriteDenied(id, report)
+        return if (denyReason == null) {
+            // Live write path (root / unlock-covered).
+            viewModelScope.launch {
+                val result = tunableWriter.write(
+                    id = id,
+                    value = value,
+                    report = report,
+                    reason = "Custom sysfs rule: $path",
+                )
+                _lastResult.value = result
+                if (result is WriteResult.Success) {
+                    val rule = CustomSysfsRule(path, value, System.currentTimeMillis())
+                    _customRuleHistory.value = listOf(rule) +
+                        _customRuleHistory.value.filter { it.path != path }
+                }
+            }
+            null
+        } else {
+            // Script-builder mode: stage it.
+            val stagingError = stageAdvancedKnob(id, value)
+            if (stagingError == null) {
                 val rule = CustomSysfsRule(path, value, System.currentTimeMillis())
                 _customRuleHistory.value = listOf(rule) +
                     _customRuleHistory.value.filter { it.path != path }
             }
+            stagingError
         }
-        return null
     }
 }

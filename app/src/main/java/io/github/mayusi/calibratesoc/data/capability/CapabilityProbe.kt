@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.data.capability
 
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +43,7 @@ class CapabilityProbe @Inject constructor(
     private val vendorAppDetector: VendorAppDetector,
     private val fileSystem: FileSystem,
     private val userPrefs: UserPrefs,
+    private val advancedPermissionsScript: AdvancedPermissionsScript,
 ) {
     private val _report = MutableStateFlow<CapabilityReport?>(null)
     val report: StateFlow<CapabilityReport?> = _report.asStateFlow()
@@ -78,6 +80,11 @@ class CapabilityProbe @Inject constructor(
         val rootOptIn = userPrefs.rootModeEnabledBlocking()
         val hasSecureSettings = settingsWriteProbe.hasWriteSecureSettings()
 
+        // Unlock-script tier: the one-time script chmod 666'd cpufreq nodes
+        // so the app can write them without root. Probe it on every refresh
+        // so the UI lights up automatically after the user runs the script.
+        val sysfsDirectlyWritable = advancedPermissionsScript.grantsCurrentlyHeld().sysfsWritable
+
         val tier = when {
             hasRoot && rootOptIn -> PrivilegeTier.ROOT
             // Any OEM game-assistant app (AYN/Odin, AYANEO, Retroid) +
@@ -113,6 +120,7 @@ class CapabilityProbe @Inject constructor(
             schedBoostValues = schedBoostValues,
             inputBoostPresent = inputBoost != null,
             inputBoost = inputBoost,
+            sysfsDirectlyWritable = sysfsDirectlyWritable,
         ).also { _report.value = it }
     }
 

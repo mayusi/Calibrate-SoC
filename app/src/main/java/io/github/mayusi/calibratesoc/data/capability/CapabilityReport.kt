@@ -51,6 +51,16 @@ data class CapabilityReport(
     val inputBoostPresent: Boolean = false,
     /** Current input boost parameters (null when module absent). */
     val inputBoost: InputBoostProbe? = null,
+    /**
+     * True when the one-time unlock script has been run AND the cpufreq nodes
+     * are chmod 666 (app-UID-writable without root). Derived at probe time by
+     * [AdvancedPermissionsScript.grantsCurrentlyHeld().sysfsWritable].
+     *
+     * When true, [Tunables.whyWriteDenied] returns null for any sysfs node that
+     * the unlock script actually chmod'd, routing those writes to
+     * [UnlockedFileWriter] instead of [NoopWriter].
+     */
+    val sysfsDirectlyWritable: Boolean = false,
 )
 
 @Serializable
