@@ -223,6 +223,15 @@ private fun HistoryRow(entry: TuneHistoryEntry, onDelete: () -> Unit = {}) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 PathwayChip(entry.pathway)
+                // Show origin device label when recorded.
+                val deviceLabel = entry.appliedOnDeviceName ?: entry.appliedOnDeviceKey
+                if (deviceLabel != null) {
+                    Text(
+                        "on $deviceLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                }
             }
             if (entry.presetDescription.isNotBlank()) {
                 Text(

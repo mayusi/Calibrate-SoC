@@ -114,6 +114,20 @@ class UserPrefs @Inject constructor(
         prefs[UPDATE_REMIND_AFTER_MS_KEY] ?: 0L
     }
 
+    // ── AutoTDP: idle/charge trigger ──────────────────────────────────────────
+
+    /**
+     * Master opt-in for the idle/charge auto-downclock trigger (Component 7).
+     * Default OFF so the user never gets an uninvited downclock.
+     *
+     * When ON, [IdleChargeTrigger] emits an EFFICIENCY profile request
+     * whenever the screen turns off or the device is plugged in to charge,
+     * and emits null (restore) on screen-on + unplug.
+     */
+    val idleChargeTriggerEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[IDLE_CHARGE_TRIGGER_ENABLED_KEY] ?: false
+    }
+
     /** The release tag the user last dismissed ("don't nag me about this version").
      *  Null means never dismissed. Banner re-appears when a newer tag arrives. */
     val dismissedUpdateTag: Flow<String?> = context.dataStore.data.map { prefs ->
@@ -207,6 +221,10 @@ class UserPrefs @Inject constructor(
         context.dataStore.edit { it[TEMP_ALERT_THRESHOLD_C_KEY] = value }
     }
 
+    suspend fun setIdleChargeTriggerEnabled(value: Boolean) {
+        context.dataStore.edit { it[IDLE_CHARGE_TRIGGER_ENABLED_KEY] = value }
+    }
+
     /** Pass null to clear the auto-profile (notify-only mode). */
     suspend fun setTempAlertAutoProfileId(profileId: String?) {
         context.dataStore.edit { prefs ->
@@ -234,10 +252,12 @@ class UserPrefs @Inject constructor(
         val TEMP_ALERTS_ENABLED_KEY      = booleanPreferencesKey("temp_alerts_enabled")
         val TEMP_ALERT_THRESHOLD_C_KEY   = intPreferencesKey("temp_alert_threshold_c")
         val TEMP_ALERT_AUTO_PROFILE_ID_KEY = stringPreferencesKey("temp_alert_auto_profile_id")
-        val AUTO_UPDATE_CHECK_ENABLED_KEY  = booleanPreferencesKey("auto_update_check_enabled")
-        val LAST_UPDATE_CHECK_MS_KEY       = longPreferencesKey("last_update_check_ms")
-        val UPDATE_REMIND_AFTER_MS_KEY     = longPreferencesKey("update_remind_after_ms")
-        val DISMISSED_UPDATE_TAG_KEY       = stringPreferencesKey("dismissed_update_tag")
+        val AUTO_UPDATE_CHECK_ENABLED_KEY      = booleanPreferencesKey("auto_update_check_enabled")
+        val LAST_UPDATE_CHECK_MS_KEY           = longPreferencesKey("last_update_check_ms")
+        val UPDATE_REMIND_AFTER_MS_KEY         = longPreferencesKey("update_remind_after_ms")
+        val DISMISSED_UPDATE_TAG_KEY           = stringPreferencesKey("dismissed_update_tag")
+        // ── AutoTDP keys ──────────────────────────────────────────────────────
+        val IDLE_CHARGE_TRIGGER_ENABLED_KEY    = booleanPreferencesKey("autotdp_idle_charge_trigger_enabled")
 
         const val DEFAULT_ALERT_THRESHOLD_C = 80
     }

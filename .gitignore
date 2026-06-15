@@ -74,6 +74,8 @@ Thumbs.db
 
 ## Internal planning / dev docs — not part of the public repo
 /PLAN.md
+/AUDIT-*.md
+/AUTOTDP-DESIGN.md
 /.claude/
 /.codex/
 *.diag.png

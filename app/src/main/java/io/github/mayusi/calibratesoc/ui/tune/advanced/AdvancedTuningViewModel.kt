@@ -11,6 +11,7 @@ import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.presets.VerificationTier
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.script.AynScriptGenerator
+import io.github.mayusi.calibratesoc.data.script.ScriptGenerateResult
 import io.github.mayusi.calibratesoc.data.tunables.KernelTunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
@@ -219,8 +220,10 @@ class AdvancedTuningViewModel @Inject constructor(
         )
 
         viewModelScope.launch {
-            val body = scriptGenerator.generate(preset, report, adapter)
-            _lastDeploy.value = scriptDeployer.deploy(preset, body)
+            when (val result = scriptGenerator.generate(preset, report, adapter)) {
+                is ScriptGenerateResult.Ok -> _lastDeploy.value = scriptDeployer.deploy(preset, result.script)
+                is ScriptGenerateResult.Rejected -> { /* advanced-tuning preset is device-local; rejection is a no-op */ }
+            }
         }
     }
 

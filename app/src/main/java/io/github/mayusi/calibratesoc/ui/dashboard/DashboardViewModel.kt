@@ -4,6 +4,8 @@ import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.monitor.BatteryChargeReader
@@ -43,9 +45,16 @@ class DashboardViewModel @Inject constructor(
     tuneHistoryStore: TuneHistoryStore,
     private val batteryChargeReader: BatteryChargeReader,
     private val sessionRecorder: SessionRecorder,
+    autoTdpController: AutoTdpController,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /**
+     * Live AutoTDP daemon state. The Dashboard shows a strip when the
+     * daemon is not IDLE so the user always knows power management is active.
+     */
+    val autoTdpState: StateFlow<AutoTdpRunState> = autoTdpController.state
 
     /** Mirror recorder state for the Dashboard recording card. */
     val isRecording: StateFlow<Boolean> = sessionRecorder.isRecording

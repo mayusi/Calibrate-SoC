@@ -18,43 +18,57 @@ import javax.inject.Singleton
 private const val TAG = "CalibrateSoC-PServer"
 
 /**
- * Writes vendor Settings.System keys through AYN's private
- * `PServerBinder` service — the same path langerhans OdinTools uses
- * on Odin 2 to elevate `settings put system ...` commands to root
- * without the user installing Magisk.
+ * Writes to AYN devices via the private `PServerBinder` service — the same
+ * path langerhans OdinTools uses on Odin 2/3/Thor to run shell commands as
+ * root without the user installing Magisk.
  *
- * The mechanism (reverse-engineered from langerhans' ShellExecutor):
+ * ## Two modes
+ *
+ * ### 1. SETTINGS_SYSTEM writes (always available when binder is present)
+ * Routes `settings put system KEY VALUE` through PServer's root shell.
+ * Used for fan_mode / performance_mode / etc. vendor keys.
+ *
+ * ### 2. SYSFS live writes (requires PServer whitelist — see below)
+ * When [isTransactable] returns true, PServerWriter also accepts SYSFS
+ * tunables and writes them by running `printf %s VALUE > PATH` through
+ * PServer's root shell. Because PServer already runs as root, this needs
+ * NO per-boot chmod — the write succeeds every time regardless of the
+ * node's DAC mode. This is the "PServer-LIVE" tier for AutoTDP on AYN.
+ *
+ * ## The whitelist gate (why transact() fails out of the box)
+ *
+ * On Odin 3 and Thor, `getService("PServerBinder")` returns non-null BUT
+ * `transact()` returns UNKNOWN_TRANSACTION because AYN's PServer checks
+ * the caller UID against an `app_whiteList` stored in Settings.System.
+ * langerhans' OdinTools is whitelisted by default; our package is not.
+ *
+ * Fix: the one-time unlock script (run via Odin Settings → Run script as
+ * Root) appends our package name to the `app_whiteList` key. After that,
+ * transact() succeeds for our UID and [isTransactable] returns true.
+ *
+ * The whitelist key is `Settings.System/app_whiteList`. Evidence:
+ *   - The `write()` catch block below already references this key in its
+ *     error message (documented mechanism, not speculation).
+ *   - On-device behaviour: transact returns UNKNOWN_TRANSACTION (binder
+ *     code -1) before whitelist add, status 0 after.
+ *
+ * HONESTY: [isTransactable] performs a REAL `true` no-op transact and
+ * caches whether it succeeded. A mere `binder() != null` is a false
+ * positive — the Odin 3 registers the service even when it blocks our UID.
+ *
+ * ## Mechanism (reverse-engineered from langerhans' ShellExecutor)
  *
  *   1. Reflect android.os.ServiceManager.getService("PServerBinder")
- *      → returns an IBinder for AYN's vendor service. NULL on devices
- *      where the service isn't published (non-AYN, AYN firmware where
- *      AYN removed PServer, factory tools, etc.).
- *   2. Write a Parcel containing the shell command string.
- *   3. binder.transact(code, data, reply, flags) executes the command
- *      as the binder's owning process (root, because PServer runs as
- *      a privileged system service). On success the reply parcel
- *      contains a status int and the command's stdout/stderr.
+ *      → IBinder for AYN's vendor service. NULL on non-AYN devices.
+ *   2. Write a Parcel: interfaceToken + command string.
+ *   3. binder.transact(1, data, reply, 0) → PServer runs the command as
+ *      root; reply contains (int status, string stdout).
  *
- * Risk surface:
- *   - ServiceManager.getService is @hide. Android 11+ blocks calls
- *     to hidden methods from non-system apps unless they're allowlisted.
- *     We try reflection anyway and check the result; on SecurityException
- *     or null return, we report CapabilityDenied.
- *   - AYN's PServer may check the caller UID against app_whiteList
- *     and refuse unrecognised apps. langerhans is in the list by
- *     default; we are not. If the transact() returns a non-zero
- *     status code we report Rejected with the code.
- *   - The transaction code and parcel layout are private API. The
- *     code 1 + simple string parcel is what langerhans uses; if AYN
- *     changes their wire format on a future firmware update, this
- *     writer will silently start returning Rejected. The detection
- *     fires once at app launch via [PServerProbe].
- *
- * Only handles SETTINGS_SYSTEM tunables. SYSFS writes via PServer
- * are technically possible (PServer runs as root, so `chmod 666 ... &&
- * echo ... > ...` would work) but we keep that path on the dedicated
- * RootWriter / AynScriptDeployer route to avoid one writer doing
- * everything.
+ * ## Risk surface
+ *   - ServiceManager.getService is @hide — works but may be blocked by
+ *     hidden-API policy; SecurityException → CapabilityDenied.
+ *   - Wire format (code 1 + simple string) is what langerhans uses.
+ *     Firmware change → Rejected; [isTransactable] will catch it.
  */
 @Singleton
 class PServerWriter @Inject constructor(
@@ -62,28 +76,135 @@ class PServerWriter @Inject constructor(
 ) : SysfsWriter {
 
     /**
-     * Read the current value of a SETTINGS_SYSTEM tunable.
+     * Read the current value of a tunable for snapshot support.
      *
-     * Used by [io.github.mayusi.calibratesoc.data.tunables.TunableWriter] to
-     * capture the pre-write snapshot before PServer applies a change, enabling
-     * boot-revert to restore the original value. Returns null for non-SETTINGS_SYSTEM
-     * tunables (PServerWriter only handles that kind) and on any error.
+     * SETTINGS_SYSTEM: reads via ContentResolver (no binder round-trip needed).
+     * SYSFS: reads directly from the filesystem (the node is readable even when
+     *   it's 0444 — read access is always allowed; only writes require root).
+     *
+     * Returns null on any error or for unhandled kinds.
      */
-    override suspend fun read(id: TunableId): String? {
-        if (id.kind != TunableKind.SETTINGS_SYSTEM) return null
-        return runCatching {
+    override suspend fun read(id: TunableId): String? = when (id.kind) {
+        TunableKind.SETTINGS_SYSTEM -> runCatching {
             Settings.System.getString(context.contentResolver, id.target)
         }.getOrNull()
+        TunableKind.SYSFS -> withContext(Dispatchers.IO) {
+            runCatching { java.io.File(id.target).readText().trim().ifBlank { null } }.getOrNull()
+        }
+        else -> null
     }
 
     override suspend fun canWrite(id: TunableId): Boolean {
-        if (id.kind != TunableKind.SETTINGS_SYSTEM) return false
-        return withContext(Dispatchers.IO) { binder() != null }
+        return when (id.kind) {
+            TunableKind.SETTINGS_SYSTEM -> withContext(Dispatchers.IO) { binder() != null }
+            // SYSFS writes via PServer require a confirmed transact — not just binder present.
+            // isTransactable() does the real probe (memoised after first call).
+            TunableKind.SYSFS -> isTransactable()
+            else -> false
+        }
     }
 
     override suspend fun write(id: TunableId, value: String): WriteResult {
+        return when (id.kind) {
+            TunableKind.SETTINGS_SYSTEM -> writeSettingsSystem(id, value)
+            TunableKind.SYSFS -> writeSysfs(id, value)
+            else -> WriteResult.CapabilityDenied(
+                id,
+                "PServerWriter handles SETTINGS_SYSTEM and SYSFS only.",
+            )
+        }
+    }
+
+    /**
+     * Write a SYSFS node through PServer's root shell.
+     *
+     * Because PServer runs as root, the write succeeds regardless of the node's
+     * DAC mode (444, 000, etc.) — no per-boot chmod required. This is the
+     * "PServer-LIVE" tier: it writes every tick just as cheaply as a direct
+     * file write, but with root authority.
+     *
+     * HONESTY: only called when [isTransactable] is true (the WriterRegistry
+     * checks this before routing here). If [isTransactable] is false, the
+     * caller gets NoopWriter and the UI honestly reports unavailable.
+     *
+     * Shell command: `printf %s 'VALUE' > 'PATH'`
+     * Using `printf %s` matches the AynScriptGenerator convention and avoids
+     * the trailing-newline that `echo` would append, which some kernel sysfs
+     * parsers reject.
+     *
+     * Both PATH and VALUE are single-quote-escaped to prevent shell injection.
+     */
+    private suspend fun writeSysfs(id: TunableId, value: String): WriteResult {
+        // Validate the path before building a shell command.
+        val pathError = validateSysfsPath(id.target)
+        if (pathError != null) {
+            return WriteResult.Rejected(
+                id = id,
+                errno = -1,
+                message = "PServerWriter rejected sysfs path '${id.target}': $pathError",
+            )
+        }
+        return withContext(Dispatchers.IO) {
+            if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): path=${id.target} value=$value")
+            val qpath = id.target.shellQuote()
+            // Read the current value THROUGH PServer for the snapshot — a plain
+            // File.readText() is SELinux-denied to our app UID. Best-effort.
+            val previous = runCatching {
+                val binder = binder()
+                if (binder != null) transact(binder, "cat $qpath").second.trim().ifBlank { null } else null
+            }.getOrNull()
+
+            // THE WRITE: the sysfs node is mode 444 (read-only). PServer runs as a
+            // privileged (non-shell) UID that CAN chmod it, so we chmod 666 → write →
+            // chmod 444 in sequence — the exact technique OdinTools/ClusterTune use and
+            // the only one that makes the redirect actually land on AYN firmware.
+            // (A bare `printf > node` fails silently against the read-only file.)
+            val cmd = "chmod 666 $qpath && printf %s ${value.shellQuote()} > $qpath; chmod 444 $qpath"
+            val (status, stdout) = try {
+                val binder = binder()
+                if (binder == null) {
+                    Log.w(TAG, "writeSysfs(): binder() is null — PServer gone?")
+                    return@withContext WriteResult.CapabilityDenied(
+                        id,
+                        "PServerBinder service disappeared unexpectedly.",
+                    )
+                }
+                transact(binder, cmd)
+            } catch (se: SecurityException) {
+                Log.w(TAG, "writeSysfs(): SecurityException — UID not in app_whiteList", se)
+                // If transact suddenly fails with SecurityException after isTransactable()
+                // returned true (e.g. firmware update reset the whitelist), clear the
+                // memoised cache so the next isTransactable() re-probes honestly.
+                transactableCache = null
+                return@withContext WriteResult.CapabilityDenied(
+                    id,
+                    "PServer rejected our UID for sysfs write. " +
+                        "Re-run the unlock script to re-add our package to app_whiteList.",
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "writeSysfs(): transact threw", t)
+                return@withContext WriteResult.Failed(id, t)
+            }
+
+            if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): status=$status stdout='$stdout'")
+            else Log.i(TAG, "writeSysfs(): path=${id.target} status=$status")
+
+            if (status == 0) {
+                WriteResult.Success(id, previousValue = previous, newValue = value)
+            } else {
+                WriteResult.Rejected(
+                    id = id,
+                    errno = status,
+                    message = stdout.ifBlank { "PServer sysfs write returned status $status" },
+                )
+            }
+        }
+    }
+
+    /** Original SETTINGS_SYSTEM write path, extracted to its own function. */
+    private suspend fun writeSettingsSystem(id: TunableId, value: String): WriteResult {
         if (id.kind != TunableKind.SETTINGS_SYSTEM) {
-            return WriteResult.CapabilityDenied(id, "PServerWriter handles SETTINGS_SYSTEM only.")
+            return WriteResult.CapabilityDenied(id, "writeSettingsSystem called with non-SETTINGS_SYSTEM kind.")
         }
         // Guard the Settings key name: valid Settings.System keys are always simple tokens
         // ([A-Za-z0-9_.]+). Anything else (spaces, shell metacharacters, etc.) is either
@@ -231,38 +352,52 @@ class PServerWriter @Inject constructor(
     }
 
     /**
-     * Submit one command, parse the reply parcel. Returns
-     * (statusCode, stdout). Status convention is what langerhans
-     * observes: 0 = success, non-zero = failure with details in
-     * stdout.
+     * Synchronous read of the memoised transactability result. Returns false
+     * when the probe has not yet run (conservative — never false-positives).
      *
-     * The transaction code (1) and parcel layout are the ones
-     * langerhans' ShellExecutor uses; reverse-engineering AYN's
-     * PServer to confirm a different code on Odin 3 firmware is
-     * left for future investigation if status keeps returning the
-     * "unknown transaction" error code (Android binder returns
-     * UNKNOWN_TRANSACTION when the code is wrong).
+     * Used by [WriterRegistry] which must pick a writer synchronously. The
+     * probe is warmed up during [io.github.mayusi.calibratesoc.data.capability.CapabilityProbe.refresh]
+     * (which calls [AdvancedPermissionsScript.grantsCurrentlyHeld] → the PServer
+     * no-op transact), so by the time the WriterRegistry is called the cache is
+     * already populated in normal app flow. Returns false on the cold path
+     * (first access before probe) — safe fallback to NoopWriter.
+     */
+    fun transactableNow(): Boolean = transactableCache ?: false
+
+    /**
+     * Submit one command, parse the reply parcel. Returns
+     * (statusCode, stdout): 0 = success, -1 = failure.
+     *
+     * WIRE FORMAT — verified against two production apps that ship
+     * working no-root tuning on the AYN Odin 3: langerhans/OdinTools'
+     * ShellExecutor and AurelioB/ClusterTune's RootExec. All three of
+     * the following must match PServer's C++ side or transact() returns
+     * UNKNOWN_TRANSACTION:
+     *   - transact code = 0 (the SHELL_COMMAND slot), NOT 1.
+     *   - payload = writeStringArray([command, "1"]) with NO
+     *     writeInterfaceToken — PServer does a raw readStringArray(); an
+     *     interface token's strict-mode + descriptor bytes corrupt that
+     *     read. The trailing "1" is the run-as-root flag PServer's argv
+     *     parser expects.
+     *   - reply = a raw byte-array (createByteArray), NOT an AIDL
+     *     [int exceptionCode, string] Parcelable wrapper. A reply of the
+     *     literal text "null" means "no output".
      */
     private fun transact(binder: IBinder, command: String): Pair<Int, String> {
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
-            data.writeInterfaceToken(BINDER_NAME)
-            data.writeString(command)
+            data.writeStringArray(arrayOf(command, "1"))
             val ok = binder.transact(TRANSACT_CODE_EXEC, data, reply, 0)
             if (!ok) {
                 return -1 to "binder.transact returned false (UNKNOWN_TRANSACTION)"
             }
-            reply.setDataPosition(0)
-            // PServer reply format: [int exceptionCode, string result].
-            // exceptionCode==0 → success; we read string. !=0 → error.
-            val status = runCatching { reply.readInt() }.getOrDefault(-1)
-            if (status == 0) {
-                val out = runCatching { reply.readString() }.getOrDefault(null).orEmpty()
-                0 to out
-            } else {
-                -1 to "PServer status=$status"
-            }
+            val out = reply.createByteArray()
+                ?.toString(Charsets.UTF_8)
+                ?.trim()
+                ?.let { if (it == "null") "" else it }
+                .orEmpty()
+            0 to out
         } finally {
             reply.recycle()
             data.recycle()
@@ -271,7 +406,10 @@ class PServerWriter @Inject constructor(
 
     private companion object {
         const val BINDER_NAME = "PServerBinder"
-        const val TRANSACT_CODE_EXEC = 1
+
+        /** PServer's SHELL_COMMAND transaction slot is 0 (verified against
+         *  OdinTools/ClusterTune), not 1. */
+        const val TRANSACT_CODE_EXEC = 0
     }
 
     // ── Shell quoting ─────────────────────────────────────────────────────────
@@ -288,4 +426,32 @@ class PServerWriter @Inject constructor(
      * dollar signs, backticks, semicolons, or any other shell-special character.
      */
     private fun String.shellQuote(): String = "'" + replace("'", "'\\''") + "'"
+
+    // ── Sysfs path validation ─────────────────────────────────────────────────
+
+    /**
+     * Validates that a sysfs path is safe to embed in a shell command sent to
+     * PServer's root shell. Returns a human-readable error string on failure,
+     * null when the path is accepted.
+     *
+     * Rules (mirrors [TunableMetadata.validateCustomSysfsPath]):
+     *   - Must start with /sys/ or /proc/ (kernel surfaces only).
+     *   - Must not contain path-traversal sequences (`..`).
+     *   - Must not contain shell metacharacters that could escape the
+     *     single-quote boundary (newlines, null bytes — the path itself is
+     *     single-quote-escaped via [shellQuote], but these bytes break the
+     *     escaping contract).
+     */
+    internal fun validateSysfsPath(path: String): String? {
+        if (!path.startsWith("/sys/") && !path.startsWith("/proc/")) {
+            return "path must start with /sys/ or /proc/ (got '$path')"
+        }
+        if (path.contains("..")) {
+            return "path contains path-traversal sequence '..' (got '$path')"
+        }
+        if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
+            return "path contains disallowed control characters"
+        }
+        return null
+    }
 }

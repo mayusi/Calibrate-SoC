@@ -50,6 +50,22 @@ data class Preset(
      * in TunableMetadata.
      */
     val extraSysfs: Map<String, String> = emptyMap(),
+    /**
+     * Optional list of [DeviceIdentity.knownHandheldKey] values this preset
+     * is safe to apply to.  **null = applies to all devices** (backwards-
+     * compatible default — old entries and built-in algorithmic presets never
+     * set this field).
+     *
+     * When non-null the preset must only be shown on — and applied to — a
+     * device whose [DeviceIdentity.knownHandheldKey] appears in this list.
+     * [PresetGenerator.remoteCommunityPresets] enforces this at the list-
+     * building stage; [ProfileApplier.apply] enforces it again as a hard
+     * safety gate so that imported/shared presets cannot be applied on the
+     * wrong device even if they bypassed the list filter.
+     *
+     * Example JSON: `"targetHandheldKeys": ["retroid_pocket6"]`
+     */
+    val targetHandheldKeys: List<String>? = null,
 )
 
 /**

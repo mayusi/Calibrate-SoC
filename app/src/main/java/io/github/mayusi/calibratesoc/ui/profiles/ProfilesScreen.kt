@@ -1,6 +1,8 @@
 package io.github.mayusi.calibratesoc.ui.profiles
 
 import android.content.Intent
+import android.provider.Settings
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -21,8 +24,6 @@ import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,6 +41,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -49,16 +51,22 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
+import io.github.mayusi.calibratesoc.ui.components.AlertCard
+import io.github.mayusi.calibratesoc.ui.components.AlertType
+import io.github.mayusi.calibratesoc.ui.components.EmptyState
+import io.github.mayusi.calibratesoc.ui.components.KvRow
+import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import kotlinx.coroutines.launch
 
 /**
  * Profiles screen. Two sections:
  *   1. Saved profiles list. Each profile: name, summary, apply / boot
- *      toggle / delete actions.
+ *      toggle / delete actions. Active profile (last applied) is
+ *      highlighted with an emerald "Active" chip.
  *   2. Per-app overrides. Tap an entry to pick which profile fires
  *      when that app comes to the foreground (requires the
- *      Accessibility service grant — surfaced as a yellow banner if
- *      not granted yet).
+ *      Accessibility service grant — surfaced as a warning if not
+ *      granted when overrides exist).
  */
 @Composable
 fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
@@ -66,10 +74,17 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
     val installed by viewModel.installedApps.collectAsStateWithLifecycle()
     val shareCode by viewModel.shareCode.collectAsStateWithLifecycle()
     val importState by viewModel.importState.collectAsStateWithLifecycle()
+    val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
+    val accessibilityGranted by viewModel.accessibilityGranted.collectAsStateWithLifecycle()
 
     var editingApp by remember { mutableStateOf<String?>(null) }
     var sharingProfile by remember { mutableStateOf<UserProfile?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+
+    // Refresh accessibility grant status each time the screen is composed.
+    LaunchedEffect(Unit) { viewModel.refreshAccessibility() }
 
     // When shareCode is populated, update the sharingProfile trigger.
     LaunchedEffect(shareCode) {
@@ -109,6 +124,7 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
 
         if (store.profiles.isEmpty()) {
             item {
+                // Fix 5: use shared EmptyState from SharedComponents.kt
                 EmptyState(
                     icon = Icons.Outlined.Tune,
                     title = "No profiles yet",
@@ -119,6 +135,8 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
             items(store.profiles, key = { it.id }) { profile ->
                 ProfileCard(
                     profile = profile,
+                    // Fix 3: pass active-profile awareness
+                    isActive = profile.id == activeProfileId,
                     onApply = { viewModel.apply(profile) },
                     onDelete = { viewModel.delete(profile) },
                     onToggleBoot = { viewModel.toggleApplyOnBoot(profile) },
@@ -140,8 +158,32 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
             )
         }
 
+        // Fix 4: inline warning when overrides exist but accessibility is not granted.
+        if (store.perAppOverrides.isNotEmpty() && !accessibilityGranted) {
+            item {
+                AlertCard(
+                    type = AlertType.WARNING,
+                    title = "Accessibility not granted",
+                    message = "Per-app auto-switch is silently disabled until you enable the Calibrate SoC Accessibility service.",
+                    action = {
+                        TextButton(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                }
+                            },
+                        ) { Text("Open Settings") }
+                    },
+                )
+            }
+        }
+
         if (store.perAppOverrides.isEmpty()) {
             item {
+                // Fix 5: use shared EmptyState
                 EmptyState(
                     icon = Icons.Outlined.Apps,
                     title = "No per-app profiles",
@@ -154,6 +196,8 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
             val profile = store.profiles.firstOrNull { it.id == profileId }
             OverrideCard(
                 packageName = pkg,
+                // Fix 1: resolved app label from PackageManager via ViewModel cache
+                appLabel = viewModel.resolveAppLabel(pkg),
                 profileName = profile?.name ?: "(missing profile)",
                 onChange = { editingApp = pkg },
                 onClear = { viewModel.setOverride(pkg, null) },
@@ -215,112 +259,133 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
     }
 }
 
+// ── Active chip ─────────────────────────────────────────────────────────────────
+
+/**
+ * Emerald pill chip indicating the profile was the last applied tune.
+ * Colors are hardcoded from the theme palette (Theme.kt tertiary / tertiary-container).
+ */
+private val EmeraldChipBg = Color(0xFF064E3B)
+private val EmeraldChipFg = Color(0xFF34D399)
+
 @Composable
-private fun EmptyState(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    body: String,
-) {
-    Column(
+private fun ActiveChip() {
+    Text(
+        text = "Active",
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = EmeraldChipFg,
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-        )
-        Text(
-            title,
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            body,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
-    }
+            .background(
+                color = EmeraldChipBg,
+                shape = RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
 }
+
+// ── Profile card ────────────────────────────────────────────────────────────────
 
 @Composable
 private fun ProfileCard(
     profile: UserProfile,
+    isActive: Boolean,
     onApply: () -> Unit,
     onDelete: () -> Unit,
     onToggleBoot: () -> Unit,
     onShare: () -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(profile.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                androidx.compose.material3.IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        imageVector = Icons.Outlined.Share,
-                        contentDescription = "Share preset code",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    // Fix 2: use SectionCard instead of raw Card — gives consistent
+    // surfaceVariant container + SemiBold titleMedium header.
+    SectionCard(title = profile.name) {
+        // Trailing action row: Active chip (when applicable) + share icon
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (isActive) {
+                ActiveChip()
+                Spacer(Modifier.size(8.dp))
+            }
+            androidx.compose.material3.IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.Share,
+                    contentDescription = "Share preset code",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (profile.description.isNotBlank()) {
+            Text(
+                profile.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        val originLabel = profile.createdOnDeviceName ?: profile.createdOnDeviceKey
+        if (originLabel != null) {
+            Text(
+                "from $originLabel",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+        }
+        // Fix 6: render each CPU policy's MHz cap as a clean KvRow.
+        val capsEntries = profile.cpuPolicyMaxKhz.entries.sortedBy { it.key }
+        if (capsEntries.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                capsEntries.forEach { (policy, khz) ->
+                    KvRow(
+                        label = "p$policy max",
+                        value = "${khz / 1000} MHz",
                     )
                 }
             }
-            if (profile.description.isNotBlank()) {
-                Text(
-                    profile.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            val capsLine = profile.cpuPolicyMaxKhz.entries
-                .sortedBy { it.key }
-                .joinToString("  ") { "p${it.key}=${it.value / 1000}MHz" }
-            if (capsLine.isNotBlank()) {
-                Text(capsLine, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = profile.applyOnBoot, onCheckedChange = { onToggleBoot() })
-                Text("Apply on boot", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onDelete) { Text("Delete") }
-                Button(onClick = onApply) { Text("Apply") }
-            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = profile.applyOnBoot, onCheckedChange = { onToggleBoot() })
+            Text("Apply on boot", style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onDelete) { Text("Delete") }
+            Button(onClick = onApply) { Text("Apply") }
         }
     }
 }
 
+// ── Override card ────────────────────────────────────────────────────────────────
+
 @Composable
 private fun OverrideCard(
     packageName: String,
+    appLabel: String,
     profileName: String,
     onChange: () -> Unit,
     onClear: () -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(packageName, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
-            Text("→ $profileName", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onChange) { Text("Change") }
-                TextButton(onClick = onClear) { Text("Remove") }
-            }
+    // Fix 1 + 2: SectionCard with resolved app label as the title (SemiBold,
+    // titleMedium).  Package name rendered below as small secondary text.
+    SectionCard(title = appLabel) {
+        Text(
+            packageName,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "Profile: $profileName",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onChange) { Text("Change") }
+            TextButton(onClick = onClear) { Text("Remove") }
         }
     }
 }
+
+// ── App-picker dialog ─────────────────────────────────────────────────────────
 
 @Composable
 private fun AppPickerDialog(

@@ -65,7 +65,7 @@ class PresetGenerator @Inject constructor(
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         return buildList {
             addAll(communityPresetsFor(adapter))
-            addAll(remoteCommunityPresets())
+            addAll(remoteCommunityPresets(report))
             addAll(builtinPresetsFor(report, adapter))
         }
     }
@@ -80,19 +80,34 @@ class PresetGenerator @Inject constructor(
     // --- Remote community presets ------------------------------------
 
     /**
-     * Returns remote community presets (if any) fetched from the OTA channel.
+     * Returns remote community presets (if any) fetched from the OTA channel,
+     * filtered to only those applicable to [report]'s device.
+     *
+     * Filtering rule: a preset is included iff its [Preset.targetHandheldKeys]
+     * is null (applies to all devices) OR the current device's
+     * [DeviceIdentity.knownHandheldKey] appears in the list.  Presets with a
+     * non-null list that does NOT include the current device are silently
+     * dropped — the user should never see (let alone apply) a preset that
+     * was explicitly authored for a different device's cluster topology.
      *
      * These are deliberately surfaced as [VerificationTier.GENERIC_UNKNOWN_FAMILY]
      * ("Community (unverified)") so the user sees the EXTRA confirm dialog before
      * Apply — the same gate the UI already uses for unknown-device built-in presets.
      * They are never auto-applied.
      */
-    private fun remoteCommunityPresets(): List<Preset> =
-        remoteContent.remotePresets().map { p ->
-            // Force GENERIC_UNKNOWN_FAMILY so the extra confirm gate is ALWAYS
-            // shown for remote content, even if the JSON claimed a higher tier.
-            p.copy(verification = VerificationTier.GENERIC_UNKNOWN_FAMILY)
-        }
+    private fun remoteCommunityPresets(report: CapabilityReport): List<Preset> {
+        val currentKey = report.device.knownHandheldKey
+        return remoteContent.remotePresets()
+            .filter { p ->
+                // null targetHandheldKeys = universal preset; non-null = must match.
+                p.targetHandheldKeys == null || (currentKey != null && currentKey in p.targetHandheldKeys)
+            }
+            .map { p ->
+                // Force GENERIC_UNKNOWN_FAMILY so the extra confirm gate is ALWAYS
+                // shown for remote content, even if the JSON claimed a higher tier.
+                p.copy(verification = VerificationTier.GENERIC_UNKNOWN_FAMILY)
+            }
+    }
 
     private fun CommunityPreset.toPreset(adapterKey: String): Preset = Preset(
         id = "${adapterKey}_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_")}",

@@ -258,6 +258,24 @@
         </service>
 
         <!--
+          AutoTDP LIVE daemon. Writes cpu$N/online, scaling_max_freq, and
+          GPU max_pwrlevel on a 1 Hz telemetry loop; reverts all writes on
+          stop via TunableWriter's snapshot journal. SPECIAL_USE — dynamic
+          power management / CPU & GPU tuning, no AOSP category covers this.
+          Only starts on devices where the needed sysfs nodes are writable
+          (root / unlock-script tier); otherwise it self-stops and exposes
+          a reason for the UI to route to SCRIPT/ADVISORY.
+        -->
+        <service
+            android:name=".data.autotdp.AutoTdpService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="dynamic CPU and GPU power management daemon" />
+        </service>
+
+        <!--
           Quick Settings tile to toggle the HUD without opening the app.
           The user has to drag this into their tile tray via Edit tiles
           once — Android won't auto-add system tiles to the active set.

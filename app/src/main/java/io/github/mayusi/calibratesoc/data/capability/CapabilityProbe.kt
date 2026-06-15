@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc.data.capability
 
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
+import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +45,7 @@ class CapabilityProbe @Inject constructor(
     private val fileSystem: FileSystem,
     private val userPrefs: UserPrefs,
     private val advancedPermissionsScript: AdvancedPermissionsScript,
+    private val pServerWriter: PServerWriter,
 ) {
     private val _report = MutableStateFlow<CapabilityReport?>(null)
     val report: StateFlow<CapabilityReport?> = _report.asStateFlow()
@@ -85,6 +87,14 @@ class CapabilityProbe @Inject constructor(
         // so the UI lights up automatically after the user runs the script.
         val sysfsDirectlyWritable = advancedPermissionsScript.grantsCurrentlyHeld().sysfsWritable
 
+        // PServer-LIVE tier: warms the PServerWriter.transactableCache so that
+        // WriterRegistry.writerFor() can call transactableNow() synchronously.
+        // On non-AYN devices, binder() returns null immediately (no IPC cost).
+        // On AYN devices, this is the REAL probe — one transact("true") — that
+        // determines whether the whitelist step has been run. Result is memoised
+        // for the session; false before the whitelist add, true after.
+        val pserverSysfsLive = pServerWriter.isTransactable()
+
         val tier = when {
             hasRoot && rootOptIn -> PrivilegeTier.ROOT
             // Any OEM game-assistant app (AYN/Odin, AYANEO, Retroid) +
@@ -121,6 +131,7 @@ class CapabilityProbe @Inject constructor(
             inputBoostPresent = inputBoost != null,
             inputBoost = inputBoost,
             sysfsDirectlyWritable = sysfsDirectlyWritable,
+            pserverSysfsLive = pserverSysfsLive,
         ).also { _report.value = it }
     }
 

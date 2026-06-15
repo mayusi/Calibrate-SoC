@@ -17,6 +17,7 @@ import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.script.AynScriptGenerator
 import io.github.mayusi.calibratesoc.data.script.BootScriptReminder
+import io.github.mayusi.calibratesoc.data.script.ScriptGenerateResult
 import io.github.mayusi.calibratesoc.data.tunables.ApplyPathway
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
@@ -24,6 +25,8 @@ import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryEntry
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
+import io.github.mayusi.calibratesoc.data.monitor.MonitorService
+import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -58,9 +61,23 @@ class TuneViewModel @Inject constructor(
     private val scriptDeployer: AynScriptDeployer,
     private val bootReminder: BootScriptReminder,
     private val tuneHistoryStore: TuneHistoryStore,
+    monitorService: MonitorService,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /**
+     * Latest telemetry sample for live readback next to policy sliders.
+     * Collected in viewModelScope — no main-thread blocking.
+     */
+    val latestTelemetry: StateFlow<Telemetry?> = MutableStateFlow<Telemetry?>(null)
+        .also { sink ->
+            viewModelScope.launch {
+                monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS).collect { sample ->
+                    sink.value = sample
+                }
+            }
+        }.asStateFlow()
 
     /** Matched device adapter for the current report. Null on generic /
      *  unknown devices. Drives the AYN_SETTINGS vendor card. Tied to
@@ -85,6 +102,14 @@ class TuneViewModel @Inject constructor(
      *  rendered with a different copy explaining persistence. */
     private val _lastBootDeploy = MutableStateFlow<AynScriptDeployer.BootDeployed?>(null)
     val lastBootDeploy: StateFlow<AynScriptDeployer.BootDeployed?> = _lastBootDeploy.asStateFlow()
+
+    /**
+     * Non-null when the last script-generate call was blocked by the
+     * device-safety gate.  The UI should surface this as a user-visible
+     * error dialog.  Cleared by [clearScriptGenerateRejected].
+     */
+    private val _scriptGenerateRejected = MutableStateFlow<String?>(null)
+    val scriptGenerateRejected: StateFlow<String?> = _scriptGenerateRejected.asStateFlow()
 
     val oneTimeOcAcknowledged: StateFlow<Boolean> = userPrefs.ocAcknowledged
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -219,6 +244,9 @@ class TuneViewModel @Inject constructor(
     }
 
     private suspend fun recordHistory(preset: Preset, pathway: ApplyPathway, notes: String = "") {
+        val report = capability.value
+        val deviceKey = report?.device?.knownHandheldKey
+        val deviceName = adapter.value?.displayName ?: deviceKey
         tuneHistoryStore.append(
             TuneHistoryEntry(
                 appliedAtMs = System.currentTimeMillis(),
@@ -232,6 +260,8 @@ class TuneViewModel @Inject constructor(
                 gpuMaxHz = preset.gpuMaxHz,
                 gpuMinHz = preset.gpuMinHz,
                 gpuGovernor = preset.gpuGovernor,
+                appliedOnDeviceKey = deviceKey,
+                appliedOnDeviceName = deviceName,
             ),
         )
     }
@@ -253,12 +283,16 @@ class TuneViewModel @Inject constructor(
                 reason = "Vendor: $reasonDisplay",
             )
             _lastResults.value = listOf(result)
+            val deviceKey = report.device.knownHandheldKey
+            val deviceName = adapter.value?.displayName ?: deviceKey
             tuneHistoryStore.append(
                 TuneHistoryEntry(
                     appliedAtMs = System.currentTimeMillis(),
                     presetName = reasonDisplay,
                     presetDescription = "Vendor key $key = $value",
                     pathway = ApplyPathway.AYN_SETTINGS_KEY,
+                    appliedOnDeviceKey = deviceKey,
+                    appliedOnDeviceName = deviceName,
                 ),
             )
         }
@@ -274,10 +308,16 @@ class TuneViewModel @Inject constructor(
         val report = capability.value ?: return
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         viewModelScope.launch {
-            val body = scriptGenerator.generate(preset, report, adapter)
-            _lastDeploy.value = scriptDeployer.deploy(preset, body)
-            _lastDeployPreset.value = preset
-            recordHistory(preset, ApplyPathway.GENERATED_SCRIPT)
+            when (val result = scriptGenerator.generate(preset, report, adapter)) {
+                is ScriptGenerateResult.Rejected -> {
+                    _scriptGenerateRejected.value = result.reason
+                }
+                is ScriptGenerateResult.Ok -> {
+                    _lastDeploy.value = scriptDeployer.deploy(preset, result.script)
+                    _lastDeployPreset.value = preset
+                    recordHistory(preset, ApplyPathway.GENERATED_SCRIPT)
+                }
+            }
         }
     }
 
@@ -289,10 +329,16 @@ class TuneViewModel @Inject constructor(
         val report = capability.value ?: return
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         viewModelScope.launch {
-            val body = scriptGenerator.generate(preset, report, adapter)
-            val res = scriptDeployer.deployForBoot(preset, body)
-            _lastBootDeploy.value = res
-            if (res.success) recordHistory(preset, ApplyPathway.BOOT_SCRIPT_INSTALL, "manager: ${res.manager}")
+            when (val result = scriptGenerator.generate(preset, report, adapter)) {
+                is ScriptGenerateResult.Rejected -> {
+                    _scriptGenerateRejected.value = result.reason
+                }
+                is ScriptGenerateResult.Ok -> {
+                    val res = scriptDeployer.deployForBoot(preset, result.script)
+                    _lastBootDeploy.value = res
+                    if (res.success) recordHistory(preset, ApplyPathway.BOOT_SCRIPT_INSTALL, "manager: ${res.manager}")
+                }
+            }
         }
     }
 
@@ -304,16 +350,23 @@ class TuneViewModel @Inject constructor(
         val report = capability.value ?: return
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         viewModelScope.launch {
-            val body = scriptGenerator.generate(preset, report, adapter)
-            _lastDeploy.value = scriptDeployer.deploy(preset, body)
-            _lastDeployPreset.value = preset
-            bootReminder.register(preset)
-            recordHistory(preset, ApplyPathway.BOOT_REMINDER_REGISTERED)
+            when (val result = scriptGenerator.generate(preset, report, adapter)) {
+                is ScriptGenerateResult.Rejected -> {
+                    _scriptGenerateRejected.value = result.reason
+                }
+                is ScriptGenerateResult.Ok -> {
+                    _lastDeploy.value = scriptDeployer.deploy(preset, result.script)
+                    _lastDeployPreset.value = preset
+                    bootReminder.register(preset)
+                    recordHistory(preset, ApplyPathway.BOOT_REMINDER_REGISTERED)
+                }
+            }
         }
     }
 
     fun clearLastDeploy() { _lastDeploy.value = null }
     fun clearLastBootDeploy() { _lastBootDeploy.value = null }
+    fun clearScriptGenerateRejected() { _scriptGenerateRejected.value = null }
 
     /** Result of reading back the kernel after the user runs a script. */
     private val _verifyResult = MutableStateFlow<VerifyResult?>(null)
@@ -398,8 +451,17 @@ class TuneViewModel @Inject constructor(
             cpuPolicyMinKhz = mins,
             cpuPolicyGovernor = govs,
         )
+        val deviceKey = report.device.knownHandheldKey
+        val deviceName = adapter.value?.displayName ?: deviceKey
         viewModelScope.launch {
-            profileRepository.saveProfile(UserProfile.fromPreset(asPreset, applyOnBoot))
+            profileRepository.saveProfile(
+                UserProfile.fromPreset(
+                    preset = asPreset,
+                    applyOnBoot = applyOnBoot,
+                    createdOnDeviceKey = deviceKey,
+                    createdOnDeviceName = deviceName,
+                ),
+            )
         }
     }
 

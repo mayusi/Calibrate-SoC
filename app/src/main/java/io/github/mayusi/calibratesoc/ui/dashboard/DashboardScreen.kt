@@ -1,5 +1,8 @@
 package io.github.mayusi.calibratesoc.ui.dashboard
 
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,20 +20,25 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.DevfreqDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
@@ -60,6 +68,7 @@ import io.github.mayusi.calibratesoc.ui.theme.Spacing
 fun DashboardScreen(
     viewModel: DashboardViewModel = hiltViewModel(),
     onOpenSessions: () -> Unit = {},
+    onOpenAutoTdp: () -> Unit = {},
 ) {
     val capability by viewModel.capability.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
@@ -68,6 +77,7 @@ fun DashboardScreen(
     val batteryEstimate by viewModel.batteryEstimate.collectAsStateWithLifecycle()
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
     val recordingElapsed by viewModel.recordingElapsedSeconds.collectAsStateWithLifecycle()
+    val autoTdpState by viewModel.autoTdpState.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -75,6 +85,11 @@ fun DashboardScreen(
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item { Header(capability, activeTuneState) }
+        // AutoTDP status strip — only when daemon is not IDLE so the strip
+        // never clutters the default state.
+        if (autoTdpState.status != AutoTdpStatus.IDLE) {
+            item { AutoTdpStatusStrip(autoTdpState, onOpenAutoTdp) }
+        }
         item { HudLauncherCard() }
         item {
             SessionRecordingCard(
@@ -122,6 +137,112 @@ fun DashboardScreen(
 
         item { BatteryCard(current, batteryEstimate) }
         item { RamCard(current) }
+    }
+}
+
+// --- AutoTDP status strip -----------------------------------------------
+
+/**
+ * Pure helper: formats the AutoTDP strip detail line from the applied TDP
+ * state and savings measurement.
+ *
+ * Returns null when there is nothing meaningful to display (no applied
+ * state, no savings, and no reason text).
+ *
+ * Factored out so it can be unit-tested without Compose.
+ */
+internal fun autoTdpStripDetail(
+    parkedCores: Set<Int>,
+    bigClusterCapKhz: Int?,
+    deltaMw: Long?,
+    enoughData: Boolean?,
+    fallbackReason: String,
+): String? {
+    val parkedLabel = parkedCores.takeIf { it.isNotEmpty() }
+        ?.sorted()
+        ?.joinToString(",") { "cpu$it" }
+        ?.let { "parked $it" }
+    val capLabel = bigClusterCapKhz?.let { khz ->
+        "cap ${"%.1f".format(khz / 1_000_000.0)}G"
+    }
+    val savingsLabel = when {
+        deltaMw == null -> null
+        enoughData == false -> "measuring…"
+        else -> deltaMw.let { "saving -${it} mW" }
+    }
+    val parts = listOfNotNull(parkedLabel, capLabel, savingsLabel)
+    return if (parts.isEmpty()) fallbackReason.take(60).ifBlank { null }
+    else parts.joinToString(" · ")
+}
+
+/**
+ * Compact top-of-screen strip shown whenever the AutoTDP daemon is not
+ * IDLE. Displays the daemon's last known applied state (parked cores, freq
+ * cap) and the measured savings when they are ready.  Tap "Details →" to
+ * navigate to the AutoTDP screen.
+ *
+ * Honesty-first: savings are shown only when [AutoTdpRunState.savings]
+ * has [enoughData] == true.  Before that, a "measuring…" placeholder is
+ * used instead of showing zeros.
+ */
+@Composable
+private fun AutoTdpStatusStrip(state: AutoTdpRunState, onTap: () -> Unit) {
+    val statusLabel = when (state.status) {
+        AutoTdpStatus.RUNNING -> "AutoTDP running"
+        AutoTdpStatus.STOPPED -> "AutoTDP stopped"
+        AutoTdpStatus.KILLED_BY_SAFETY -> "AutoTDP killed (safety)"
+        AutoTdpStatus.WRITE_DENIED -> "AutoTDP write denied"
+        AutoTdpStatus.LIVE_UNAVAILABLE -> "AutoTDP unavailable"
+        AutoTdpStatus.IDLE -> "AutoTDP"
+    }
+
+    val applied = state.appliedState
+    val savings = state.savings
+
+    val detail = autoTdpStripDetail(
+        parkedCores = applied?.parkedPrimeCores ?: emptySet(),
+        bigClusterCapKhz = applied?.bigClusterCapKhz,
+        deltaMw = savings?.deltaMw,
+        enoughData = savings?.enoughData,
+        fallbackReason = state.lastReason,
+    )
+
+    // Tinted surface strip reusing theme colors
+    val tintColor = when (state.status) {
+        AutoTdpStatus.RUNNING -> MaterialTheme.colorScheme.tertiary
+        AutoTdpStatus.KILLED_BY_SAFETY, AutoTdpStatus.WRITE_DENIED -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.secondary
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Spacing.item))
+            .then(
+                Modifier.padding(horizontal = Spacing.group, vertical = Spacing.dense),
+            ),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                statusLabel,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = tintColor,
+            )
+            if (detail != null) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+        TextButton(onClick = onTap) {
+            Text("Details →", style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 
@@ -329,7 +450,19 @@ private fun AtAGlanceCard(t: Telemetry) = SectionCard("At a glance") {
     val totalW = t.batteryDrawMilliW?.let { it / 1000.0 }
     val peakCpuMhz = t.perCoreCpuFreqKhz.maxOrNull()?.let { it / 1000 }
     val gpuLoad = t.gpuLoadPct
+    val gpuMhz = t.gpuFreqHz?.let { it / 1_000_000L }
 
+    // Battery level via sticky intent — unprivileged, available everywhere.
+    val context = LocalContext.current
+    val battPct = remember(t.timestampMs) {
+        runCatching {
+            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                ?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                ?.takeIf { it >= 0 }
+        }.getOrNull()
+    }
+
+    // Row 1: original four glance tiles.
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Spacing.item),
@@ -357,6 +490,28 @@ private fun AtAGlanceCard(t: Telemetry) = SectionCard("At a glance") {
             value = gpuLoad?.let { "$it%" } ?: "—",
             modifier = Modifier.weight(1f),
         )
+    }
+
+    // Row 2: GPU MHz + battery % — new glance tiles aligned to the grid above.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.item),
+    ) {
+        StatTile(
+            label = "GPU",
+            value = gpuMhz?.let { "$it" } ?: "—",
+            unit = if (gpuMhz != null) "MHz" else null,
+            modifier = Modifier.weight(1f),
+        )
+        StatTile(
+            label = "Battery",
+            value = battPct?.let { "$it%" } ?: "—",
+            modifier = Modifier.weight(1f),
+        )
+        // Two invisible weight spacers keep tiles left-aligned in the same
+        // four-column grid as the row above.
+        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.weight(1f))
     }
 }
 
@@ -403,32 +558,97 @@ private fun PerCoreFreqCard(t: Telemetry) = SectionCard(title = "CPU frequency (
 
 // --- CPU load chart ---------------------------------------------------
 
+/**
+ * Shows a mean-aggregate line chart of CPU load over the rolling history
+ * window, plus a per-core snapshot bar view beneath it for the latest
+ * sample. The chart gives trend; the bars give instant per-core granularity.
+ */
 @Composable
 private fun CpuLoadCard(history: List<Telemetry>) = SectionCard("CPU load (%)") {
     if (history.isEmpty() || history.last().perCoreLoadPct.isEmpty()) {
         Text("warming up…", style = MaterialTheme.typography.bodyMedium)
         return@SectionCard
     }
-    // Aggregate across cores → mean. Per-core stack lands in Phase 5
-    // once we have screen real estate for it.
+
+    // Aggregate across cores → mean for the time-series chart.
     val series = history.map { t ->
         val loads = t.perCoreLoadPct
         if (loads.isEmpty()) 0f else loads.sum().toFloat() / loads.size
     }
-    MetricLineChart(points = series, heightDp = 120)
+    MetricLineChart(points = series, heightDp = 100)
+
+    // Per-core snapshot bars for the most recent sample.
+    val latestLoads = history.last().perCoreLoadPct
+    if (latestLoads.isNotEmpty()) {
+        Spacer(Modifier.height(Spacing.group))
+        Text(
+            "Per-core (live)",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        latestLoads.forEachIndexed { idx, pct ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            ) {
+                Text(
+                    "cpu$idx",
+                    modifier = Modifier.width(40.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+                LinearProgressIndicator(
+                    progress = { (pct.toFloat() / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(Spacing.dense)),
+                )
+                Text(
+                    "$pct%",
+                    modifier = Modifier.width(36.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+    }
 }
 
-// --- GPU chart -------------------------------------------------------
+// --- GPU card -------------------------------------------------------
 
+/**
+ * GPU card: load + frequency displayed as labeled StatTile cells (with an
+ * amber color-band when load > 90 %), followed by a load-over-time line
+ * chart. Replaces the previous raw "$current% $freqMhz MHz" text dump with
+ * proper StatTile treatment to match the rest of the dashboard's style.
+ */
 @Composable
 private fun GpuCard(history: List<Telemetry>, latest: Telemetry) = SectionCard("GPU") {
     val current = latest.gpuLoadPct
     val freqMhz = latest.gpuFreqHz?.let { it / 1_000_000L }
-    Text(
-        "${current?.let { "$it%" } ?: "—"}   ${freqMhz?.let { "$it MHz" } ?: ""}",
-        style = MaterialTheme.typography.bodyLarge,
-        fontFamily = FontFamily.Monospace,
-    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.item),
+    ) {
+        StatTile(
+            label = "Load",
+            value = current?.let { "$it%" } ?: "—",
+            // Amber band at > 90 % load to flag GPU contention.
+            valueColor = current?.let { if (it > 90) MaterialTheme.colorScheme.secondary else null },
+            modifier = Modifier.weight(1f),
+        )
+        StatTile(
+            label = "Freq",
+            value = freqMhz?.let { "$it" } ?: "—",
+            unit = if (freqMhz != null) "MHz" else null,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.weight(1f))
+    }
+
     val series = history.map { it.gpuLoadPct?.toFloat() ?: 0f }
     if (series.all { it == 0f } && current == null) {
         Text("GPU load unreadable on this device", style = MaterialTheme.typography.bodySmall)

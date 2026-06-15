@@ -618,6 +618,103 @@ class PresetGeneratorTest {
     }
 
     // -------------------------------------------------------------------------
+    // OTA preset filtering by targetHandheldKeys
+    // -------------------------------------------------------------------------
+
+    /**
+     * An OTA preset with targetHandheldKeys=["retroid_pocket6"] must be
+     * shown on an RP6 and hidden on an Odin 3.
+     */
+    @Test
+    fun `OTA preset with rp6 key is shown on retroid_pocket6 only`() {
+        val rp6Preset = Preset(
+            id = "rp6_ps2_gc_sustained",
+            name = "RP6 PS2 Sustained",
+            description = "RP6 only",
+            verification = VerificationTier.COMMUNITY_TUNED,
+            cpuPolicyMaxKhz = mapOf(0 to 1555000, 3 to 1920000, 7 to 2227000),
+            targetHandheldKeys = listOf("retroid_pocket6"),
+        )
+        val remoteWithRp6Preset = remoteContentWith(listOf(rp6Preset))
+
+        // RP6 report — should include the preset.
+        val rp6Report = reportWith("retroid_pocket6", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(307, 1555, 2016)),
+            policy(3, listOf(499, 1920, 2803)),
+            policy(7, listOf(595, 2227, 3187)),
+        ))
+        val generatorRp6 = generatorWithRemote(remoteWithRp6Preset)
+        val rp6Presets = generatorRp6.presetsFor(rp6Report)
+        assertThat(rp6Presets.map { it.id }).contains("rp6_ps2_gc_sustained")
+
+        // Odin 3 report — same OTA list, preset must be filtered out.
+        val odin3Report = reportWith("ayn_odin3", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(384, 2745, 3532)),
+            policy(6, listOf(1017, 3072, 4320)),
+        ))
+        val generatorOdin3 = generatorWithRemote(remoteWithRp6Preset)
+        val odin3Presets = generatorOdin3.presetsFor(odin3Report)
+        assertThat(odin3Presets.map { it.id }).doesNotContain("rp6_ps2_gc_sustained")
+    }
+
+    /**
+     * An OTA preset with targetHandheldKeys=null (or missing from JSON) is
+     * shown on every device.
+     */
+    @Test
+    fun `OTA preset with null targetHandheldKeys is shown on all devices`() {
+        val universalPreset = Preset(
+            id = "universal_test_preset",
+            name = "Universal",
+            description = "For all",
+            verification = VerificationTier.GENERIC_UNKNOWN_FAMILY,
+            cpuPolicyMaxKhz = mapOf(0 to 1000000),
+            targetHandheldKeys = null, // universal
+        )
+        val remote = remoteContentWith(listOf(universalPreset))
+
+        val rp6Report = reportWith("retroid_pocket6", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(307, 1555, 2016)),
+        ))
+        val odin3Report = reportWith("ayn_odin3", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(384, 2745, 3532)),
+        ))
+        val unknownReport = reportWith(null, GpuFamily.ADRENO, listOf(
+            policy(0, listOf(300, 1000, 2000)),
+        ))
+
+        assertThat(generatorWithRemote(remote).presetsFor(rp6Report).map { it.id })
+            .contains("universal_test_preset")
+        assertThat(generatorWithRemote(remote).presetsFor(odin3Report).map { it.id })
+            .contains("universal_test_preset")
+        assertThat(generatorWithRemote(remote).presetsFor(unknownReport).map { it.id })
+            .contains("universal_test_preset")
+    }
+
+    /**
+     * OTA preset targeting a specific device is hidden when the current
+     * device key is null (unrecognised device).
+     */
+    @Test
+    fun `OTA preset with targetHandheldKeys is hidden on unrecognised device`() {
+        val rp6Preset = Preset(
+            id = "rp6_only",
+            name = "RP6 only",
+            description = "d",
+            verification = VerificationTier.COMMUNITY_TUNED,
+            cpuPolicyMaxKhz = mapOf(0 to 1555000),
+            targetHandheldKeys = listOf("retroid_pocket6"),
+        )
+        val remote = remoteContentWith(listOf(rp6Preset))
+        val unknownReport = reportWith(null, GpuFamily.ADRENO, listOf(
+            policy(0, listOf(300, 1000, 2000)),
+        ))
+
+        val presets = generatorWithRemote(remote).presetsFor(unknownReport)
+        assertThat(presets.map { it.id }).doesNotContain("rp6_only")
+    }
+
+    // -------------------------------------------------------------------------
     // SocFamilyRules — governor safety regression
     // -------------------------------------------------------------------------
 
@@ -652,6 +749,19 @@ class PresetGeneratorTest {
         val repo = mockk<RemoteContentRepository>()
         every { repo.remotePresets() } returns emptyList()
         return repo
+    }
+
+    private fun remoteContentWith(presets: List<Preset>): RemoteContentRepository {
+        val repo = mockk<RemoteContentRepository>()
+        every { repo.remotePresets() } returns presets
+        return repo
+    }
+
+    private fun generatorWithRemote(remote: RemoteContentRepository): PresetGenerator {
+        val registry = mockk<DeviceAdapterRegistry>()
+        every { registry.lookup(any()) } returns null
+        every { registry.lookup(null) } returns null
+        return PresetGenerator(registry, remote)
     }
 
     /** Helper for tests that use round MHz values (multiplied by 1000 to get kHz). */

@@ -80,6 +80,7 @@ import io.github.mayusi.calibratesoc.data.vendor.OdinIntents
 fun TuneScreen(
     onOpenHistory: () -> Unit = {},
     onOpenAdvancedTuning: () -> Unit = {},
+    onOpenAutoTdp: () -> Unit = {},
     viewModel: TuneViewModel = hiltViewModel(),
 ) {
     val capability by viewModel.capability.collectAsStateWithLifecycle()
@@ -93,6 +94,7 @@ fun TuneScreen(
     val lastDeployPreset by viewModel.lastDeployPreset.collectAsStateWithLifecycle()
     val verifyResult by viewModel.verifyResult.collectAsStateWithLifecycle()
     val lastBootDeploy by viewModel.lastBootDeploy.collectAsStateWithLifecycle()
+    val latestTelemetry by viewModel.latestTelemetry.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // Pending confirmations. Two kinds:
@@ -199,10 +201,19 @@ fun TuneScreen(
             }
         }
 
+        // Pre-compute the sorted distinct max-freqs for all policies so the
+        // cluster-tier ranking is stable across all PolicyCard composables.
+        val allPolicyMaxKhz = report.cpuPolicies
+            .map { it.availableFreqsKhz.lastOrNull() ?: it.currentMaxKhz }
+            .distinct()
+            .sorted()
+
         items(report.cpuPolicies) { policy ->
             PolicyCard(
                 policy = policy,
                 edit = pending[policy.policyId],
+                liveCoreFreqsKhz = latestTelemetry?.perCoreCpuFreqKhz,
+                allPolicyMaxKhz = allPolicyMaxKhz,
                 onChange = { viewModel.setEdit(policy.policyId, it) },
             )
         }
@@ -253,6 +264,22 @@ fun TuneScreen(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text("Advanced tuning →")
+            }
+        }
+
+        // AutoTDP entry point — dynamic power management with LIVE/SCRIPT/ADVISORY rungs.
+        item {
+            OutlinedButton(
+                onClick = onOpenAutoTdp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.TuneIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("AutoTDP — dynamic power management →")
             }
         }
 
@@ -1005,47 +1032,81 @@ private fun GpuPowerLevelSlider(
 
 // --- Per-policy card ------------------------------------------------
 
+/**
+ * Per-policy card. Adds two new pieces of information on top of the existing
+ * slider + governor widget:
+ *
+ *  1. **Cluster tier label** — inferred from each policy's max-freq rank among
+ *     all policies: lowest = efficiency, middle = big, highest = prime. Shown
+ *     in the card title so the user knows which cluster they are tuning without
+ *     counting core indices.
+ *
+ *  2. **Live MHz readback** — shows "Live: X MHz" next to the Max freq slider,
+ *     reading the highest live core freq for this policy's core set from
+ *     [liveCoreFreqsKhz]. Null-safe: if telemetry hasn't arrived yet the
+ *     readback is omitted rather than showing zero.
+ */
 @Composable
 private fun PolicyCard(
     policy: CpuPolicyProbe,
     edit: TuneViewModel.PolicyEdit?,
+    liveCoreFreqsKhz: List<Int>?,
+    allPolicyMaxKhz: List<Int>,
     onChange: (TuneViewModel.PolicyEdit) -> Unit,
-) = SectionCard("CPU policy ${policy.policyId} — cores ${policy.onlineCores.joinToString(",")}") {
-    val freqs = policy.availableFreqsKhz
-    if (freqs.isEmpty()) {
-        Text("No OPP table — kernel does not expose available freqs.",
-            style = MaterialTheme.typography.bodySmall)
-        return@SectionCard
-    }
-    val low = freqs.first()
-    val high = freqs.last()
-    val currentMin = edit?.minKhz ?: policy.currentMinKhz
-    val currentMax = edit?.maxKhz ?: policy.currentMaxKhz
+) {
+    // Cluster tier label: inferred from this policy's rank in the sorted list
+    // of all policies' max-freqs. Pure helper — no composable side effects.
+    val thisPolicyMaxKhz = policy.availableFreqsKhz.lastOrNull() ?: policy.currentMaxKhz
+    val tierLabel = clusterTierLabel(thisPolicyMaxKhz, allPolicyMaxKhz)
+    val title = "CPU policy ${policy.policyId} — cores ${policy.onlineCores.joinToString(",")} · $tierLabel"
 
-    LabeledSlider(
-        label = "Min freq",
-        valueKhz = currentMin,
-        steps = freqs,
-        onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(minKhz = snapped)) },
-    )
-    LabeledSlider(
-        label = "Max freq",
-        valueKhz = currentMax,
-        steps = freqs,
-        onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(maxKhz = snapped)) },
-    )
-    Text(
-        "Hardware range: ${low / 1000}–${high / 1000} MHz · ${freqs.size} steps",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    SectionCard(title) {
+        val freqs = policy.availableFreqsKhz
+        if (freqs.isEmpty()) {
+            Text("No OPP table — kernel does not expose available freqs.",
+                style = MaterialTheme.typography.bodySmall)
+            return@SectionCard
+        }
+        val low = freqs.first()
+        val high = freqs.last()
+        val currentMin = edit?.minKhz ?: policy.currentMinKhz
+        val currentMax = edit?.maxKhz ?: policy.currentMaxKhz
 
-    if (policy.availableGovernors.isNotEmpty()) {
-        GovernorDropdown(
-            available = policy.availableGovernors,
-            current = edit?.governor ?: policy.currentGovernor,
-            onChange = { onChange((edit ?: TuneViewModel.PolicyEdit()).copy(governor = it)) },
+        // Live MHz readback: max observed freq among this policy's cores.
+        val liveMhzLabel = liveCoreFreqsKhz
+            ?.let { allCores ->
+                policy.onlineCores
+                    .mapNotNull { coreIdx -> allCores.getOrNull(coreIdx) }
+                    .maxOrNull()
+                    ?.let { khz -> "Live: ${khz / 1000} MHz" }
+            }
+
+        LabeledSlider(
+            label = "Min freq",
+            valueKhz = currentMin,
+            steps = freqs,
+            onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(minKhz = snapped)) },
         )
+        LabeledSlider(
+            label = "Max freq",
+            valueKhz = currentMax,
+            steps = freqs,
+            liveSuffix = liveMhzLabel,
+            onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(maxKhz = snapped)) },
+        )
+        Text(
+            "Hardware range: ${low / 1000}–${high / 1000} MHz · ${freqs.size} steps",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (policy.availableGovernors.isNotEmpty()) {
+            GovernorDropdown(
+                available = policy.availableGovernors,
+                current = edit?.governor ?: policy.currentGovernor,
+                onChange = { onChange((edit ?: TuneViewModel.PolicyEdit()).copy(governor = it)) },
+            )
+        }
     }
 }
 
@@ -1055,6 +1116,7 @@ private fun LabeledSlider(
     valueKhz: Int,
     steps: List<Int>,
     onChange: (Int) -> Unit,
+    liveSuffix: String? = null,
 ) {
     val low = steps.first().toFloat()
     val high = steps.last().toFloat()
@@ -1062,8 +1124,17 @@ private fun LabeledSlider(
     val pos = ((valueKhz.toFloat() - low) / sliderRange).coerceIn(0f, 1f)
 
     Column {
-        Row {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            if (liveSuffix != null) {
+                Text(
+                    liveSuffix,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
             Text(
                 "${valueKhz / 1000} MHz",
                 fontFamily = FontFamily.Monospace,
@@ -1583,3 +1654,30 @@ private fun GrantIndicator(label: String, on: Boolean, hint: String) {
     }
 }
 
+// --- Cluster tier inference -------------------------------------------
+
+/**
+ * Infers a human-readable cluster tier label for a CPU policy by ranking
+ * its hardware max-freq relative to all other policies on the SoC.
+ *
+ * Ranking rule (sorted ascending by max-freq, distinct values):
+ *   - Rank 0 (lowest)  → "efficiency"
+ *   - Rank last (highest) → "prime"  (only shown when ≥ 3 distinct max-freqs)
+ *   - All others        → "big"
+ *
+ * This mirrors the little/big/prime naming used by ARM and Qualcomm:
+ *   Snapdragon 8 Gen X: little (efficiency) < big < prime
+ *   Dimensity:          little (efficiency) < big
+ *
+ * @param thisPolicyMaxKhz  hardware OPP ceiling for this policy.
+ * @param allPolicyMaxKhz   sorted (ascending) distinct ceiling list for ALL
+ *                          policies on this SoC.
+ */
+internal fun clusterTierLabel(thisPolicyMaxKhz: Int, allPolicyMaxKhz: List<Int>): String {
+    if (allPolicyMaxKhz.size <= 1) return "efficiency"
+    return when (thisPolicyMaxKhz) {
+        allPolicyMaxKhz.first() -> "efficiency"
+        allPolicyMaxKhz.last() -> if (allPolicyMaxKhz.size >= 3) "prime" else "big"
+        else -> "big"
+    }
+}

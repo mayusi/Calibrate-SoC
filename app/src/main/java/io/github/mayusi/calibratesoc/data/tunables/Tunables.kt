@@ -95,8 +95,22 @@ object Tunables {
      * the target path is one the unlock script actually chmod'd
      * ([isUnlockCoveredNode]), we return null — the node is live-writable
      * via [UnlockedFileWriter] without root.
+     *
+     * SHIZUKU TIER: when privilege is SHIZUKU AND [shizukuProbedWritable] is
+     * true for this exact path, we return null — the per-node probe confirmed
+     * shell can write this node on this device. When shizukuProbedWritable is
+     * false the honest message says "Shizuku connected but kernel blocks shell
+     * writes to this node" rather than a vague "permission denied".
+     *
+     * @param shizukuProbedWritable Pass [ShizukuNodeCache.isCachedWritable]
+     *   for id.target when the privilege tier is SHIZUKU. Null (default) means
+     *   "probe not available" — treated as unwritable.
      */
-    fun whyWriteDenied(id: TunableId, report: CapabilityReport): String? {
+    fun whyWriteDenied(
+        id: TunableId,
+        report: CapabilityReport,
+        shizukuProbedWritable: Boolean? = null,
+    ): String? {
         if (id.kind == TunableKind.SETTINGS_SYSTEM || id.kind == TunableKind.VENDOR_INTENT) {
             return null // always reachable
         }
@@ -110,7 +124,15 @@ object Tunables {
             io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.AYN_SETTINGS ->
                 "Direct sysfs writes need root. Use Generate script and run it via your device's Settings > Run script as Root."
             io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.SHIZUKU ->
-                "Shizuku kernel writes pending UserService support; use Generate script for now."
+                when (shizukuProbedWritable) {
+                    true  -> null // probe confirmed: shell CAN write this node
+                    false ->
+                        "Shizuku is connected but this device's kernel blocks shell writes to ${id.target} " +
+                            "(vendor SELinux policy). Monitoring + vendor settings only for this node."
+                    null  ->
+                        "Shizuku permission granted but this node has not been probed yet. " +
+                            "Run the Shizuku capability check to discover which nodes are shell-writable."
+                }
             io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.NONE ->
                 "Needs root (Magisk / KernelSU), or use Generate script and run via your device's Settings > Run script as Root."
         }

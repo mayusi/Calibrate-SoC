@@ -9,6 +9,8 @@ import io.github.mayusi.calibratesoc.data.capability.RootKind
 import io.github.mayusi.calibratesoc.data.capability.ShizukuStatus
 import io.github.mayusi.calibratesoc.data.capability.SoCIdentity
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
+import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
+import io.github.mayusi.calibratesoc.data.capability.FreqRange
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.presets.VerificationTier
@@ -21,6 +23,26 @@ import org.junit.Test
  * script as Root" runner), so its correctness is load-bearing.
  */
 class AynScriptGeneratorTest {
+
+    /**
+     * Helper: assert that generate() returned Ok (not Rejected) and
+     * return the script body string for further assertions.
+     */
+    private fun ScriptGenerateResult.expectOk(): String {
+        assertThat(this).isInstanceOf(ScriptGenerateResult.Ok::class.java)
+        return (this as ScriptGenerateResult.Ok).script
+    }
+
+    private fun policy(id: Int, vararg freqsKhz: Int) = CpuPolicyProbe(
+        policyId = id,
+        onlineCores = listOf(id),
+        availableFreqsKhz = freqsKhz.toList(),
+        availableGovernors = listOf("schedutil"),
+        currentMinKhz = freqsKhz.first(),
+        currentMaxKhz = freqsKhz.last(),
+        currentGovernor = "schedutil",
+        hardwareLimitsKhz = FreqRange(freqsKhz.first(), freqsKhz.last()),
+    )
 
     private val report = CapabilityReport(
         device = DeviceIdentity(
@@ -37,7 +59,14 @@ class AynScriptGeneratorTest {
         privilege = PrivilegeTier.NONE,
         rootKind = RootKind.NONE,
         shizuku = ShizukuStatus(false, false, false, null),
-        cpuPolicies = emptyList(),
+        // RP6 has 3 clusters: little (policy0), mid (policy3), big (policy7).
+        // These must match the policies referenced by `balanced` so the safety
+        // gate (Gate 2) does not reject the test preset.
+        cpuPolicies = listOf(
+            policy(0, 307000, 1613000, 2016000),
+            policy(3, 499000, 2242000, 2803000),
+            policy(7, 595000, 2390000, 3187000),
+        ),
         gpu = null,
         thermalZones = emptyList(),
         fan = null,
@@ -65,7 +94,7 @@ class AynScriptGeneratorTest {
 
     @Test
     fun `script writes all three clusters with chmod sandwich`() {
-        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+        val sh = AynScriptGenerator().generate(balanced, report, adapter).expectOk()
 
         // Every cluster's max is written.
         assertThat(sh).contains("policy0/scaling_max_freq")
@@ -83,7 +112,7 @@ class AynScriptGeneratorTest {
 
     @Test
     fun `every write is guarded on path existence and error-tolerant`() {
-        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+        val sh = AynScriptGenerator().generate(balanced, report, adapter).expectOk()
         // A missing policy node on a 2-cluster device must not abort.
         // After S0(b), paths are single-quoted — the existence test uses the quoted form.
         assertThat(sh).contains("[ -e '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq' ]")
@@ -93,7 +122,7 @@ class AynScriptGeneratorTest {
 
     @Test
     fun `script ends with a verification readback for every touched policy`() {
-        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+        val sh = AynScriptGenerator().generate(balanced, report, adapter).expectOk()
         assertThat(sh).contains("verifying")
         assertThat(sh).contains("policy0 max=")
         assertThat(sh).contains("policy3 max=")
@@ -105,7 +134,7 @@ class AynScriptGeneratorTest {
         val dangerous = balanced.copy(
             cpuPolicyMinKhz = mapOf(7 to 3000000), // 3 GHz min = cook
         )
-        val sh = AynScriptGenerator().generate(dangerous, report, adapter)
+        val sh = AynScriptGenerator().generate(dangerous, report, adapter).expectOk()
         assertThat(sh).contains("SAFETY: skipping min for policy7")
         // Must NOT emit a real min write of 3 GHz (path is now single-quoted too).
         assertThat(sh).doesNotContain("printf %s '3000000' > '/sys/devices/system/cpu/cpufreq/policy7/scaling_min_freq'")
@@ -113,7 +142,7 @@ class AynScriptGeneratorTest {
 
     @Test
     fun `min is written low first then target to satisfy kernel ordering`() {
-        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+        val sh = AynScriptGenerator().generate(balanced, report, adapter).expectOk()
         // The low-floor min write (300000) precedes the max write,
         // which precedes the target min write.
         // After S0(b), paths are single-quoted in the printf redirect target.
@@ -174,7 +203,7 @@ class AynScriptGeneratorTest {
             name = "foo' ; rm -rf /data ; echo '",
             cpuPolicyGovernor = emptyMap(),
         )
-        val sh = AynScriptGenerator().generate(malicious, report, adapter)
+        val sh = AynScriptGenerator().generate(malicious, report, adapter).expectOk()
         // The apostrophe in the name must be POSIX-escaped on the echo line:
         // foo'... → 'foo'\''...  (close quote, escaped literal ', reopen quote)
         assertThat(sh).contains("'foo'\\''")
@@ -189,7 +218,7 @@ class AynScriptGeneratorTest {
         val malicious = balanced.copy(
             cpuPolicyGovernor = mapOf(0 to "schedutil' ; cat /data/data/io.github.mayusi.calibratesoc ; echo '"),
         )
-        val sh = AynScriptGenerator().generate(malicious, report, adapter)
+        val sh = AynScriptGenerator().generate(malicious, report, adapter).expectOk()
         // The apostrophe in the governor must be escaped (schedutil'\'' ...),
         // never left as a bare `schedutil' ;` quote-break.
         assertThat(sh).contains("schedutil'\\''")
@@ -205,7 +234,7 @@ class AynScriptGeneratorTest {
         assertThat(gen.commentSafe(nasty)).doesNotContain("\n")
 
         val malicious = balanced.copy(name = "Cool\nrm -rf /data", cpuPolicyGovernor = emptyMap())
-        val sh = gen.generate(malicious, report, adapter)
+        val sh = gen.generate(malicious, report, adapter).expectOk()
         // The `# Preset:` comment line must stay a single line — the injected
         // newline must not split it into a real command line.
         assertThat(sh).contains("# Preset: Cool rm -rf /data")
@@ -228,7 +257,7 @@ class AynScriptGeneratorTest {
                 "/sys/module/cpu_boost/parameters/input_boost_freq" to injectionValue,
             ),
         )
-        val sh = AynScriptGenerator().generate(preset, report, adapter)
+        val sh = AynScriptGenerator().generate(preset, report, adapter).expectOk()
 
         // 1. The apostrophe in the value must be POSIX-escaped (foo'\'' ...).
         assertThat(sh).contains("'\\''")
@@ -246,7 +275,7 @@ class AynScriptGeneratorTest {
                 "/sys/module/cpu_boost/parameters/input_boost_ms" to "40",
             ),
         )
-        val sh = AynScriptGenerator().generate(preset, report, adapter)
+        val sh = AynScriptGenerator().generate(preset, report, adapter).expectOk()
 
         // Existence guard present for each path (after S0(b), path is single-quoted).
         assertThat(sh).contains("[ -e '/proc/sys/vm/swappiness' ]")
@@ -267,7 +296,7 @@ class AynScriptGeneratorTest {
         val preset = balanced.copy(
             extraSysfs = mapOf("/data/dangerous_path" to "1"),
         )
-        val sh = AynScriptGenerator().generate(preset, report, adapter)
+        val sh = AynScriptGenerator().generate(preset, report, adapter).expectOk()
 
         // Must be skipped with a comment, not emitted as a command.
         assertThat(sh).contains("# SKIPPED (invalid path)")
@@ -282,7 +311,7 @@ class AynScriptGeneratorTest {
         val preset = balanced.copy(
             extraSysfs = mapOf("/sys/../../etc/shadow" to "root"),
         )
-        val sh = AynScriptGenerator().generate(preset, report, adapter)
+        val sh = AynScriptGenerator().generate(preset, report, adapter).expectOk()
 
         assertThat(sh).contains("# SKIPPED (invalid path)")
         assertThat(sh).doesNotContain("printf %s 'root' > '/sys/../../etc/shadow'")
@@ -296,7 +325,7 @@ class AynScriptGeneratorTest {
         // After S0(b), the path in every shell command is wrapped in single-quotes
         // (shellSingleQuote), not left bare. This test locks in the quoted form for
         // a well-known policy path so regressions are caught immediately.
-        val sh = AynScriptGenerator().generate(balanced, report, adapter)
+        val sh = AynScriptGenerator().generate(balanced, report, adapter).expectOk()
 
         // The path must appear quoted in the existence guard, chmod, and redirect.
         val policyPath = "'/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'"
@@ -315,7 +344,7 @@ class AynScriptGeneratorTest {
         val preset = balanced.copy(
             extraSysfs = mapOf("/proc/sys/vm/swappiness" to "60"),
         )
-        val sh = AynScriptGenerator().generate(preset, report, adapter)
+        val sh = AynScriptGenerator().generate(preset, report, adapter).expectOk()
 
         assertThat(sh).contains("[ -e '/proc/sys/vm/swappiness' ]")
         assertThat(sh).contains("chmod 666 '/proc/sys/vm/swappiness'")

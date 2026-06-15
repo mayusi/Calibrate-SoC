@@ -13,6 +13,7 @@ import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.presets.VerificationTier
 import io.github.mayusi.calibratesoc.data.script.AynScriptGenerator
+import io.github.mayusi.calibratesoc.data.script.ScriptGenerateResult
 import org.junit.Test
 
 /**
@@ -30,6 +31,19 @@ import org.junit.Test
 class TunablesUnlockTest {
 
     // ── helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Unwrap a [ScriptGenerateResult] to the script body, failing the test if
+     * the gate rejected the preset (which should never happen for these
+     * device-local test presets with no targetHandheldKeys and cpuPolicies
+     * sourced from the same report).
+     */
+    private fun ScriptGenerateResult.expectOk(): String {
+        check(this is ScriptGenerateResult.Ok) {
+            "Expected ScriptGenerateResult.Ok but got Rejected: ${(this as ScriptGenerateResult.Rejected).reason}"
+        }
+        return this.script
+    }
 
     private fun report(
         tier: PrivilegeTier,
@@ -210,7 +224,7 @@ class TunablesUnlockTest {
                 "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor" to dangerousValue,
             ),
         )
-        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter)
+        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter).expectOk()
 
         // The dangerous value must be POSIX single-quote-escaped:
         // the apostrophe (' ) in the value becomes '\'', so the full
@@ -237,7 +251,7 @@ class TunablesUnlockTest {
                 "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor" to "powersave",
             ),
         )
-        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter)
+        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter).expectOk()
         // Every extraSysfs write must be wrapped in an existence check. The path is
         // now single-quoted (defence-in-depth against a metacharacter-bearing path),
         // so the guard reads `[ -e '/sys/...' ]`.
@@ -257,7 +271,7 @@ class TunablesUnlockTest {
                 "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor" to valueWithNewline,
             ),
         )
-        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter)
+        val sh = AynScriptGenerator().generate(preset, report(PrivilegeTier.NONE), adapter).expectOk()
         // The newline is inside a single-quoted string so must appear as a literal
         // character (no \n escape needed in single quotes — it's just a newline
         // inside the quoted string, which is safe). The "rm -rf /" after the newline

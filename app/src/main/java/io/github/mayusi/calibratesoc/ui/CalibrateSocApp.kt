@@ -56,6 +56,7 @@ import io.github.mayusi.calibratesoc.ui.session.AppStatsScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionDetailScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionsScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
+import io.github.mayusi.calibratesoc.ui.autotdp.AutoTdpScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneHistoryScreen
 import io.github.mayusi.calibratesoc.ui.tune.TuneScreen
 import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
@@ -117,6 +118,7 @@ fun CalibrateSocApp(
                                     Destination.SessionDetail -> Icons.Outlined.BarChart
                                     Destination.AdvancedTuning -> Icons.Outlined.Tune
                                     Destination.AppStats -> Icons.Outlined.BarChart
+                                    Destination.AutoTdp -> Icons.Outlined.Speed
                                 },
                                 contentDescription = dest.label,
                             )
@@ -135,16 +137,21 @@ fun CalibrateSocApp(
                 composable(Destination.Dashboard.route) {
                     DashboardScreen(
                         onOpenSessions = { nav.navigate(Destination.Sessions.route) },
+                        onOpenAutoTdp = { nav.navigate(Destination.AutoTdp.route) },
                     )
                 }
                 composable(Destination.Tune.route) {
                     TuneScreen(
                         onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
                         onOpenAdvancedTuning = { nav.navigate(Destination.AdvancedTuning.route) },
+                        onOpenAutoTdp = { nav.navigate(Destination.AutoTdp.route) },
                     )
                 }
                 composable(Destination.AdvancedTuning.route) {
                     AdvancedTuningScreen(onBack = { nav.popBackStack() })
+                }
+                composable(Destination.AutoTdp.route) {
+                    AutoTdpScreen(onBack = { nav.popBackStack() })
                 }
                 composable(Destination.TuneHistory.route) { TuneHistoryScreen() }
                 composable(Destination.Profiles.route) { ProfilesScreen() }

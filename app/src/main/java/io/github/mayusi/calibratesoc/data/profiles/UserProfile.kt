@@ -34,6 +34,44 @@ data class UserProfile(
      * OTA/preset-sharing channel.
      */
     val extraSysfs: Map<String, String> = emptyMap(),
+    /**
+     * The [DeviceIdentity.knownHandheldKey] of the device on which this
+     * profile was created (e.g. "retroid_pocket6", "ayn_odin3").  Null for
+     * profiles imported from a backup or share code that predates this field,
+     * or for profiles created on an unrecognised device.
+     *
+     * Used by the UI to show "from <device>" when the origin device differs
+     * from the current device — a subtle safety hint before Apply.
+     */
+    val createdOnDeviceKey: String? = null,
+    /**
+     * Human-readable name for [createdOnDeviceKey], captured at save time
+     * from the device's display name in the adapter or a fallback.
+     * Stored separately so the UI can render "from Retroid Pocket 6" even
+     * when the current device doesn't have that adapter loaded.
+     */
+    val createdOnDeviceName: String? = null,
+    /**
+     * Mirror of [Preset.targetHandheldKeys] — the list of device keys this
+     * profile is safe to apply to (e.g. ["retroid_pocket6"]).
+     *
+     * Null = applies to any device (backwards-compatible default; old persisted
+     * profiles that pre-date this field deserialize to null via
+     * kotlinx.serialization's ignoreUnknownKeys=true on the ProfileStore codec).
+     *
+     * **Why this field exists on UserProfile:**
+     * [ProfileApplier.apply] receives a [Preset], not a [UserProfile].  Every
+     * real apply path converts UserProfile → Preset first via [toPreset].  If
+     * [toPreset] drops targetHandheldKeys, Gate 1 in ProfileApplier never sees
+     * the restriction, so a device-targeted preset silently applies everywhere.
+     * Keeping this field here — and propagating it through [fromPreset]/[toPreset]
+     * — closes that hole on ALL production apply paths:
+     *   - Profiles screen Apply button  (UserProfile → toPreset → ProfileApplier)
+     *   - Per-app auto-switch           (ForegroundAppWatcher → same path)
+     *   - Boot re-apply                 (BootRevertReceiver → same path)
+     *   - Share-code import             (ShareablePreset → toUserProfile → toPreset)
+     */
+    val targetHandheldKeys: List<String>? = null,
 ) {
     fun toPreset(): Preset = Preset(
         id = id,
@@ -47,10 +85,18 @@ data class UserProfile(
         gpuMinHz = gpuMinHz,
         gpuGovernor = gpuGovernor,
         extraSysfs = extraSysfs,
+        // Propagate targeting so ProfileApplier's Gate 1 fires on every
+        // UserProfile → Preset apply path (Profiles screen, auto-switch, boot).
+        targetHandheldKeys = targetHandheldKeys,
     )
 
     companion object {
-        fun fromPreset(preset: Preset, applyOnBoot: Boolean = false): UserProfile = UserProfile(
+        fun fromPreset(
+            preset: Preset,
+            applyOnBoot: Boolean = false,
+            createdOnDeviceKey: String? = null,
+            createdOnDeviceName: String? = null,
+        ): UserProfile = UserProfile(
             id = "user_${System.currentTimeMillis()}",
             name = preset.name,
             description = preset.description,
@@ -63,6 +109,11 @@ data class UserProfile(
             extraSysfs = preset.extraSysfs,
             applyOnBoot = applyOnBoot,
             createdAtMs = System.currentTimeMillis(),
+            createdOnDeviceKey = createdOnDeviceKey,
+            createdOnDeviceName = createdOnDeviceName,
+            // Carry targeting forward so toPreset() can re-surface it to
+            // ProfileApplier's Gate 1 on every subsequent apply.
+            targetHandheldKeys = preset.targetHandheldKeys,
         )
     }
 }

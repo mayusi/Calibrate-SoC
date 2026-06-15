@@ -61,6 +61,23 @@ data class CapabilityReport(
      * [UnlockedFileWriter] instead of [NoopWriter].
      */
     val sysfsDirectlyWritable: Boolean = false,
+    /**
+     * True when AYN's PServerBinder is present AND our package is in its
+     * `app_whiteList` (i.e. transact() succeeded on the probe no-op).
+     *
+     * When true, [WriterRegistry] routes SYSFS tunables on AYN/Odin devices
+     * to [PServerWriter] instead of [UnlockedFileWriter]/[NoopWriter].
+     * PServer runs as root, so no per-boot chmod is needed — this is the
+     * best live-write tier available on non-rooted AYN handhelds.
+     *
+     * Set by [CapabilityProbe] via [PServerWriter.isTransactable()]. The result
+     * is memoised for the session; false before the whitelist step, true after.
+     *
+     * HONESTY: This field is only true when a REAL transact round-trip
+     * confirmed PServer ran our command. `binder != null` is NOT sufficient
+     * (the Odin 3 registers the service even when it blocks our UID).
+     */
+    val pserverSysfsLive: Boolean = false,
 )
 
 @Serializable

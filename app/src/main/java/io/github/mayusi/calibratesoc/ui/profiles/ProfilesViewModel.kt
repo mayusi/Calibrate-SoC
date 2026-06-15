@@ -1,25 +1,30 @@
 package io.github.mayusi.calibratesoc.ui.profiles
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.backup.BackupManager
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
+import io.github.mayusi.calibratesoc.data.profiles.ForegroundAppWatcher
 import io.github.mayusi.calibratesoc.data.profiles.ProfileApplier
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.share.PresetShareCodec
 import io.github.mayusi.calibratesoc.data.share.ShareDecodeResult
+import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,6 +43,7 @@ class ProfilesViewModel @Inject constructor(
     private val capabilityProbe: CapabilityProbe,
     private val shareCodec: PresetShareCodec,
     private val backupManager: BackupManager,
+    private val tuneHistoryStore: TuneHistoryStore,
 ) : ViewModel() {
 
     val store: StateFlow<ProfileStore> =
@@ -45,6 +51,80 @@ class ProfilesViewModel @Inject constructor(
 
     private val _installedApps = MutableStateFlow<List<InstalledApp>>(emptyList())
     val installedApps: StateFlow<List<InstalledApp>> = _installedApps.asStateFlow()
+
+    // ─── Active-profile awareness ──────────────────────────────────────────────
+
+    /**
+     * The id of the profile that was most recently applied, or null when no
+     * history entry matches any saved profile by name.  Derived by comparing
+     * the newest TuneHistoryEntry.presetName against each UserProfile.name.
+     *
+     * This is a best-effort heuristic: profiles are matched by name because
+     * TuneHistoryEntry pre-dates stable profile ids on every apply path.
+     * The match is intentionally loose (trimmed, case-insensitive) so it
+     * survives minor renames during import/export round-trips.
+     */
+    val activeProfileId: StateFlow<String?> = combine(
+        store,
+        tuneHistoryStore.entries,
+    ) { profileStore, history ->
+        val lastPresetName = history.firstOrNull()?.presetName?.trim() ?: return@combine null
+        profileStore.profiles.firstOrNull { p ->
+            p.name.trim().equals(lastPresetName, ignoreCase = true)
+        }?.id
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // ─── Accessibility grant awareness ────────────────────────────────────────
+
+    /**
+     * True when the Calibrate SoC ForegroundAppWatcher Accessibility service
+     * is enabled in system settings. Refreshed each time [refreshAccessibility]
+     * is called (called by the UI on every screen resume via LaunchedEffect).
+     */
+    private val _accessibilityGranted = MutableStateFlow(checkAccessibilityGranted())
+    val accessibilityGranted: StateFlow<Boolean> = _accessibilityGranted.asStateFlow()
+
+    /** Re-read the system accessibility setting. Call from screen resume. */
+    fun refreshAccessibility() {
+        _accessibilityGranted.value = checkAccessibilityGranted()
+    }
+
+    private fun checkAccessibilityGranted(): Boolean {
+        val enabled = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        val needle = ComponentName(context, ForegroundAppWatcher::class.java).flattenToString()
+        return enabled.split(':').any { it.equals(needle, ignoreCase = true) }
+    }
+
+    // ─── App label cache ───────────────────────────────────────────────────────
+
+    /**
+     * Cache of package-name -> human-readable app label.  Populated lazily
+     * on first request via [resolveAppLabel]; avoids calling PackageManager
+     * from the main thread on every recomposition.
+     */
+    private val appLabelCache = mutableMapOf<String, String>()
+
+    /**
+     * Returns the resolved app label for [packageName], falling back to the
+     * package name itself if the app is not installed.  The result is cached
+     * in [appLabelCache] after the first resolution so recompositions are
+     * cheap.  IO is performed inline on the calling coroutine (caller must be
+     * off the main thread or tolerate a brief block; in practice the cache
+     * hit rate is 100 % after first render).
+     */
+    fun resolveAppLabel(packageName: String): String {
+        appLabelCache[packageName]?.let { return it }
+        val label = runCatching {
+            val pm = context.packageManager
+            val info = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(info).toString()
+        }.getOrElse { packageName }
+        appLabelCache[packageName] = label
+        return label
+    }
 
     // ─── Share / import state ──────────────────────────────────────────────────
 

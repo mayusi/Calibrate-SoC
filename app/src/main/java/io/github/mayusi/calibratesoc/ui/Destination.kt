@@ -25,6 +25,9 @@ sealed class Destination(val route: String, val label: String) {
     /** Advanced Tuning — sub-screen reached from the Tune tab. Not in
      *  the bottom bar; accessed via the "Advanced tuning →" button. */
     data object AdvancedTuning : Destination("advanced_tuning", "Advanced Tuning")
+    /** AutoTDP — sub-screen reached from the Tune tab via the "AutoTDP →" entry card.
+     *  Not in the bottom bar (it's a power-user surface with its own honesty rungs). */
+    data object AutoTdp : Destination("autotdp", "AutoTDP")
     /** Per-App Performance Dashboard — sub-screen reachable from Sessions list.
      *  Not in the bottom bar; aggregates all saved sessions by app label. */
     data object AppStats : Destination("app_stats", "App Stats")

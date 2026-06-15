@@ -26,6 +26,20 @@ import javax.inject.Singleton
  * writing — so even an auto-switch firing 50 times in a row leaves
  * exactly one journal entry per tunable per session (the snapshot
  * coalescer keeps the original stock value).
+ *
+ * Safety gate: [apply] rejects any preset that:
+ *   1. Carries a [Preset.targetHandheldKeys] list that does NOT
+ *      include the current device's [DeviceIdentity.knownHandheldKey].
+ *      This prevents a shared/imported RP6 preset from writing RP6
+ *      3-cluster MHz values onto an Odin 3 2-cluster topology.
+ *   2. References a cpuPolicy policyId that does not exist in the
+ *      current device's [CapabilityReport.cpuPolicies].  This is
+ *      defence-in-depth against topology mismatches even when
+ *      targetHandheldKeys is not set.
+ *
+ * Both checks return [WriteResult.Rejected] with a clear error
+ * message rather than silently dropping or applying the writes.
+ * The caller surfaces these to the user.
  */
 @Singleton
 class ProfileApplier @Inject constructor(
@@ -37,6 +51,33 @@ class ProfileApplier @Inject constructor(
         reason: String,
     ): List<WriteResult> {
         val results = mutableListOf<WriteResult>()
+
+        // ── Hard safety gates (device-targeting + policy-existence) ────────
+        // Delegated to PresetSafetyGate so the same logic is reused by both
+        // the live-apply path (here) and the script-generation path
+        // (AynScriptGenerator / TuneViewModel).
+        //
+        // Gate 1 (device-targeting) only fires when Preset.targetHandheldKeys
+        // is non-null.  That field is now propagated through EVERY apply path
+        // (UserProfile.toPreset, ShareablePreset.toUserProfile) so this gate
+        // cannot be silently bypassed on the Profiles screen, ForegroundAppWatcher,
+        // BootRevertReceiver, or share-code import.
+        //
+        // Gate 2 (policy-existence) is defence-in-depth; it does NOT catch
+        // same-policyId/different-topology mismatches — see PresetSafetyGate
+        // for the full honesty comment.
+        when (val verdict = PresetSafetyGate.check(preset, report)) {
+            is PresetSafetyGate.SafetyVerdict.Rejected -> {
+                val gateId = TunableId(kind = TunableKind.SYSFS, target = "preset_safety_gate")
+                results += WriteResult.Rejected(
+                    id = gateId,
+                    errno = null,
+                    message = verdict.reason,
+                )
+                return results
+            }
+            is PresetSafetyGate.SafetyVerdict.Ok -> { /* proceed */ }
+        }
         for ((policyId, maxKhz) in preset.cpuPolicyMaxKhz) {
             results += tunableWriter.write(
                 id = Tunables.cpuMaxFreq(policyId),

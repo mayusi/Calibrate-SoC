@@ -121,6 +121,19 @@ data class TuneHistoryEntry(
     val gpuMaxHz: Long? = null,
     val gpuMinHz: Long? = null,
     val gpuGovernor: String? = null,
+    /**
+     * The [DeviceIdentity.knownHandheldKey] of the device on which this
+     * tune was applied (e.g. "retroid_pocket6", "ayn_odin3").  Null for
+     * entries recorded before this field existed (old history files) or
+     * on unrecognised devices.  The UI shows "on <device>" when non-null.
+     */
+    val appliedOnDeviceKey: String? = null,
+    /**
+     * Human-readable display name for [appliedOnDeviceKey], captured at
+     * record time.  Stored separately so the UI can render
+     * "on Retroid Pocket 6" even if the device DB changes later.
+     */
+    val appliedOnDeviceName: String? = null,
 )
 
 @Serializable

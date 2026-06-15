@@ -216,6 +216,23 @@ data class ShareablePreset(
      * on the Json config, which both production and test instances set).
      */
     val extraSysfs: Map<String, String> = emptyMap(),
+    /**
+     * Mirror of [Preset.targetHandheldKeys] / [UserProfile.targetHandheldKeys].
+     * Null = applies to any device.
+     *
+     * Added alongside extraSysfs (no format-version bump needed): the Json
+     * config on both the production encoder and the test codec sets
+     * ignoreUnknownKeys=true, so old share codes that omit this field
+     * deserialize safely with the null default — they are not falsely blocked.
+     *
+     * On encode: populated from [UserProfile.targetHandheldKeys] via [fromProfile].
+     * On decode: propagated to the new [UserProfile] via [toUserProfile] so that
+     * [UserProfile.toPreset] can surface it to [ProfileApplier]'s Gate 1.
+     * Without this round-trip, a share-code import would silently strip the
+     * targeting restriction and allow the imported profile to be applied on the
+     * wrong device.
+     */
+    val targetHandheldKeys: List<String>? = null,
 ) {
     fun toUserProfile(): UserProfile = UserProfile(
         // New unique ID on every import so two imports of the same code don't collide.
@@ -238,6 +255,10 @@ data class ShareablePreset(
         // Shared profiles do NOT auto-apply — user applies manually.
         applyOnBoot = false,
         createdAtMs = System.currentTimeMillis(),
+        // Propagate targeting so the imported UserProfile → toPreset() → ProfileApplier
+        // Gate 1 still sees the restriction. Without this, a share-code import would
+        // silently strip the targeting and allow apply on the wrong device.
+        targetHandheldKeys = targetHandheldKeys,
     )
 
     companion object {
@@ -252,6 +273,9 @@ data class ShareablePreset(
             gpuMinHz = profile.gpuMinHz,
             gpuGovernor = profile.gpuGovernor,
             extraSysfs = profile.extraSysfs,
+            // Carry targeting into the wire format so the receiver's Gate 1
+            // is not silently bypassed when the decoded UserProfile is applied.
+            targetHandheldKeys = profile.targetHandheldKeys,
         )
     }
 }
