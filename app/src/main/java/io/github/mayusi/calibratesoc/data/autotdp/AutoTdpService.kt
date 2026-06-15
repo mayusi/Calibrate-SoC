@@ -70,6 +70,7 @@ class AutoTdpService : Service() {
     @Inject lateinit var tunableWriter: TunableWriter
     @Inject lateinit var controller: AutoTdpController
     @Inject lateinit var writerRegistry: io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
+    @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
@@ -124,8 +125,9 @@ class AutoTdpService : Service() {
      * Main daemon body. Runs on [Dispatchers.IO].
      *
      * Steps:
-     *   1. Resolve CapabilityReport.
-     *   2. Check LIVE availability — if denied, emit state + stop.
+     *   1. Resolve CapabilityReport (with PServer cache bust — FIX 2).
+     *   2. Check LIVE availability — if denied for a PServer-related reason,
+     *      retry once after 300 ms (FIX 2). Only then emit LIVE_UNAVAILABLE.
      *   3. Build TdpCaps.
      *   4. Collect telemetry, maintain rolling window, call AutoTdpEngine.decide.
      *   5. Apply delta via TunableWriter.
@@ -133,22 +135,42 @@ class AutoTdpService : Service() {
      */
     private suspend fun runDaemon(config: AutoTdpProfileConfig) {
         // ── Step 1: resolve capabilities ──────────────────────────────────────
+        // FIX 2(a): invalidate the PServer transactableCache BEFORE the refresh
+        // so we never evaluate the LIVE gate against a stale false cached from an
+        // earlier binder blip. The cache is cheap to rebuild (one `true` transact).
+        pServerWriter.invalidateTransactableCache()
+
         // Always refresh rather than using the cached value so that
         // pserverSysfsLive / sysfsDirectlyWritable reflect the CURRENT
         // device state at daemon-start time. A stale report could have
         // pserverSysfsLive=false (probed before the whitelist step was
         // run) and cause the availability gate to reject a device that
         // is actually writable.
-        val report: CapabilityReport = capabilityProbe.refresh()
+        var report: CapabilityReport = capabilityProbe.refresh()
 
         // ── Step 2: LIVE availability gate ────────────────────────────────────
-        val liveReason = liveUnavailableReason(report)
+        // FIX 2(b): if the first probe indicates PServer is unavailable, retry
+        // once with a 300 ms delay. A transient binder blip (PServer service
+        // restarting, HAL not yet up) often clears within hundreds of ms.
+        // We only retry for PServer-related denials (the reason string mentions
+        // "pserver" or comes from the live-write path) — structural denials
+        // (no writer tier for a node family) are never retried.
+        var liveReason = liveUnavailableReason(report)
+        if (liveReason != null && isPserverRelatedDenial(report, liveReason)) {
+            Log.w(TAG, "LIVE not available (PServer-related), retrying in 300ms: $liveReason")
+            delay(300)
+            pServerWriter.invalidateTransactableCache()
+            report = capabilityProbe.refresh()
+            liveReason = liveUnavailableReason(report)
+        }
+
         if (liveReason != null) {
-            Log.w(TAG, "LIVE not available: $liveReason")
+            Log.w(TAG, "LIVE not available after retry: $liveReason")
             controller.updateState(
                 AutoTdpRunState(
                     status = AutoTdpStatus.LIVE_UNAVAILABLE,
                     liveAvailable = false,
+                    // FIX 2(c): preserve the reason string so the UI can show it (FIX 4).
                     liveUnavailableReason = liveReason,
                 )
             )
@@ -409,6 +431,20 @@ class AutoTdpService : Service() {
             }
         }
         return null // all clear — both critical node families have a live writer
+    }
+
+    /**
+     * FIX 2: Returns true when the LIVE-unavailable denial is PServer-related —
+     * i.e. the report shows no live path AND the device likely has PServer
+     * (vendor app present). These are the transient cases worth retrying.
+     * Structural denials (root tier required, no cpu policies, etc.) return false.
+     */
+    private fun isPserverRelatedDenial(report: CapabilityReport, reason: String): Boolean {
+        // If the report already confirms pserverSysfsLive=false but a vendor app
+        // is present (meaning PServer binder exists), it's a binder blip worth
+        // retrying. Also catch reason strings that reference the live-write path.
+        val vendorPresent = report.vendorApps.aynGameAssistant || report.vendorApps.langerhansOdinTools
+        return vendorPresent && !report.pserverSysfsLive
     }
 
     // ── Notification ──────────────────────────────────────────────────────────

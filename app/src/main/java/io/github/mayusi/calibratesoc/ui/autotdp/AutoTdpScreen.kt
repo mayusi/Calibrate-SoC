@@ -110,6 +110,8 @@ fun AutoTdpScreen(
     val kneeKhz by viewModel.kneeKhz.collectAsStateWithLifecycle()
     val idleChargeTriggerEnabled by viewModel.idleChargeTriggerEnabled.collectAsStateWithLifecycle()
     val manuallyOn by viewModel.manuallyOn.collectAsStateWithLifecycle()
+    val startingUp by viewModel.startingUp.collectAsStateWithLifecycle()
+    val startError by viewModel.startError.collectAsStateWithLifecycle()
     val lastScriptDeploy by viewModel.lastScriptDeploy.collectAsStateWithLifecycle()
     val perAppMap by viewModel.perAppMap.collectAsStateWithLifecycle()
     val showPServerUnlockCta by viewModel.showPServerUnlockCta.collectAsStateWithLifecycle()
@@ -160,10 +162,23 @@ fun AutoTdpScreen(
             HeroControlBlock(
                 rung = rung,
                 isOn = manuallyOn,
+                startingUp = startingUp,
                 runState = runState,
                 onToggle = { viewModel.setManualEnabled(it) },
                 onGenerateScript = { viewModel.generateEfficiencyScript() },
             )
+        }
+
+        // ── 2b. Abort / start-error notice (FIX 4) ────────────────────────────
+        // Persists after the button returns to STOPPED so the user knows WHY.
+        // The notice remains visible until the user taps "Dismiss" or taps START again.
+        startError?.let { errorMsg ->
+            item {
+                AbortNoticeCard(
+                    message = errorMsg,
+                    onDismiss = { viewModel.clearStartError() },
+                )
+            }
         }
 
         // ── 3. Live savings MetricTile (only when data ready) ──────────────────
@@ -285,6 +300,7 @@ fun AutoTdpScreen(
 private fun HeroControlBlock(
     rung: AutoTdpRung,
     isOn: Boolean,
+    startingUp: Boolean,
     runState: AutoTdpRunState,
     onToggle: (Boolean) -> Unit,
     onGenerateScript: () -> Unit,
@@ -303,17 +319,24 @@ private fun HeroControlBlock(
                     verticalArrangement = Arrangement.spacedBy(Spacing.group),
                 ) {
                     Text(
-                        if (isOn) {
-                            when (runState.status) {
-                                AutoTdpStatus.RUNNING -> "DAEMON ACTIVE"
-                                else -> "STARTING…"
-                            }
-                        } else "STOPPED",
+                        when {
+                            startingUp -> "STARTING…"
+                            isOn && runState.status == AutoTdpStatus.RUNNING -> "DAEMON ACTIVE"
+                            isOn -> "STARTING…"
+                            else -> "STOPPED"
+                        },
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = if (isRunning) AccentBar.Emerald else Color(0xFF999999),
                         letterSpacing = 0.10.sp,
                     )
+                    // FIX 1: show a progress bar while the capability probe is in flight.
+                    if (startingUp) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = AccentBar.Blue,
+                        )
+                    }
                     Text(
                         if (isRunning) "Writing kernel clocks every second"
                         else "All kernel writes reverted",
@@ -321,10 +344,15 @@ private fun HeroControlBlock(
                         color = Color(0xFF777777),
                     )
                     Spacer(Modifier.height(4.dp))
+                    // FIX 1: disable the button while probing to prevent double-taps.
                     ArsenalButton(
-                        label = if (isOn) "Stop AutoTDP" else "Start AutoTDP",
-                        onClick = { onToggle(!isOn) },
-                        accent = if (isOn) AccentBar.Emerald else AccentBar.Red,
+                        label = when {
+                            startingUp -> "Starting…"
+                            isOn -> "Stop AutoTDP"
+                            else -> "Start AutoTDP"
+                        },
+                        onClick = { if (!startingUp) onToggle(!isOn) },
+                        accent = if (isOn || startingUp) AccentBar.Emerald else AccentBar.Red,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -1313,6 +1341,62 @@ private fun PerAppEfficiencyDialog(
         },
         confirmButton = { Button(onClick = onDismiss) { Text("Done") } },
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Abort / start-error notice (FIX 4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Persistent notice surfaced whenever AutoTDP stops for a non-user reason.
+ *
+ * Stays visible after the button returns to STOPPED so the user knows WHY the
+ * daemon stopped instead of seeing a silent flip to "STOPPED" with no context.
+ * The [message] string is provided by the ViewModel and is always plain-language
+ * (no internal codes, no fake values — honesty-first).
+ *
+ * FIX 4: abort paths (LIVE_UNAVAILABLE, KILLED_BY_SAFETY, WRITE_DENIED) all now
+ * route here with a human-readable explanation before clearing _manuallyOn.
+ */
+@Composable
+private fun AbortNoticeCard(
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    ArsenalPanel(accent = AccentBar.Amber) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Info,
+                contentDescription = null,
+                tint = AccentBar.Amber,
+                modifier = Modifier.size(18.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                Text(
+                    "AutoTDP stopped",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = AccentBar.Amber,
+                    letterSpacing = 0.07.sp,
+                )
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFCCCCCC),
+                )
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

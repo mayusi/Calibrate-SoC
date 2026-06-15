@@ -324,8 +324,8 @@ private fun HudLauncherCard() {
     ArsenalPanel(accent = AccentBar.Neutral, title = "Floating HUD") {
         Text(
             "Draws a draggable performance panel on top of any app. Drag anywhere to move it; " +
-                "tap the swap icon for compact ↔ verbose. The ±/Next buttons step the big-core " +
-                "clock or cycle saved profiles via your device's script runner.",
+                "tap the swap icon to switch between the compact bar and the full panel. The full " +
+                "panel can start AutoTDP and switch its profile right from your game.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF999999),
         )

@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
 /**
@@ -183,6 +185,25 @@ class AutoTdpViewModel @Inject constructor(
     private val _manuallyOn = MutableStateFlow(false)
     val manuallyOn: StateFlow<Boolean> = _manuallyOn.asStateFlow()
 
+    /**
+     * True while the async capability refresh triggered by the START button
+     * is in flight. Prevents double-taps and drives the "Starting…" button label.
+     */
+    private val _startingUp = MutableStateFlow(false)
+    val startingUp: StateFlow<Boolean> = _startingUp.asStateFlow()
+
+    /**
+     * Non-null when the last START attempt failed before the daemon could
+     * be launched (e.g. capability probe returned no CPU policies).
+     * The UI surfaces this as a persistent notice. Cleared when the user
+     * presses START again or when the daemon transitions to RUNNING.
+     */
+    private val _startError = MutableStateFlow<String?>(null)
+    val startError: StateFlow<String?> = _startError.asStateFlow()
+
+    /** Ensures only one concurrent startManual coroutine runs at a time. */
+    private val startMutex = Mutex()
+
     private var sweepJob: Job? = null
     private var latestTelemetry: io.github.mayusi.calibratesoc.data.monitor.Telemetry? = null
 
@@ -232,14 +253,43 @@ class AutoTdpViewModel @Inject constructor(
         }
 
         // Reflect LIVE_UNAVAILABLE → drop manuallyOn so the toggle resets.
+        // Also propagate abort notices via _startError for FIX 4.
         controller.state
             .onEach { state ->
-                if (state.status == AutoTdpStatus.LIVE_UNAVAILABLE ||
-                    state.status == AutoTdpStatus.STOPPED ||
-                    state.status == AutoTdpStatus.KILLED_BY_SAFETY ||
-                    state.status == AutoTdpStatus.WRITE_DENIED
-                ) {
-                    _manuallyOn.value = false
+                when (state.status) {
+                    AutoTdpStatus.RUNNING -> {
+                        // Daemon started successfully — clear any lingering start error.
+                        _startError.value = null
+                    }
+                    AutoTdpStatus.LIVE_UNAVAILABLE -> {
+                        _manuallyOn.value = false
+                        // Surface the daemon's PServer unavailability reason (FIX 4).
+                        _startError.value =
+                            "AutoTDP stopped: live kernel writes weren't available" +
+                            (state.liveUnavailableReason?.let { " — $it" } ?: "") +
+                            ". Re-run Advanced unlock or try again."
+                    }
+                    AutoTdpStatus.KILLED_BY_SAFETY -> {
+                        _manuallyOn.value = false
+                        // Surface the thermal/battery kill reason (FIX 4).
+                        _startError.value =
+                            "AutoTDP stopped: device hit its thermal/battery safety limit" +
+                            (state.killReason?.let { " ($it)" } ?: "") +
+                            ". Let it cool, then restart."
+                    }
+                    AutoTdpStatus.WRITE_DENIED -> {
+                        _manuallyOn.value = false
+                        // Surface the write-denied detail (FIX 4).
+                        _startError.value =
+                            "AutoTDP stopped: a kernel write was denied" +
+                            (state.writeFailure?.let { " — $it" } ?: "") +
+                            ". Try the unlock script or root."
+                    }
+                    AutoTdpStatus.STOPPED -> {
+                        _manuallyOn.value = false
+                        // User-requested stop — no error notice needed.
+                    }
+                    AutoTdpStatus.IDLE -> Unit
                 }
             }
             .launchIn(viewModelScope)
@@ -280,17 +330,70 @@ class AutoTdpViewModel @Inject constructor(
     /**
      * Called when the user taps the main On/Off toggle (LIVE rung only).
      * Sets manual-precedence so triggers cannot override while ON.
+     *
+     * FIX 1: if the capability report hasn't been probed yet (user opened the
+     * AutoTDP screen very fast), this used to silently `return` and leave the
+     * daemon never started while `_manuallyOn` was already flipped to true.
+     *
+     * Fixed: when `report` is null we refresh it asynchronously under a mutex
+     * (prevents double-tap races), show a "Starting…" state during the probe,
+     * and only proceed to `controller.start` when a usable report arrives.
+     * If the refresh still yields no CPU policies we surface an error notice.
      */
     fun setManualEnabled(on: Boolean) {
-        _manuallyOn.value = on
-        if (on) {
-            val report = capabilityProbe.report.value ?: return
-            val caps = TdpCaps.from(report)
+        if (!on) {
+            _manuallyOn.value = false
+            _startingUp.value = false
+            _startError.value = null
+            controller.stop()
+            return
+        }
+
+        // Fast path: report already cached.
+        val cached = capabilityProbe.report.value
+        if (cached != null) {
+            _manuallyOn.value = true
+            _startError.value = null
+            val caps = TdpCaps.from(cached)
             val config = buildConfig(caps)
             controller.start(config)
-        } else {
-            controller.stop()
+            return
         }
+
+        // Slow path: report not yet available — refresh first, then start.
+        // The mutex prevents a second tap from launching a parallel probe.
+        viewModelScope.launch {
+            if (!startMutex.tryLock()) return@launch   // already probing
+            _startingUp.value = true
+            _manuallyOn.value = true
+            _startError.value = null
+            try {
+                val report = capabilityProbe.refresh()
+                val caps = TdpCaps.from(report)
+                if (caps.bigPolicyId < 0 && caps.bigClusterOppStepsKhz.isEmpty()) {
+                    // No usable CPU policies — cannot start the daemon honestly.
+                    _manuallyOn.value = false
+                    _startError.value =
+                        "AutoTDP could not start: no CPU policies found after probing this device. " +
+                        "Check that the capability report is not empty."
+                    return@launch
+                }
+                val config = buildConfig(caps)
+                controller.start(config)
+            } catch (t: Throwable) {
+                _manuallyOn.value = false
+                _startError.value =
+                    "AutoTDP could not start: capability probe failed (${t.message}). Try again."
+            } finally {
+                _startingUp.value = false
+                startMutex.unlock()
+            }
+        }
+    }
+
+    /** Clears the persistent start-error notice. */
+    fun clearStartError() {
+        _startError.value = null
     }
 
     fun selectProfile(profile: AutoTdpProfile) {

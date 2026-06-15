@@ -6,7 +6,7 @@ import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 /**
  * Stateful thermal kill evaluator for the AutoTDP daemon.
  *
- * Design rationale (three fixes):
+ * Design rationale (four fixes):
  *
  * 1. THRESHOLD raised from 95 °C → 105 °C.
  *    Snapdragon 8 Gen 3 / Odin 3 routinely reaches 85–95 °C on die sensors
@@ -30,6 +30,17 @@ import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
  *    is a genuine emergency regardless of type. We do not filter to CPU-only
  *    because a GPU or modem zone at 105 °C is equally dangerous.
  *
+ * 4. STARTUP GRACE WINDOW (FIX 3): the kill is NOT evaluated for the first
+ *    [graceSamples] telemetry samples after the daemon starts.
+ *    Rationale: on a warm device (just finished gaming), the first few sensor
+ *    readings may already be above 105 °C. If the daemon aborts immediately, it
+ *    reverts all writes — removing the frequency cap that was about to cool the
+ *    device. The grace gives the daemon time to apply caps first, which is the
+ *    mechanism that ACTUALLY reduces thermals.
+ *    Safety backstop: the kernel's own thermal trip (~110 °C) is always active
+ *    regardless of what AutoTDP does. Three seconds of grace at ≤110 °C is safe.
+ *    The kill is still evaluated normally for every sample AFTER the grace window.
+ *
  * Thread safety: this object must only be called from a single coroutine
  * (the daemon loop). It is NOT thread-safe.
  */
@@ -41,18 +52,35 @@ class ThermalKillEvaluator(
      * a kill. Default = 2 (current sample + 1 predecessor).
      */
     val requiredConsecutive: Int = REQUIRED_CONSECUTIVE,
+    /**
+     * FIX 3: Number of initial samples to skip before evaluating the kill.
+     * Defaults to [GRACE_SAMPLES] (3 samples ≈ 3 s at 1 Hz polling).
+     * During the grace window the evaluator always returns null.
+     */
+    val graceSamples: Int = GRACE_SAMPLES,
 ) {
     private var consecutiveOverThreshold = 0
+    /** Counts how many samples have been fed since the last [reset]. */
+    private var samplesSeenTotal = 0
 
     /**
      * Feed one [Telemetry] sample. Returns a human-readable kill reason string
      * when the kill should be declared, or null when the daemon should continue.
      *
      * The kill is declared only after [requiredConsecutive] consecutive calls
-     * where the hottest zone exceeds [killThresholdMilliC]. A single below-
-     * threshold sample resets the counter (the thermal situation improved).
+     * where the hottest zone exceeds [killThresholdMilliC], AND only after the
+     * startup [graceSamples] grace window has expired. A single below-threshold
+     * sample resets the consecutive counter (the thermal situation improved).
      */
     fun evaluate(sample: Telemetry): String? {
+        samplesSeenTotal++
+
+        // FIX 3: honour the startup grace — skip kill evaluation for the first
+        // [graceSamples] samples so the daemon can apply frequency caps first.
+        if (samplesSeenTotal <= graceSamples) {
+            return null
+        }
+
         val hotZone = sample.zoneTempsMilliC.maxByOrNull { it.tempMilliC }
             ?: return null // no zone data — don't kill (can't read = can't confirm danger)
 
@@ -70,9 +98,10 @@ class ThermalKillEvaluator(
         }
     }
 
-    /** Reset the consecutive counter (call when restarting the daemon loop). */
+    /** Reset all counters (call when restarting the daemon loop). */
     fun reset() {
         consecutiveOverThreshold = 0
+        samplesSeenTotal = 0
     }
 
     private fun buildKillReason(hotZone: ZoneTemp, consecutive: Int): String {
@@ -106,5 +135,22 @@ class ThermalKillEvaluator(
          * the daemon. Two in a row is a sustained emergency.
          */
         const val REQUIRED_CONSECUTIVE = 2
+
+        /**
+         * FIX 3: Number of initial telemetry samples to skip before evaluating the
+         * thermal kill. At the default 1 Hz polling rate this is ≈ 3 seconds.
+         *
+         * Rationale: on a device that is warm from gaming, the first samples may
+         * already read ≥ 105 °C. Killing immediately is counter-productive —
+         * the daemon hasn't yet had a chance to apply frequency caps, which are
+         * precisely the mechanism that would REDUCE the temperature. The 3-sample
+         * grace gives the daemon time to cap clocks before the evaluator starts
+         * counting consecutive over-threshold samples.
+         *
+         * Safety: the kernel's own thermal trip (~110 °C) and hardware throttling
+         * are always active. Three seconds without a software kill at ≤110 °C
+         * is well within the safe operating envelope of SD8Gen3 / Odin 3.
+         */
+        const val GRACE_SAMPLES = 3
     }
 }

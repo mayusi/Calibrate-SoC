@@ -35,9 +35,7 @@ import io.github.mayusi.calibratesoc.R
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
-import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
-import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.session.SessionRecorder
 import io.github.mayusi.calibratesoc.ui.theme.CalibrateSocTheme
 import kotlinx.coroutines.CoroutineScope
@@ -95,11 +93,9 @@ class OverlayService :
     // ── Injected dependencies ─────────────────────────────────────────────────
 
     @Inject lateinit var hudPrefs: HudPrefs
-    @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var hudEventLog: HudEventLog
     @Inject lateinit var gameFpsSampler: GameFpsSampler
     @Inject lateinit var refreshRateController: RefreshRateController
-    @Inject lateinit var userPrefs: UserPrefs
     @Inject lateinit var sessionRecorder: SessionRecorder
 
     /** AutoTDP controller — used for HUD in-overlay start/stop/profile switch. */
@@ -154,7 +150,6 @@ class OverlayService :
 
         attachOverlay()
         observeProfile()
-        observeBigCorePolicy()
 
         // HUD Choreographer frame rate → assembler.
         frameRateSampler.start()
@@ -341,19 +336,7 @@ class OverlayService :
                             hudEventLog.add(HudEventLog.Level.ACTION, "apply $id (chip)")
                             tuneController.applyProfileViaScript(id)
                         },
-                        onStepMhz = { delta -> tuneController.stepBigCoreMhz(delta) },
                         onCycleNextProfile = { tuneController.cycleNextProfile() },
-                        onTogglePolicy = { pid ->
-                            serviceScope.launch {
-                                val cur = assembler.state.value.enabledPolicies
-                                val next = if (pid in cur) cur - pid else cur + pid
-                                hudPrefs.setEnabledPolicies(next)
-                                assembler.updateEnabledPolicies(next)
-                            }
-                        },
-                        onPickStepSize = { mhz ->
-                            serviceScope.launch { hudPrefs.setStepMhz(mhz) }
-                        },
                         onToggleRecord = {
                             serviceScope.launch {
                                 if (sessionRecorder.isRecording.value) {
@@ -425,12 +408,6 @@ class OverlayService :
             hudPrefs.profile.collect { assembler.feedProfile(it) }
         }
         lifecycleScope.launch {
-            hudPrefs.stepMhz.collect { assembler.feedStepMhz(it) }
-        }
-        lifecycleScope.launch {
-            hudPrefs.enabledPolicies.collect { assembler.feedEnabledPolicies(it) }
-        }
-        lifecycleScope.launch {
             val density = resources.displayMetrics.density
             combine(hudPrefs.xDp, hudPrefs.yDp) { x, y -> x to y }
                 .collect { (xDp, yDp) ->
@@ -448,53 +425,6 @@ class OverlayService :
                 }
         }
     }
-
-    /**
-     * Probe CPU topology and write capability ONCE, then re-evaluate
-     * canTuneLive whenever the experimental toggle flips (no HUD restart
-     * required to show/hide the steppers).
-     */
-    private fun observeBigCorePolicy() {
-        serviceScope.launch {
-            val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
-            val all = report.cpuPolicies.map { it.policyId }.sorted()
-            val big = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }
-            // The CapabilityProbe already determined direct-writability via a real
-            // write-and-verify probe. Do NOT re-probe here: on stock AYN (cpufreq
-            // node mode 644, system-owned) a bare File.write() fires avc: denied
-            // { write } scontext=untrusted_app on every HUD start. Trust the
-            // authoritative report flag instead — zero AVC denials on launch.
-            val directWritable = report.sysfsDirectlyWritable
-            val rooted = isRootAvailable()
-            // pserverSysfsLive: the CapabilityProbe confirmed a real PServer
-            // transact round-trip during refresh(). Use the report field rather
-            // than calling isTransactable() again to avoid a second round-trip.
-            val capable = report.pserverSysfsLive || rooted || directWritable
-
-            assembler.feedCapability(
-                bigCorePolicy = big?.policyId,
-                bigCoreCurrentMhz = big?.currentMaxKhz?.div(1000),
-                allPolicies = all,
-                enabledPolicies = all.toSet(),
-            )
-
-            userPrefs.experimentalEnabled.collect { experimental ->
-                val gated = capable && experimental
-                assembler.feedCanTuneLive(gated)
-                hudEventLog.add(
-                    HudEventLog.Level.INFO,
-                    "canTuneLive=$gated (pserver=${report.pserverSysfsLive}, " +
-                        "root=$rooted, direct=$directWritable, experimental=$experimental)",
-                )
-            }
-        }
-    }
-
-    // ── Utility ───────────────────────────────────────────────────────────────
-
-    private fun isRootAvailable(): Boolean =
-        runCatching { com.topjohnwu.superuser.Shell.getCachedShell()?.isRoot == true }
-            .getOrElse { false }
 
     // ── DragHandler ───────────────────────────────────────────────────────────
 
@@ -637,13 +567,6 @@ data class HudUiState(
     val lastActionMessage: String? = null,
     /** HUD Choreographer draw rate — NOT the game's FPS. */
     val hudHz: Int = 0,
-    val bigCorePolicy: Int? = null,
-    val bigCoreCurrentMhz: Int? = null,
-    val stepMhz: Int = 200,
-    /** True when a real write path exists and experimental mode is on. */
-    val canTuneLive: Boolean = false,
-    val enabledPolicies: Set<Int> = emptySet(),
-    val allPolicies: List<Int> = emptyList(),
     val gameFps: Int? = null,
     /** True when [gameFps] is a real game frame-rate measurement (from PServer /
      *  GameFpsSampler), false when it is the panel's display refresh rate

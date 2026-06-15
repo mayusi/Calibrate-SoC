@@ -260,25 +260,27 @@ class HudDisplayUtilsTest {
 
     // ── hudWidthDp ────────────────────────────────────────────────────────────
 
+    // Full-panel widths were widened (420/480/540) so the horizontal HUD lays
+    // the FPS hero block and the 4-wide metric-tile row out on one row.
     @Test
-    fun `hudWidthDp returns 220 for index 0`() {
-        assertThat(HudDisplayUtils.hudWidthDp(0)).isEqualTo(220)
+    fun `hudWidthDp returns 420 for index 0`() {
+        assertThat(HudDisplayUtils.hudWidthDp(0)).isEqualTo(420)
     }
 
     @Test
-    fun `hudWidthDp returns 270 for index 1`() {
-        assertThat(HudDisplayUtils.hudWidthDp(1)).isEqualTo(270)
+    fun `hudWidthDp returns 480 for index 1`() {
+        assertThat(HudDisplayUtils.hudWidthDp(1)).isEqualTo(480)
     }
 
     @Test
-    fun `hudWidthDp returns 330 for index 2`() {
-        assertThat(HudDisplayUtils.hudWidthDp(2)).isEqualTo(330)
+    fun `hudWidthDp returns 540 for index 2`() {
+        assertThat(HudDisplayUtils.hudWidthDp(2)).isEqualTo(540)
     }
 
     @Test
     fun `hudWidthDp clamps out-of-range indices`() {
-        assertThat(HudDisplayUtils.hudWidthDp(-1)).isEqualTo(220)
-        assertThat(HudDisplayUtils.hudWidthDp(99)).isEqualTo(330)
+        assertThat(HudDisplayUtils.hudWidthDp(-1)).isEqualTo(420)
+        assertThat(HudDisplayUtils.hudWidthDp(99)).isEqualTo(540)
     }
 
     // ── hudSizeLabel ──────────────────────────────────────────────────────────

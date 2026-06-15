@@ -49,9 +49,8 @@ object HudDisplayUtils {
      * Decide whether the manual tune steppers should be gated (disabled)
      * because AutoTDP is currently managing the CPU clocks.
      *
-     * This is a two-layer gate:
-     *  1. [HudTuneController.stepBigCoreMhz] checks this and returns early.
-     *  2. [HudOverlayContent] hides/replaces the stepper row when gated.
+     * Retained for backward-compat (tested) and for any future manual-tune
+     * surface that may wish to respect the same gate rule.
      *
      * A simple pure function so we can unit-test the gate rule without
      * any Android or coroutine dependencies.
@@ -113,17 +112,21 @@ object HudDisplayUtils {
     fun formatGhzFromMhz(mhz: Int?): String = mhz?.let { "%.2fG".format(it / 1000.0) } ?: "—"
 
     /**
-     * HUD width in dp for a given size index.
+     * Full HUD panel width in dp for a given size index.
      *
-     * 0 = small  (220dp)
-     * 1 = medium (270dp, default)
-     * 2 = large  (330dp)
+     * The full panel lays the FPS hero block and the 4-wide metric-tile row out
+     * HORIZONTALLY, so it needs real width to keep all four tiles on one row
+     * beside the framerate block instead of wrapping into a cramped column.
+     *
+     * 0 = small  (420dp)
+     * 1 = medium (480dp, default)
+     * 2 = large  (540dp)
      */
     @JvmStatic
     fun hudWidthDp(sizeIndex: Int): Int = when (sizeIndex.coerceIn(0, 2)) {
-        0 -> 220
-        1 -> 270
-        else -> 330
+        0 -> 420
+        1 -> 480
+        else -> 540
     }
 
     /**

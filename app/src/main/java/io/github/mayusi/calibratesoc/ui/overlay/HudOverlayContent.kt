@@ -12,28 +12,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -50,35 +42,27 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
-import io.github.mayusi.calibratesoc.ui.components.AccentBar
-import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
-import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.CutCorner
 import io.github.mayusi.calibratesoc.ui.components.CutCornerShape
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
 
 // ── Arsenal-aligned HUD palette ───────────────────────────────────────────────
-// Mirrors AccentBar tokens but kept as private vals for fast lookup in this file.
+// Mirrors AccentBar tokens exactly. Kept private for fast local lookup.
 
-// Fully opaque: the hudOpacity modifier on the container is the SOLE alpha control.
-// A non-FF alpha here compounds with hudOpacity (0.94 × opacity) and makes the HUD
-// more transparent than the user's chosen value.
-private val HudBg        = Color(0xFF0B1220) // near-black with slight blue tint
-private val HudSurface   = Color(0xFF111827) // panel surface (slightly lighter)
-private val HudBorder    = Color(0xFF1F2937) // outer border
-private val HudBarBg     = Color(0xFF1E293B) // track/bar background
-private val HudLabel     = Color(0xFF64748B) // muted label gray
-private val HudValue     = Color(0xFFE2E8F0) // value text
-private val HudDim       = Color(0xFF475569) // parked / disabled
+private val HudBg        = Color(0xFF0B1220)
+private val HudSurface   = Color(0xFF111827)
+private val HudBorder    = Color(0xFF1C2740)
+private val HudBarBg     = Color(0xFF1E293B)
+private val HudLabel     = Color(0xFF64748B)
+private val HudValue     = Color(0xFFE2E8F0)
+private val HudDim       = Color(0xFF475569)
 
-// Arsenal accent tokens (same hex as AccentBar to ensure visual consistency)
-private val HudRed       = Color(0xFFFF4D6D) // primary / danger / alert
-private val HudBlue      = Color(0xFF5C93F0) // CPU
-private val HudPurple    = Color(0xFFA98BF5) // GPU / power
-private val HudAmber     = Color(0xFFE0A93D) // thermal / battery caution
-private val HudEmerald   = Color(0xFF2EE6A6) // live / good / FPS-real
+private val HudRed       = Color(0xFFFF4D6D)
+private val HudBlue      = Color(0xFF5C93F0)
+private val HudPurple    = Color(0xFFA98BF5)
+private val HudAmber     = Color(0xFFE0A93D)
+private val HudEmerald   = Color(0xFF2EE6A6)
 
-// AutoTDP panel accent
 private val HudAutoTdpBg     = Color(0xFF081A12)
 private val HudAutoTdpBorder = Color(0xFF0F3020)
 
@@ -87,31 +71,237 @@ private val HudAutoTdpBorder = Color(0xFF0F3020)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Direction-C HUD overlay root.
+ * Horizontal HUD overlay.
  *
- * COMPACT: FPS hero (big, emerald when real / muted REFRESH) + tight MetricTile row
- *          (CPU GHz, GPU MHz, Power W, Temp) + AutoTDP one-line strip when running.
+ * COMPACT mode: a single thin horizontal bar that hugs a screen edge.
+ *   [ 60 FPS ] | dot CPU  dot GPU  dot POWER  dot TEMP | [TDP pill]
  *
- * VERBOSE: Full control panel — live clock steppers, AutoTDP toggle + profile,
- *          quick-profile chips, FPS-cap stepper, layout/size/opacity controls.
- *          All controls are tappable in overlay using existing FLAG_NOT_FOCUSABLE +
- *          clickable{} pattern (same as existing steppers which already work).
+ * FULL mode: a wider horizontal panel (~480dp):
+ *   Header row: CALIBRATE + AutoTDP pill | layout-swap + close
+ *   Body:  LEFT = FPS block  |  RIGHT = 4-wide metric grid (CPU/GPU/POWER/TEMP)
+ *   AutoTDP control strip at the bottom.
  *
- * Callbacks are wired through [OverlayService.attachOverlay] → the actual
- * implementations live in [HudTuneController] / [AutoTdpController] /
- * [RefreshRateController] / [HudPrefs] — never reimplemented here.
+ * All callbacks are wired in [OverlayService.attachOverlay]. Only the existing
+ * [onToggleAutoTdp] and [onSetAutoTdpProfile] callbacks touch AutoTDP -- no new
+ * controller calls are introduced here.
  */
 @Composable
 fun HudOverlayContent(
     state: HudUiState,
     onCycleLayout: () -> Unit,
     onApplyProfile: (String) -> Unit,
-    onStepMhz: (Int) -> Unit,
     onCycleNextProfile: () -> Unit,
-    onTogglePolicy: (Int) -> Unit,
-    onPickStepSize: (Int) -> Unit,
     onToggleRecord: () -> Unit,
-    // New callbacks for Direction-C verbose control panel
+    onToggleAutoTdp: () -> Unit,
+    onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
+    onSetRefreshHz: (Float?) -> Unit,
+    onCycleHudSize: () -> Unit,
+    onSetOpacity: (Float) -> Unit,
+    onClose: () -> Unit,
+) {
+    when (state.profile) {
+        HudProfile.COMPACT -> HudCompactBar(
+            state = state,
+            onCycleLayout = onCycleLayout,
+            onClose = onClose,
+        )
+        HudProfile.VERBOSE -> HudFullPanel(
+            state = state,
+            onCycleLayout = onCycleLayout,
+            onToggleRecord = onToggleRecord,
+            onApplyProfile = onApplyProfile,
+            onCycleNextProfile = onCycleNextProfile,
+            onToggleAutoTdp = onToggleAutoTdp,
+            onSetAutoTdpProfile = onSetAutoTdpProfile,
+            onSetRefreshHz = onSetRefreshHz,
+            onCycleHudSize = onCycleHudSize,
+            onSetOpacity = onSetOpacity,
+            onClose = onClose,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPACT mode -- single thin horizontal bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Thin horizontal bar:
+ *   [ 60 FPS ] | dot 3.28G  dot 88%  dot 6.4W  dot 61deg | [TDP]
+ * All on one row. Near-black bg, rounded 10dp, ~8px vertical padding.
+ */
+@Composable
+private fun HudCompactBar(
+    state: HudUiState,
+    onCycleLayout: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val a11y = buildString {
+        append(if (state.gameFps != null) "${state.gameFps} ${if (state.gameFpsIsReal) "FPS" else "Hz"}" else "FPS unavailable")
+        append(", CPU ${HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 })}")
+        append(", GPU ${state.gpuMhz?.let { "${it}M" } ?: "N/A"}")
+        append(", ${HudDisplayUtils.formatWatts(state.batteryW)}")
+        append(", ${HudDisplayUtils.formatTemp(state.cpuTempC)}")
+    }
+
+    Row(
+        modifier = Modifier
+            .alpha(state.hudOpacity)
+            .clip(RoundedCornerShape(10.dp))
+            .background(HudBg)
+            .border(0.5.dp, HudBorder, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .semantics { contentDescription = a11y },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        // FPS hero -- big green mono number
+        val fpsColor = if (state.gameFpsIsReal) HudEmerald else HudDim
+        Text(
+            text = state.gameFps?.toString() ?: "--",
+            color = fpsColor,
+            fontSize = 22.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            lineHeight = 22.sp,
+        )
+        Spacer(Modifier.width(3.dp))
+        Text(
+            text = if (state.gameFpsIsReal) "FPS" else "HZ",
+            color = fpsColor,
+            fontSize = 8.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp,
+        )
+
+        // Thin vertical divider
+        CompactDivider()
+
+        // 4 inline metrics with colored dot prefix
+        CompactMetric(
+            dot = HudBlue,
+            value = HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 }),
+        )
+        Spacer(Modifier.width(8.dp))
+        CompactMetric(
+            dot = HudPurple,
+            value = state.gpuMhz?.let { "${it}M" } ?: "--",
+        )
+        Spacer(Modifier.width(8.dp))
+        CompactMetric(
+            dot = HudAmber,
+            value = HudDisplayUtils.formatWatts(state.batteryW),
+        )
+        Spacer(Modifier.width(8.dp))
+        val tempHot = state.cpuTempC != null && state.cpuTempC >= 80f
+        CompactMetric(
+            dot = if (tempHot) HudAmber else HudEmerald,
+            value = HudDisplayUtils.formatTemp(state.cpuTempC),
+        )
+
+        // TDP pill -- only shown, not interactive in compact
+        if (state.autoTdpRunning || true) {
+            CompactDivider()
+            val tdpAccent = if (state.autoTdpRunning) HudEmerald else HudDim
+            val tdpLabel = if (state.autoTdpRunning) {
+                "TDP ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}"
+            } else "TDP"
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(tdpAccent.copy(alpha = if (state.autoTdpRunning) 0.15f else 0.07f))
+                    .border(0.5.dp, tdpAccent.copy(alpha = if (state.autoTdpRunning) 0.5f else 0.25f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    text = tdpLabel,
+                    color = tdpAccent,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+
+        // Layout swap -- tap to expand to FULL
+        Spacer(Modifier.width(6.dp))
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .clickable(onClick = onCycleLayout),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.SwapHoriz,
+                contentDescription = "Expand HUD",
+                tint = HudDim,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+        // Close
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.Close,
+                contentDescription = "Hide overlay",
+                tint = HudDim,
+                modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactDivider() {
+    Spacer(Modifier.width(8.dp))
+    Box(
+        modifier = Modifier
+            .width(0.5.dp)
+            .height(14.dp)
+            .background(HudBorder),
+    )
+    Spacer(Modifier.width(8.dp))
+}
+
+@Composable
+private fun CompactMetric(dot: Color, value: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .clip(RoundedCornerShape(50))
+                .background(dot),
+        )
+        Text(
+            text = value,
+            color = HudValue,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  FULL mode -- horizontal panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun HudFullPanel(
+    state: HudUiState,
+    onCycleLayout: () -> Unit,
+    onToggleRecord: () -> Unit,
+    onApplyProfile: (String) -> Unit,
+    onCycleNextProfile: () -> Unit,
     onToggleAutoTdp: () -> Unit,
     onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
     onSetRefreshHz: (Float?) -> Unit,
@@ -121,88 +311,87 @@ fun HudOverlayContent(
 ) {
     val widthDp: Dp = HudDisplayUtils.hudWidthDp(state.hudSizeIndex).dp
 
-    Box(
+    Column(
         modifier = Modifier
             .widthIn(min = widthDp, max = widthDp)
             .alpha(state.hudOpacity)
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(HudBg)
-            .border(0.5.dp, HudBorder, RoundedCornerShape(6.dp)),
+            .border(0.5.dp, HudBorder, RoundedCornerShape(10.dp))
+            .drawBehind {
+                // Red left-edge accent bar
+                val barW = 2.dp.toPx()
+                drawRect(HudRed, size = size.copy(width = barW))
+            }
+            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Red left-edge accent bar — Direction C primary accent on the container.
-        Box(
-            modifier = Modifier
-                .width(2.dp)
-                .height(HudDisplayUtils.hudWidthDp(state.hudSizeIndex).dp * 0f) // full-height via drawBehind
-                .matchParentSize()
-                .drawBehind {
-                    val barW = 2.dp.toPx()
-                    drawRect(HudRed, size = size.copy(width = barW))
-                },
+        // ── Header row ──────────────────────────────────────────────────────
+        FullPanelHeader(
+            state = state,
+            onCycleLayout = onCycleLayout,
+            onToggleRecord = onToggleRecord,
+            onCycleHudSize = onCycleHudSize,
+            onClose = onClose,
         )
 
-        Column(modifier = Modifier.padding(start = 6.dp, end = 8.dp, top = 5.dp, bottom = 5.dp)) {
-            HudHeader(
-                profile = state.profile,
-                isRecording = state.isRecording,
-                recordingElapsedSeconds = state.recordingElapsedSeconds,
-                hudSizeIndex = state.hudSizeIndex,
-                onCycleLayout = onCycleLayout,
-                onToggleRecord = onToggleRecord,
-                onCycleHudSize = onCycleHudSize,
-                onClose = onClose,
+        HudDivider()
+
+        // ── Body: FPS block | Metric grid ───────────────────────────────────
+        FullPanelBody(state)
+
+        // ── AutoTDP control strip ────────────────────────────────────────────
+        HudDivider()
+        AutoTdpControlStrip(
+            state = state,
+            onToggleAutoTdp = onToggleAutoTdp,
+            onSetAutoTdpProfile = onSetAutoTdpProfile,
+        )
+
+        // ── Quick profiles (optional) ────────────────────────────────────────
+        // Kept inline because it's a one-tap in-game action. Refresh-rate,
+        // opacity, per-core bars and the thermal breakdown were intentionally
+        // REMOVED from the always-visible full panel — they made it tall and
+        // cramped. The horizontal panel now stays compact: header → metrics →
+        // AutoTDP → (optional) saved-profile chips. Opacity/size live on the
+        // header size chip; per-core/thermal detail lives in the app's Dashboard.
+        if (state.quickProfiles.isNotEmpty()) {
+            HudDivider()
+            FullProfileChips(
+                chips = state.quickProfiles,
+                onApplyProfile = onApplyProfile,
+                onCycleNextProfile = onCycleNextProfile,
             )
-            Spacer(Modifier.height(4.dp))
-            when (state.profile) {
-                HudProfile.COMPACT -> HudCompactContent(state)
-                HudProfile.VERBOSE -> HudVerboseContent(
-                    state = state,
-                    onStepMhz = onStepMhz,
-                    onPickStepSize = onPickStepSize,
-                    onTogglePolicy = onTogglePolicy,
-                    onToggleAutoTdp = onToggleAutoTdp,
-                    onSetAutoTdpProfile = onSetAutoTdpProfile,
-                    onApplyProfile = onApplyProfile,
-                    onCycleNextProfile = onCycleNextProfile,
-                    onSetRefreshHz = onSetRefreshHz,
-                    onSetOpacity = onSetOpacity,
-                )
-            }
-            // Flash message (both layouts)
-            state.lastActionMessage?.let { msg ->
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = msg,
-                    color = HudAmber,
-                    fontSize = 9.sp,
-                    lineHeight = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+        }
+
+        // ── Flash message ────────────────────────────────────────────────────
+        state.lastActionMessage?.let { msg ->
+            Text(
+                text = msg,
+                color = HudAmber,
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                fontFamily = FontFamily.Monospace,
+            )
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Header
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Header ───────────────────────────────────────────────────────
 
 @Composable
-private fun HudHeader(
-    profile: HudProfile,
-    isRecording: Boolean,
-    recordingElapsedSeconds: Long,
-    hudSizeIndex: Int,
+private fun FullPanelHeader(
+    state: HudUiState,
     onCycleLayout: () -> Unit,
     onToggleRecord: () -> Unit,
     onCycleHudSize: () -> Unit,
     onClose: () -> Unit,
 ) {
     Row(
-        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Brand label — angular uppercase
+        // Brand label
         Text(
             text = "CALIBRATE",
             color = HudRed,
@@ -210,45 +399,50 @@ private fun HudHeader(
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.8.sp,
         )
-        Spacer(Modifier.width(4.dp))
-        // Current layout pill
-        StatusPill(
-            text = profile.name,
-            accent = if (profile == HudProfile.VERBOSE) HudBlue else HudLabel,
-        )
+        Spacer(Modifier.width(5.dp))
+
+        // AutoTDP status pill
+        val tdpAccent = when (state.autoTdpStatus) {
+            AutoTdpStatus.RUNNING -> HudEmerald
+            AutoTdpStatus.KILLED_BY_SAFETY, AutoTdpStatus.WRITE_DENIED -> HudRed
+            else -> HudDim
+        }
+        val tdpLabel = if (state.autoTdpRunning) {
+            "AUTOTDP - ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}"
+        } else "AUTOTDP OFF"
+        StatusPill(text = tdpLabel, accent = tdpAccent)
+
         Spacer(Modifier.weight(1f))
 
-        // Size toggle (verbose only to save space in compact)
-        if (profile == HudProfile.VERBOSE) {
-            HudIconChip(
-                label = HudDisplayUtils.hudSizeLabel(hudSizeIndex),
-                onClick = onCycleHudSize,
-                accent = HudLabel,
-            )
-            Spacer(Modifier.width(2.dp))
-        }
+        // Size toggle
+        HudIconChip(label = HudDisplayUtils.hudSizeLabel(state.hudSizeIndex), onClick = onCycleHudSize)
+        Spacer(Modifier.width(2.dp))
 
         // Recording dot
         Box(
             modifier = Modifier
-                .size(26.dp)
-                .clip(RoundedCornerShape(4.dp))
+                .size(22.dp)
+                .clip(RoundedCornerShape(3.dp))
                 .clickable(onClick = onToggleRecord)
-                .padding(5.dp),
+                .padding(4.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "●",
-                color = if (isRecording) HudRed else HudDim,
-                fontSize = 10.sp,
+                text = if (state.isRecording) {
+                    val m = state.recordingElapsedSeconds / 60
+                    val s = state.recordingElapsedSeconds % 60
+                    "R"
+                } else "R",
+                color = if (state.isRecording) HudRed else HudDim,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
-        if (isRecording) {
-            val mins = recordingElapsedSeconds / 60
-            val secs = recordingElapsedSeconds % 60
+        if (state.isRecording) {
+            val m = state.recordingElapsedSeconds / 60
+            val s = state.recordingElapsedSeconds % 60
             Text(
-                text = "%d:%02d".format(mins, secs),
+                text = "%d:%02d".format(m, s),
                 color = HudRed,
                 fontSize = 8.sp,
                 fontFamily = FontFamily.Monospace,
@@ -256,144 +450,134 @@ private fun HudHeader(
             Spacer(Modifier.width(3.dp))
         }
 
-        // Layout swap
-        IconButton(onClick = onCycleLayout, modifier = Modifier.size(26.dp)) {
+        // Layout swap (to compact)
+        IconButton(onClick = onCycleLayout, modifier = Modifier.size(22.dp)) {
             Icon(
-                Icons.Outlined.SwapVert,
-                contentDescription = "Swap layout",
+                Icons.Outlined.SwapHoriz,
+                contentDescription = "Collapse to compact",
                 tint = HudValue,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(13.dp),
             )
         }
 
         // Close
-        IconButton(onClick = onClose, modifier = Modifier.size(26.dp)) {
+        IconButton(onClick = onClose, modifier = Modifier.size(22.dp)) {
             Icon(
                 Icons.Outlined.Close,
                 contentDescription = "Hide overlay",
                 tint = HudDim,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(13.dp),
             )
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Compact layout
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Body (FPS block left | 4-metric grid right) ─────────────────
 
 @Composable
-private fun HudCompactContent(state: HudUiState) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        // FPS hero
-        CompactFpsHero(
-            gameFps = state.gameFps,
-            gameFpsIsReal = state.gameFpsIsReal,
-        )
-        // Tight MetricTile-style row: CPU GHz · GPU MHz · Power W · Temp
-        CompactMetricRow(state)
-        // AutoTDP one-liner when running
-        if (state.autoTdpRunning) {
-            AutoTdpCompactStrip(state)
-        }
-    }
-}
-
-@Composable
-private fun CompactFpsHero(
-    gameFps: Int?,
-    gameFpsIsReal: Boolean,
-) {
-    val fpsLabel = if (gameFpsIsReal) "FPS" else "REFRESH"
-    val fpsColor = if (gameFpsIsReal) HudEmerald else HudDim
-    val frameMs = gameFps?.takeIf { it > 0 }?.let { "%.1fms".format(1000f / it) }
-
-    val a11y = if (gameFps != null) {
-        "$gameFps ${if (gameFpsIsReal) "game frames per second" else "refresh Hz"}"
-    } else "FPS unavailable"
+private fun FullPanelBody(state: HudUiState) {
+    val fpsColor = if (state.gameFpsIsReal) HudEmerald else HudDim
+    val frameMs = state.gameFps?.takeIf { it > 0 }?.let { "%.1fms".format(1000f / it) }
+    val fpsLabel = if (state.gameFpsIsReal) "FPS" else "REFRESH"
 
     Row(
-        verticalAlignment = Alignment.Bottom,
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics { contentDescription = a11y },
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Big FPS number — emerald when real, dim when REFRESH
-        Text(
-            text = gameFps?.toString() ?: "—",
-            color = fpsColor,
-            fontSize = 42.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 42.sp,
-        )
-        Spacer(Modifier.width(5.dp))
-        Column(modifier = Modifier.padding(bottom = 5.dp)) {
-            // FPS / REFRESH label
-            Text(
-                text = fpsLabel,
-                color = fpsColor,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.6.sp,
-            )
-            // Frametime sub-label
+        // LEFT -- FPS hero block
+        Column(
+            modifier = Modifier
+                .width(90.dp)
+                .semantics {
+                    contentDescription = if (state.gameFps != null) {
+                        "${state.gameFps} ${if (state.gameFpsIsReal) "game frames per second" else "refresh Hz"}"
+                    } else "FPS unavailable"
+                },
+        ) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = state.gameFps?.toString() ?: "--",
+                    color = fpsColor,
+                    fontSize = 40.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 40.sp,
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    text = fpsLabel,
+                    color = fpsColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp,
+                    modifier = Modifier.padding(bottom = 5.dp),
+                )
+            }
             if (frameMs != null) {
                 Text(
-                    text = frameMs,
+                    text = "$frameMs",
                     color = HudLabel,
                     fontSize = 8.sp,
                     fontFamily = FontFamily.Monospace,
                 )
             }
         }
-    }
-}
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun CompactMetricRow(state: HudUiState) {
-    // 4 tiles in a row: CPU · GPU · POWER · TEMP
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        MiniMetricTile(
-            label = "CPU",
-            value = HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 }),
-            accent = HudBlue,
-            modifier = Modifier.weight(1f),
+        // Thin vertical rule
+        Box(
+            modifier = Modifier
+                .width(0.5.dp)
+                .height(60.dp)
+                .background(HudBorder),
         )
-        MiniMetricTile(
-            label = "GPU",
-            value = state.gpuMhz?.let { "${it}M" } ?: "—",
-            accent = HudPurple,
+
+        // RIGHT -- 4-wide metric grid
+        Row(
             modifier = Modifier.weight(1f),
-        )
-        MiniMetricTile(
-            label = "PWR",
-            value = HudDisplayUtils.formatWatts(state.batteryW),
-            accent = HudAmber,
-            modifier = Modifier.weight(1f),
-        )
-        MiniMetricTile(
-            label = "TEMP",
-            value = HudDisplayUtils.formatTemp(state.cpuTempC),
-            accent = if (state.cpuTempC != null && state.cpuTempC >= 80f) HudAmber else HudEmerald,
-            modifier = Modifier.weight(1f),
-        )
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            FullMetricTile(
+                label = "CPU",
+                value = HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 }),
+                subLine = "${state.cpuLoadPct}%",
+                accent = HudBlue,
+                modifier = Modifier.weight(1f),
+            )
+            FullMetricTile(
+                label = "GPU",
+                value = state.gpuMhz?.let { "${it}M" } ?: "--",
+                subLine = state.gpuLoadPct?.let { "${it}%" } ?: "--",
+                accent = HudPurple,
+                modifier = Modifier.weight(1f),
+            )
+            FullMetricTile(
+                label = "POWER",
+                value = HudDisplayUtils.formatWatts(state.batteryW),
+                subLine = state.ramUsedPct?.let { "RAM ${it}%" } ?: "--",
+                accent = HudAmber,
+                modifier = Modifier.weight(1f),
+            )
+            val tempHot = state.cpuTempC != null && state.cpuTempC >= 80f
+            FullMetricTile(
+                label = "TEMP",
+                value = HudDisplayUtils.formatTemp(state.cpuTempC),
+                subLine = state.gpuTempC?.let { "gpu %.0f".format(it) } ?: "--",
+                accent = if (tempHot) HudAmber else HudEmerald,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 
 /**
- * Compact metric tile: accent bottom bar, uppercase label, mono value.
- * Direction-C angular look — matches MetricTile from ArsenalComponents
- * but compact enough for a 4-across row in the HUD.
+ * Full-panel metric tile: label (9sp muted) + big mono value + tiny sub-line + 2dp accent bar.
  */
 @Composable
-private fun MiniMetricTile(
+private fun FullMetricTile(
     label: String,
     value: String,
+    subLine: String,
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
@@ -404,7 +588,7 @@ private fun MiniMetricTile(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 3.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -422,8 +606,14 @@ private fun MiniMetricTile(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.SemiBold,
             )
+            Text(
+                text = subLine,
+                color = HudDim,
+                fontSize = 7.sp,
+                fontFamily = FontFamily.Monospace,
+            )
         }
-        // 2dp accent bottom bar
+        // 2dp colored accent bar
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -433,423 +623,106 @@ private fun MiniMetricTile(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  AutoTDP compact strip
-// ─────────────────────────────────────────────────────────────────────────────
+// ── AutoTDP control strip ────────────────────────────────────────────────────
 
+/**
+ * When AutoTDP is stopped: Start button + 3-segment profile picker.
+ * When running: green status + Stop affordance.
+ */
 @Composable
-private fun AutoTdpCompactStrip(state: HudUiState) {
-    val savingsText = HudDisplayUtils.formatAutoTdpSavings(
-        state.autoTdpSavingsMw,
-        state.autoTdpSavingsPct,
-        state.autoTdpSavingsReady,
-    )
-    val parkedStr = if (state.autoTdpParkedCores.isNotEmpty()) {
-        "park ${state.autoTdpParkedCores.sorted().joinToString(",")} · "
-    } else ""
-    val capStr = state.autoTdpBigCapMhz?.let { HudDisplayUtils.formatGhzFromMhz(it) } ?: ""
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(4.dp))
-            .background(HudAutoTdpBg)
-            .border(0.5.dp, HudAutoTdpBorder, RoundedCornerShape(4.dp))
-            .padding(horizontal = 6.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Icon(
-            Icons.Outlined.Bolt,
-            contentDescription = null,
-            tint = HudEmerald,
-            modifier = Modifier.size(11.dp),
-        )
-        Text(
-            text = "AutoTDP",
-            color = HudEmerald,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        val mid = "$parkedStr$capStr".trimEnd(' ', '·').trim()
-        if (mid.isNotEmpty()) {
-            Text(
-                text = mid,
-                color = HudLabel,
-                fontSize = 8.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.weight(1f),
-            )
-        } else {
-            Spacer(Modifier.weight(1f))
-        }
-        Text(
-            text = savingsText,
-            color = if (state.autoTdpSavingsReady) HudEmerald else HudLabel,
-            fontSize = 8.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose layout — full control panel
-// ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun HudVerboseContent(
+private fun AutoTdpControlStrip(
     state: HudUiState,
-    onStepMhz: (Int) -> Unit,
-    onPickStepSize: (Int) -> Unit,
-    onTogglePolicy: (Int) -> Unit,
     onToggleAutoTdp: () -> Unit,
     onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
-    onApplyProfile: (String) -> Unit,
-    onCycleNextProfile: () -> Unit,
-    onSetRefreshHz: (Float?) -> Unit,
-    onSetOpacity: (Float) -> Unit,
 ) {
-    // BUG E FIX: verticalScroll makes the verbose control panel scrollable so all
-    // sections are reachable even when the HUD is under FLAG_NOT_FOCUSABLE (scroll
-    // still works via touch events on the overlay). Max height is tightened to
-    // 380 dp so the verbose panel doesn't consume an absurd amount of screen space;
-    // the user scrolls to reach lower sections (thermal, per-core bars, display).
-    val scroll = rememberScrollState()
-    Column(
-        modifier = Modifier
-            .heightIn(max = 380.dp)
-            .verticalScroll(scroll),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        // ── 1. FPS hero (verbose variant with battery W) ─────────────────────
-        VerboseFpsHero(state)
-
-        HudDivider()
-
-        // ── 2. Live CPU tuning (gated when AutoTDP running) ──────────────────
-        VerboseCpuTuneSection(
-            state = state,
-            onStepMhz = onStepMhz,
-            onPickStepSize = onPickStepSize,
-            onTogglePolicy = onTogglePolicy,
-        )
-
-        HudDivider()
-
-        // ── 3. AutoTDP control panel ─────────────────────────────────────────
-        VerboseAutoTdpSection(
-            state = state,
-            onToggleAutoTdp = onToggleAutoTdp,
-            onSetAutoTdpProfile = onSetAutoTdpProfile,
-        )
-
-        // ── 4. Quick profiles ────────────────────────────────────────────────
-        if (state.quickProfiles.isNotEmpty()) {
-            HudDivider()
-            VerboseProfileChips(
-                chips = state.quickProfiles,
-                onApplyProfile = onApplyProfile,
-                onCycleNextProfile = onCycleNextProfile,
-            )
-        }
-
-        // ── 5. FPS cap / refresh rate ─────────────────────────────────────────
-        if (state.availableHzOptions.isNotEmpty()) {
-            HudDivider()
-            VerboseRefreshRateSection(
-                availableHz = state.availableHzOptions,
-                pinnedHz = state.pinnedHz,
-                onSetRefreshHz = onSetRefreshHz,
-            )
-        }
-
-        // ── 6. Layout/display controls ──────────────────────────────────────
-        HudDivider()
-        VerboseDisplaySection(
-            hudOpacity = state.hudOpacity,
-            onSetOpacity = onSetOpacity,
-        )
-
-        // ── 7. Per-core bars (informational) ────────────────────────────────
-        if (state.perCoreMhz.isNotEmpty()) {
-            HudDivider()
-            VerbosePerCoreSection(state)
-        }
-
-        // ── 8. Thermal row ───────────────────────────────────────────────────
-        if (state.cpuTempC != null || state.gpuTempC != null || state.batteryTempC != null) {
-            HudDivider()
-            VerboseThermalRow(
-                cpuTempC = state.cpuTempC,
-                gpuTempC = state.gpuTempC,
-                batteryTempC = state.batteryTempC,
-            )
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: FPS hero
-// ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun VerboseFpsHero(state: HudUiState) {
-    val fpsLabel = if (state.gameFpsIsReal) "FPS" else "REFRESH"
-    val fpsColor = if (state.gameFpsIsReal) HudEmerald else HudDim
-    val frameMs = state.gameFps?.takeIf { it > 0 }?.let { "%.1fms".format(1000f / it) }
-
-    Row(
-        verticalAlignment = Alignment.Bottom,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(
-            text = state.gameFps?.toString() ?: "—",
-            color = fpsColor,
-            fontSize = 44.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 44.sp,
-        )
-        Spacer(Modifier.width(6.dp))
-        Column(modifier = Modifier.padding(bottom = 6.dp)) {
-            Text(
-                text = fpsLabel,
-                color = fpsColor,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.6.sp,
-            )
-            if (frameMs != null) {
-                Text(
-                    text = frameMs,
-                    color = HudLabel,
-                    fontSize = 8.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        // Battery W (right side)
-        if (state.batteryW != null) {
-            Column(
-                horizontalAlignment = Alignment.End,
-                modifier = Modifier.padding(bottom = 6.dp),
-            ) {
-                Text(
-                    text = HudDisplayUtils.formatWatts(state.batteryW),
-                    color = HudAmber,
-                    fontSize = 15.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "DRAW",
-                    color = HudLabel,
-                    fontSize = 7.sp,
-                    letterSpacing = 0.5.sp,
-                )
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: CPU tuning section
-// ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun VerboseCpuTuneSection(
-    state: HudUiState,
-    onStepMhz: (Int) -> Unit,
-    onPickStepSize: (Int) -> Unit,
-    onTogglePolicy: (Int) -> Unit,
-) {
-    VerboseSectionLabel("CPU CLOCK", HudBlue)
-    Spacer(Modifier.height(4.dp))
-
-    if (HudDisplayUtils.shouldGateSteppers(state.autoTdpRunning)) {
-        // AutoTDP owns the clocks — show status, not steppers.
+    if (state.autoTdpRunning) {
+        // Running state -- green status line + Stop
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(4.dp))
+                .clip(RoundedCornerShape(5.dp))
                 .background(HudAutoTdpBg)
-                .border(0.5.dp, HudAutoTdpBorder, RoundedCornerShape(4.dp))
-                .padding(8.dp),
+                .border(0.5.dp, HudAutoTdpBorder, RoundedCornerShape(5.dp))
+                .padding(horizontal = 8.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Icon(Icons.Outlined.Bolt, null, tint = HudEmerald, modifier = Modifier.size(11.dp))
+            val detailParts = buildList {
+                state.autoTdpBigCapMhz?.let { add("cap ${HudDisplayUtils.formatGhzFromMhz(it)}") }
+                if (state.autoTdpParkedCores.isNotEmpty()) {
+                    add("park cpu${state.autoTdpParkedCores.sorted().joinToString(",")}")
+                }
+                state.autoTdpGpuLevel?.let { add("GPU lvl $it") }
+            }
+            val statusText = if (detailParts.isEmpty()) {
+                "AutoTDP ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)} running"
+            } else {
+                detailParts.joinToString(" - ")
+            }
             Text(
-                "AutoTDP is managing clocks — stop it below to tune",
-                color = HudLabel,
+                text = statusText,
+                color = HudEmerald,
                 fontSize = 9.sp,
-                lineHeight = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.autoTdpSavingsReady && state.autoTdpSavingsMw != null) {
+                Text(
+                    text = HudDisplayUtils.formatAutoTdpSavings(
+                        state.autoTdpSavingsMw,
+                        state.autoTdpSavingsPct,
+                        state.autoTdpSavingsReady,
+                    ),
+                    color = HudEmerald,
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            HudChipBtn(
+                label = "STOP",
+                enabled = true,
+                accent = HudRed,
+                onClick = onToggleAutoTdp,
             )
         }
-        return
-    }
-
-    // Cluster chip row (select which policies to step)
-    if (state.allPolicies.size > 1) {
-        ClusterChipRow(
-            allPolicies = state.allPolicies,
-            enabledPolicies = state.enabledPolicies.ifEmpty { state.allPolicies.toSet() },
-            onTogglePolicy = onTogglePolicy,
-        )
-        Spacer(Modifier.height(4.dp))
-    }
-
-    // Big-cluster stepper row: [−] [step▾] [+]  2918MHz
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TuneBtn(label = "−", enabled = state.bigCorePolicy != null) { onStepMhz(-state.stepMhz) }
-        StepSizeChip(currentMhz = state.stepMhz, onPick = onPickStepSize)
-        TuneBtn(label = "+", enabled = state.bigCorePolicy != null) { onStepMhz(state.stepMhz) }
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = HudDisplayUtils.formatClusterMhz(state.bigCoreCurrentMhz),
-            color = HudBlue,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: AutoTDP control section
-// ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun VerboseAutoTdpSection(
-    state: HudUiState,
-    onToggleAutoTdp: () -> Unit,
-    onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
-) {
-    val statusColor = when (state.autoTdpStatus) {
-        AutoTdpStatus.RUNNING -> HudEmerald
-        AutoTdpStatus.KILLED_BY_SAFETY, AutoTdpStatus.WRITE_DENIED -> HudRed
-        AutoTdpStatus.LIVE_UNAVAILABLE -> HudAmber
-        else -> HudDim
-    }
-    val statusLabel = when (state.autoTdpStatus) {
-        AutoTdpStatus.RUNNING -> "RUNNING"
-        AutoTdpStatus.IDLE -> "IDLE"
-        AutoTdpStatus.LIVE_UNAVAILABLE -> "UNAVAILABLE"
-        AutoTdpStatus.KILLED_BY_SAFETY -> "SAFETY KILL"
-        AutoTdpStatus.WRITE_DENIED -> "WRITE DENIED"
-        AutoTdpStatus.STOPPED -> "STOPPED"
-    }
-
-    VerboseSectionLabel("AUTOTDP", HudEmerald)
-    Spacer(Modifier.height(4.dp))
-
-    // Status + toggle row
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(Icons.Outlined.Bolt, null, tint = statusColor, modifier = Modifier.size(12.dp))
-        Text(
-            text = statusLabel,
-            color = statusColor,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.4.sp,
-            modifier = Modifier.weight(1f),
-        )
-        // Savings display (when ready)
-        if (state.autoTdpRunning) {
-            Text(
-                text = HudDisplayUtils.formatAutoTdpSavings(
-                    state.autoTdpSavingsMw,
-                    state.autoTdpSavingsPct,
-                    state.autoTdpSavingsReady,
-                ),
-                color = if (state.autoTdpSavingsReady) HudEmerald else HudLabel,
-                fontSize = 8.sp,
-                fontFamily = FontFamily.Monospace,
+    } else {
+        // Stopped state -- Start button + profile picker
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            HudChipBtn(
+                label = "Start AutoTDP",
+                enabled = state.autoTdpStatus != AutoTdpStatus.LIVE_UNAVAILABLE,
+                accent = HudEmerald,
+                onClick = onToggleAutoTdp,
             )
-        }
-        // Start / Stop button
-        TuneBtn(
-            label = if (state.autoTdpRunning) "STOP" else "START",
-            enabled = state.autoTdpStatus != AutoTdpStatus.LIVE_UNAVAILABLE,
-            accent = if (state.autoTdpRunning) HudRed else HudEmerald,
-            onClick = onToggleAutoTdp,
-        )
-    }
-
-    Spacer(Modifier.height(4.dp))
-
-    // Profile picker row: EFF · BAL · TGT
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "PROFILE",
-            color = HudLabel,
-            fontSize = 8.sp,
-            letterSpacing = 0.4.sp,
-            modifier = Modifier.padding(end = 2.dp),
-        )
-        listOf(AutoTdpProfile.EFFICIENCY, AutoTdpProfile.BALANCED, AutoTdpProfile.BATTERY_TARGET)
-            .forEach { profile ->
+            Spacer(Modifier.weight(1f))
+            // 3-segment profile picker
+            listOf(
+                AutoTdpProfile.EFFICIENCY to "EFF",
+                AutoTdpProfile.BALANCED to "BAL",
+                AutoTdpProfile.BATTERY_TARGET to "TGT",
+            ).forEach { (profile, shortLabel) ->
                 val isActive = state.autoTdpActiveProfile == profile
-                ProfileChip(
-                    label = HudDisplayUtils.formatAutoTdpProfileShort(profile.name),
+                AutoTdpProfileChip(
+                    label = shortLabel,
                     selected = isActive,
-                    accent = HudEmerald,
                     onClick = { onSetAutoTdpProfile(profile) },
                 )
             }
-    }
-
-    // Detail line when running
-    if (state.autoTdpRunning) {
-        Spacer(Modifier.height(3.dp))
-        val detailParts = buildList {
-            if (state.autoTdpParkedCores.isNotEmpty()) {
-                add("parked cpu${state.autoTdpParkedCores.sorted().joinToString(",")}")
-            }
-            state.autoTdpBigCapMhz?.let { add("cap ${HudDisplayUtils.formatGhzFromMhz(it)}") }
-            state.autoTdpGpuLevel?.let { add("GPU lvl $it") }
-        }
-        if (detailParts.isNotEmpty()) {
-            Text(
-                text = detailParts.joinToString(" · "),
-                color = HudLabel,
-                fontSize = 8.sp,
-                fontFamily = FontFamily.Monospace,
-                lineHeight = 11.sp,
-            )
-        }
-        if (state.autoTdpReason.isNotBlank()) {
-            Text(
-                text = state.autoTdpReason.take(60),
-                color = HudDim,
-                fontSize = 8.sp,
-                lineHeight = 11.sp,
-            )
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: Quick profiles
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Quick profiles ───────────────────────────────────────────────
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun VerboseProfileChips(
+private fun FullProfileChips(
     chips: List<Pair<String, String>>,
     onApplyProfile: (String) -> Unit,
     onCycleNextProfile: () -> Unit,
@@ -862,18 +735,17 @@ private fun VerboseProfileChips(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         chips.forEach { (id, name) ->
-            ProfileChip(
+            HudSelectChip(
                 label = name.take(12),
                 selected = false,
                 accent = HudBlue,
                 onClick = { onApplyProfile(id) },
             )
         }
-        // Cycle button
-        TuneBtn(label = "NEXT", enabled = chips.size > 1, onClick = onCycleNextProfile)
+        HudChipBtn(label = "NEXT", enabled = chips.size > 1, accent = HudBlue, onClick = onCycleNextProfile)
     }
     Text(
-        text = "tap writes script — open vendor settings to run",
+        text = "tap writes script - open vendor settings to run",
         color = HudDim,
         fontSize = 8.sp,
         lineHeight = 11.sp,
@@ -881,13 +753,11 @@ private fun VerboseProfileChips(
     )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: Refresh rate / FPS cap
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Refresh rate section ────────────────────────────────────────
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun VerboseRefreshRateSection(
+private fun FullRefreshRateSection(
     availableHz: List<Float>,
     pinnedHz: Float?,
     onSetRefreshHz: (Float?) -> Unit,
@@ -899,15 +769,14 @@ private fun VerboseRefreshRateSection(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        // "Auto" chip = clear pin
-        ProfileChip(
+        HudSelectChip(
             label = "AUTO",
             selected = pinnedHz == null,
             accent = HudPurple,
             onClick = { onSetRefreshHz(null) },
         )
         availableHz.forEach { hz ->
-            ProfileChip(
+            HudSelectChip(
                 label = HudDisplayUtils.formatHz(hz),
                 selected = pinnedHz != null && kotlin.math.abs(hz - pinnedHz) < 0.5f,
                 accent = HudPurple,
@@ -917,25 +786,21 @@ private fun VerboseRefreshRateSection(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: Display controls (opacity)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Opacity row ──────────────────────────────────────────────────
 
 @Composable
-private fun VerboseDisplaySection(
+private fun FullOpacityRow(
     hudOpacity: Float,
     onSetOpacity: (Float) -> Unit,
 ) {
-    VerboseSectionLabel("DISPLAY", HudLabel)
-    Spacer(Modifier.height(4.dp))
-    // Opacity stepper row: [−10%] [94%] [+10%]
     Row(
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Text("OPACITY", color = HudLabel, fontSize = 8.sp, letterSpacing = 0.4.sp)
+        VerboseSectionLabel("OPACITY", HudLabel)
         Spacer(Modifier.weight(1f))
-        TuneBtn(label = "−", enabled = hudOpacity > 0.2f) {
+        HudChipBtn(label = "-", enabled = hudOpacity > 0.2f, accent = HudLabel) {
             onSetOpacity((hudOpacity - 0.1f).coerceAtLeast(0.1f))
         }
         Text(
@@ -945,24 +810,21 @@ private fun VerboseDisplaySection(
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold,
         )
-        TuneBtn(label = "+", enabled = hudOpacity < 1f) {
+        HudChipBtn(label = "+", enabled = hudOpacity < 1f, accent = HudLabel) {
             onSetOpacity((hudOpacity + 0.1f).coerceAtMost(1f))
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: Per-core bars (informational)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Per-core bars ─────────────────────────────────────────────────
 
 @Composable
-private fun VerbosePerCoreSection(state: HudUiState) {
+private fun FullPerCoreSection(state: HudUiState) {
     VerboseSectionLabel("PER-CORE", HudBlue)
     Spacer(Modifier.height(3.dp))
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         state.perCoreMhz.forEachIndexed { idx, mhz ->
             val loadPct = state.perCoreLoadPct.getOrNull(idx) ?: 0
-            // cpu0 is never parked per spec
             val isParked = idx != 0 && idx in state.autoTdpParkedCores
             PerCoreBar(idx = idx, mhz = mhz, loadPct = loadPct, isParked = isParked)
         }
@@ -981,7 +843,7 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, isParked: Boolean) {
             .fillMaxWidth()
             .semantics {
                 contentDescription = if (isParked) "Core $idx parked"
-                else "Core $idx — $mhz MHz, $loadPct percent load"
+                else "Core $idx $mhz MHz $loadPct percent load"
             },
     ) {
         Text(
@@ -1005,7 +867,6 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, isParked: Boolean) {
                         .fillMaxWidth(loadFrac)
                         .height(6.dp)
                         .drawBehind {
-                            // Slanted right edge — Direction C bar look
                             val skew = if (loadFrac < 1f) 3f else 0f
                             val path = Path().apply {
                                 moveTo(0f, 0f)
@@ -1021,7 +882,7 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, isParked: Boolean) {
         }
         Spacer(Modifier.width(5.dp))
         Text(
-            text = if (isParked) "PARKED" else "$mhz·$loadPct%",
+            text = if (isParked) "PARKED" else "$mhz-$loadPct%",
             color = textColor,
             fontSize = 8.sp,
             fontFamily = FontFamily.Monospace,
@@ -1030,12 +891,10 @@ private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, isParked: Boolean) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Verbose: Thermal row
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Full panel: Thermal row ────────────────────────────────────────────────────
 
 @Composable
-private fun VerboseThermalRow(
+private fun FullThermalRow(
     cpuTempC: Float?,
     gpuTempC: Float?,
     batteryTempC: Float?,
@@ -1055,9 +914,6 @@ private fun VerboseThermalRow(
 @Composable
 private fun ThermalMini(label: String, tempC: Float?, modifier: Modifier = Modifier) {
     val hot = tempC != null && tempC >= 80f
-    val valueColor = if (hot) HudAmber else HudValue
-    val accentColor = if (hot) HudAmber else HudLabel
-
     Column(
         modifier = modifier
             .background(HudBarBg, RoundedCornerShape(4.dp))
@@ -1068,7 +924,7 @@ private fun ThermalMini(label: String, tempC: Float?, modifier: Modifier = Modif
         Text(label, color = HudLabel, fontSize = 7.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
         Text(
             text = HudDisplayUtils.formatTemp(tempC),
-            color = valueColor,
+            color = if (hot) HudAmber else HudValue,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold,
@@ -1077,10 +933,10 @@ private fun ThermalMini(label: String, tempC: Float?, modifier: Modifier = Modif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Reusable micro-components
+//  Shared micro-components
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Section label — uppercase, accent tick, tight tracking. */
+/** Section label: colored tick + uppercase title. */
 @Composable
 private fun VerboseSectionLabel(title: String, accent: Color) {
     Row(
@@ -1106,25 +962,21 @@ private fun VerboseSectionLabel(title: String, accent: Color) {
 /** Thin horizontal rule. */
 @Composable
 private fun HudDivider() {
-    HorizontalDivider(
-        thickness = 0.5.dp,
-        color = HudBorder,
-    )
+    HorizontalDivider(thickness = 0.5.dp, color = HudBorder)
 }
 
 /**
- * Arsenal-style small angular button for the HUD.
+ * Arsenal-style small angular action button.
  * Uses [CutCornerShape] (TopEnd cut) for the angular look.
- * Touch works because the overlay uses FLAG_NOT_FOCUSABLE + clickable{}.
  */
 @Composable
-private fun TuneBtn(
+private fun HudChipBtn(
     label: String,
     enabled: Boolean,
     accent: Color = HudBlue,
     onClick: () -> Unit,
 ) {
-    val shape = CutCornerShape(corner = CutCorner.TopEnd, cutSize = 8.dp, cornerRadius = 3.dp)
+    val shape = CutCornerShape(corner = CutCorner.TopEnd, cutSize = 7.dp, cornerRadius = 3.dp)
     val bg = if (enabled) accent.copy(alpha = 0.18f) else Color.Transparent
     val border = if (enabled) accent.copy(alpha = 0.6f) else HudBorder
     val fg = if (enabled) accent else HudDim
@@ -1135,13 +987,13 @@ private fun TuneBtn(
             .background(bg)
             .border(0.5.dp, border, shape)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label.uppercase(),
             color = fg,
-            fontSize = 9.sp,
+            fontSize = 8.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.3.sp,
             fontFamily = FontFamily.Monospace,
@@ -1149,79 +1001,9 @@ private fun TuneBtn(
     }
 }
 
-/**
- * Step-size chip. Tapping CYCLES to the next step value (50→100→200→300→500→1000→50).
- *
- * Deliberately NOT a DropdownMenu: a Material DropdownMenu spawns a Popup window, and a
- * Popup over a FLAG_NOT_FOCUSABLE overlay does not reliably receive outside-tap dismissal,
- * so the menu can stay pinned open. A cycle-on-tap chip needs no second window and matches
- * the proven clickable{} pattern every other HUD control uses.
- */
+/** Generic selectable chip: profiles, Hz options, etc. */
 @Composable
-private fun StepSizeChip(currentMhz: Int, onPick: (Int) -> Unit) {
-    val steps = remember { listOf(50, 100, 200, 300, 500, 1000) }
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(3.dp))
-            .background(HudBlue.copy(alpha = 0.18f))
-            .border(0.5.dp, HudBlue.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
-            .clickable {
-                val idx = steps.indexOf(currentMhz).let { if (it < 0) 0 else it }
-                onPick(steps[(idx + 1) % steps.size])
-            }
-            .padding(horizontal = 7.dp, vertical = 4.dp),
-    ) {
-        Text(
-            "±${currentMhz}↻",
-            color = HudBlue,
-            fontSize = 9.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-        )
-    }
-}
-
-/** Cluster toggle chip for the policy selector. */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ClusterChipRow(
-    allPolicies: List<Int>,
-    enabledPolicies: Set<Int>,
-    onTogglePolicy: (Int) -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("CLUSTER:", color = HudLabel, fontSize = 8.sp, modifier = Modifier.padding(end = 2.dp))
-        allPolicies.forEach { pid ->
-            val on = pid in enabledPolicies
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(if (on) HudBlue.copy(alpha = 0.22f) else Color.Transparent)
-                    .border(0.5.dp, if (on) HudBlue else HudBorder, RoundedCornerShape(4.dp))
-                    .clickable { onTogglePolicy(pid) }
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
-            ) {
-                Text(
-                    "p$pid",
-                    color = if (on) HudBlue else HudDim,
-                    fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Generic selectable chip — used for profiles, Hz, AutoTDP profiles.
- * When [selected] the background is tinted with [accent].
- */
-@Composable
-private fun ProfileChip(
+private fun HudSelectChip(
     label: String,
     selected: Boolean,
     accent: Color,
@@ -1231,11 +1013,7 @@ private fun ProfileChip(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
             .background(if (selected) accent.copy(alpha = 0.22f) else Color(0xFF0D1825))
-            .border(
-                0.5.dp,
-                if (selected) accent else HudBorder,
-                RoundedCornerShape(4.dp),
-            )
+            .border(0.5.dp, if (selected) accent else HudBorder, RoundedCornerShape(4.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 7.dp, vertical = 3.dp),
     ) {
@@ -1249,7 +1027,33 @@ private fun ProfileChip(
     }
 }
 
-/** Tiny icon-like chip for HUD header buttons (size toggle). */
+/** AutoTDP profile segment chip. */
+@Composable
+private fun AutoTdpProfileChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val accent = HudEmerald
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (selected) accent.copy(alpha = 0.22f) else Color(0xFF0D1825))
+            .border(0.5.dp, if (selected) accent else HudBorder, RoundedCornerShape(4.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (selected) accent else HudLabel,
+            fontSize = 9.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+/** Tiny header chip for size label. */
 @Composable
 private fun HudIconChip(
     label: String,

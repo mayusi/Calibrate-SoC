@@ -209,54 +209,14 @@ class HudStateAssembler @Inject constructor(
         )
     }
 
-    /** Called by [HudPrefs] profile/step/policy observers. */
+    /** Called by [HudPrefs] profile observer. */
     fun feedProfile(profile: HudProfile) {
         _state.value = _state.value.copy(profile = profile)
-    }
-
-    fun feedStepMhz(step: Int) {
-        _state.value = _state.value.copy(stepMhz = step)
-    }
-
-    fun feedEnabledPolicies(set: Set<Int>) {
-        if (set.isNotEmpty()) _state.value = _state.value.copy(enabledPolicies = set)
-    }
-
-    /** Called by the capability probe observer with big-core + write-ability info. */
-    fun feedCapability(
-        bigCorePolicy: Int?,
-        bigCoreCurrentMhz: Int?,
-        allPolicies: List<Int>,
-        enabledPolicies: Set<Int>,
-    ) {
-        _state.value = _state.value.copy(
-            bigCorePolicy = bigCorePolicy,
-            bigCoreCurrentMhz = bigCoreCurrentMhz,
-            allPolicies = allPolicies,
-            enabledPolicies = if (_state.value.enabledPolicies.isEmpty()) enabledPolicies
-                else _state.value.enabledPolicies,
-        )
-    }
-
-    fun feedCanTuneLive(can: Boolean) {
-        _state.value = _state.value.copy(canTuneLive = can)
-    }
-
-    /** Update the big-core current MHz after a live step write. */
-    fun feedBigCoreMhz(policyId: Int?, mhz: Int?) {
-        _state.value = _state.value.copy(
-            bigCorePolicy = policyId ?: _state.value.bigCorePolicy,
-            bigCoreCurrentMhz = mhz ?: _state.value.bigCoreCurrentMhz,
-        )
     }
 
     /** Flash/clear the lastActionMessage. */
     fun setActionMessage(msg: String?) {
         _state.value = _state.value.copy(lastActionMessage = msg)
-    }
-
-    fun updateEnabledPolicies(set: Set<Int>) {
-        _state.value = _state.value.copy(enabledPolicies = set)
     }
 
     fun feedAutoTdpActiveProfile(profile: AutoTdpProfile) {
