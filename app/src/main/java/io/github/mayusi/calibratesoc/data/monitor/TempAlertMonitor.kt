@@ -11,10 +11,15 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.profiles.ProfileApplier
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -60,6 +65,27 @@ class TempAlertMonitor @Inject constructor(
     private var state = AlertState.COOL
     private var lastFiredMs = 0L
 
+    // ── Pref state flows ──────────────────────────────────────────────────────
+
+    // Shared scope for converting DataStore flows to StateFlows. Using a
+    // singleton scope (SupervisorJob + IO) means the StateFlows stay warm
+    // for the lifetime of this @Singleton, so every call to observe() reads
+    // the same hot flow rather than each spinning up its own collector.
+    private val monitorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val prefsState: StateFlow<Triple<Boolean, Int, String?>> =
+        combine(
+            userPrefs.tempAlertsEnabled,
+            userPrefs.tempAlertThresholdC,
+            userPrefs.tempAlertAutoProfileId,
+        ) { enabled, threshold, profileId ->
+            Triple(enabled, threshold, profileId)
+        }.stateIn(
+            scope = monitorScope,
+            started = SharingStarted.Eagerly,
+            initialValue = Triple(false, HYSTERESIS_MARGIN_C + DEFAULT_ALERT_THRESHOLD_C, null),
+        )
+
     // ── Notification channel ──────────────────────────────────────────────────
 
     private val notificationManager: NotificationManager =
@@ -93,31 +119,29 @@ class TempAlertMonitor @Inject constructor(
      * rules. This suspends for as long as the caller's coroutine scope
      * lives — intended to be launched with [kotlinx.coroutines.launch].
      *
-     * Uses [collectLatest] so that if the caller restarts collection
-     * (e.g. configuration change), the previous collect is cancelled and
-     * state is reset, preventing a stale HOT latch from silently blocking
-     * the next alert.
+     * BUG FIX (BUG 4): previously used collectLatest on the outer pref
+     * combine, which cancelled + restarted the inner telemetry.collect on
+     * every pref emission. This reset HOT alert state and dropped samples,
+     * making alerts flap or fail to fire entirely. The fix: collect the
+     * telemetry stream directly and read the latest pref values from a
+     * hot StateFlow ([prefsState]) on every sample. A pref change now
+     * takes effect on the very next telemetry tick without interrupting the
+     * running collect — HOT state is preserved across pref updates unless
+     * the threshold itself changes significantly.
      */
     suspend fun observe(telemetry: Flow<Telemetry>) {
-        // Combine all the pref signals we need into a single flat object so
-        // we don't read DataStore on every tick — we collect them separately
-        // and use the latest value each time a telemetry sample arrives.
-        combine(
-            userPrefs.tempAlertsEnabled,
-            userPrefs.tempAlertThresholdC,
-            userPrefs.tempAlertAutoProfileId,
-        ) { enabled, threshold, profileId ->
-            Triple(enabled, threshold, profileId)
-        }.collectLatest { (enabled, threshold, autoProfileId) ->
-            // Reset state whenever settings change so a new threshold
-            // doesn't latch onto old HOT state from the previous setting.
-            resetState()
-
-            if (!enabled) return@collectLatest
-
-            telemetry.collect { sample ->
-                onSample(sample, threshold, autoProfileId)
+        var lastThreshold: Int? = null
+        telemetry.collect { sample ->
+            val (enabled, threshold, autoProfileId) = prefsState.value
+            // Reset the state machine whenever the threshold changes so the
+            // new threshold doesn't latch onto old HOT state from the previous
+            // setting — mirrors the previous per-settings-change reset.
+            if (threshold != lastThreshold) {
+                resetState()
+                lastThreshold = threshold
             }
+            if (!enabled) return@collect
+            onSample(sample, threshold, autoProfileId)
         }
     }
 
@@ -220,5 +244,10 @@ class TempAlertMonitor @Inject constructor(
 
         /** Minimum time between any two alert notifications (ms). */
         const val RATE_LIMIT_MS = 60_000L
+
+        /** Default alert threshold in °C — matches [UserPrefs.DEFAULT_ALERT_THRESHOLD_C].
+         *  Duplicated here so the initial StateFlow value is correct before
+         *  DataStore has emitted its first value. */
+        private const val DEFAULT_ALERT_THRESHOLD_C = 80
     }
 }

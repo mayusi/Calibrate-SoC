@@ -509,10 +509,15 @@ private fun HudVerboseContent(
     onSetRefreshHz: (Float?) -> Unit,
     onSetOpacity: (Float) -> Unit,
 ) {
+    // BUG E FIX: verticalScroll makes the verbose control panel scrollable so all
+    // sections are reachable even when the HUD is under FLAG_NOT_FOCUSABLE (scroll
+    // still works via touch events on the overlay). Max height is tightened to
+    // 380 dp so the verbose panel doesn't consume an absurd amount of screen space;
+    // the user scrolls to reach lower sections (thermal, per-core bars, display).
     val scroll = rememberScrollState()
     Column(
         modifier = Modifier
-            .heightIn(max = 520.dp)
+            .heightIn(max = 380.dp)
             .verticalScroll(scroll),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {

@@ -23,3 +23,13 @@
 # Shizuku
 -keep class rikka.shizuku.** { *; }
 -keep class moe.shizuku.** { *; }
+
+# PServerWriter — R8 must not rename, inline, or reorder the volatile transactableCache
+# field or the binder transact + cache logic. The RELEASE build's minification otherwise
+# produces a class whose field layout differs from DEBUG, which hid the stale-cache bug.
+-keep class io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter { *; }
+-keepclassmembers class io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter {
+    volatile io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter$Companion *;
+    volatile kotlin.Boolean transactableCache;
+    volatile long openUntilMs;
+}

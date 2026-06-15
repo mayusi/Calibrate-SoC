@@ -490,4 +490,151 @@ class AutoTdpEngineTest {
         // No prime cores to park; engine must not crash.
         assertThat(decision.target.parkedPrimeCores).isEmpty()
     }
+
+    // ─── BUG C FIX: non-STOCK decisions on realistic load ────────────────────
+
+    @Test
+    fun `bug-c efficiency profile produces non-STOCK decision on gpu-bound load`() {
+        // GPU at 90%, big/prime at 10% for all 4 samples → allGpuBound=true.
+        // Engine must produce a tightened state (NOT STOCK) for EFFICIENCY.
+        val decision = AutoTdpEngine.decide(
+            window = gpuBoundWindow(4),
+            config = efficiencyConfig,
+            caps = caps3Cluster,
+            current = TdpState.STOCK,
+        )
+        assertThat(decision.target).isNotEqualTo(TdpState.STOCK)
+        assertThat(decision.target.bigClusterCapKhz).isNotNull()
+    }
+
+    @Test
+    fun `bug-c balanced profile produces non-STOCK decision when gpu load above 85 pct`() {
+        // GPU at 90% (above BALANCED_GPU_THRESHOLD=85), CPU prime at 10%.
+        // All 4 samples meet both allGpuBound AND smoothedGpuLoad >= 85.
+        val highGpuWindow = List(4) {
+            telemetry(gpuLoad = 90, coreLoads = List(8) { i -> if (i == 7) 10 else 15 })
+        }
+        val decision = AutoTdpEngine.decide(
+            window = highGpuWindow,
+            config = balancedConfig,
+            caps = caps3Cluster,
+            current = TdpState.STOCK,
+        )
+        // BALANCED at 90% GPU should park/cap — NOT hold at STOCK.
+        assertThat(decision.target).isNotEqualTo(TdpState.STOCK)
+    }
+
+    @Test
+    fun `bug-c balanced profile holds at 82 pct gpu (below balanced threshold)`() {
+        // GPU at 82% satisfies allGpuBound (>= 80) but NOT smoothedGpuLoad >= 85.
+        // BALANCED must hold at STOCK (no parking at 82%).
+        val marginalGpuWindow = List(4) {
+            telemetry(gpuLoad = 82, coreLoads = List(8) { i -> if (i == 7) 10 else 15 })
+        }
+        val decision = AutoTdpEngine.decide(
+            window = marginalGpuWindow,
+            config = balancedConfig,
+            caps = caps3Cluster,
+            current = TdpState.STOCK,
+        )
+        assertThat(decision.target).isEqualTo(TdpState.STOCK)
+        assertThat(decision.reason.lowercase()).contains("holding")
+    }
+
+    // ─── BUG C FIX: relaxState clears cap when stepping reaches top OPP ──────
+
+    @Test
+    fun `bug-c relax state clears cap when stepping from second-to-last OPP`() {
+        // Start with cap at the second-to-last step (index 6 of 8: 2_707_000).
+        // One cpu-saturated tick should step cap to top OPP and immediately clear it.
+        val almostTopOpp = TdpState(
+            parkedPrimeCores = setOf(7),
+            bigClusterCapKhz = 2_707_000,
+        )
+        val decision = AutoTdpEngine.decide(
+            window = cpuBoundWindow(4),
+            config = efficiencyConfig,
+            caps = caps3Cluster,
+            current = almostTopOpp,
+        )
+        // Stepping from 2_707_000 (index 6) to 2_803_000 (index 7, top) should
+        // immediately clear to null (stock) in a single step.
+        assertThat(decision.target.bigClusterCapKhz).isNull()
+    }
+
+    @Test
+    fun `bug-c relax state clears cap when already at top OPP`() {
+        // Start with cap already AT the top OPP.
+        val atTopOpp = TdpState(
+            parkedPrimeCores = setOf(7),
+            bigClusterCapKhz = 2_803_000,  // top OPP = steps.last()
+        )
+        val decision = AutoTdpEngine.decide(
+            window = cpuBoundWindow(4),
+            config = efficiencyConfig,
+            caps = caps3Cluster,
+            current = atTopOpp,
+        )
+        // Already at top OPP → clear immediately.
+        assertThat(decision.target.bigClusterCapKhz).isNull()
+    }
+
+    @Test
+    fun `bug-c relax state steps up one OPP when not yet at top`() {
+        // Start with cap at index 2 (1_171_000). One relax tick steps to index 3.
+        val midCap = TdpState(
+            parkedPrimeCores = setOf(7),
+            bigClusterCapKhz = 1_171_000,  // index 2
+        )
+        val decision = AutoTdpEngine.decide(
+            window = cpuBoundWindow(4),
+            config = efficiencyConfig,
+            caps = caps3Cluster,
+            current = midCap,
+        )
+        // Should step to 1_536_000 (index 3) — NOT cleared, NOT at top.
+        assertThat(decision.target.bigClusterCapKhz).isEqualTo(1_536_000)
+    }
+
+    // ─── BUG D FIX: deriveBudgetCap unit math ────────────────────────────────
+
+    @Test
+    fun `bug-d deriveBudgetCap maps half budget to a mid-table OPP`() {
+        // With MAX_DRAW_PROXY_MW = 3000, a budget of 1500 mW = fraction 0.5.
+        // 0.5 * (8-1) = 3.5 → index 3 → steps[3] = 1_536_000 kHz.
+        val cap = AutoTdpEngine.deriveBudgetCap(caps3Cluster, 1_500L)
+        assertThat(cap).isNotNull()
+        // Mid-budget → should pick an OPP significantly below the top.
+        assertThat(cap!!).isLessThan(caps3Cluster.bigClusterOppStepsKhz.last())
+        // Must still be on a real OPP step.
+        assertThat(caps3Cluster.bigClusterOppStepsKhz).contains(cap)
+    }
+
+    @Test
+    fun `bug-d deriveBudgetCap with low budget maps to low OPP`() {
+        // Budget of 300 mW = 10% of 3000 → fraction 0.1 → index 0 or 1.
+        val cap = AutoTdpEngine.deriveBudgetCap(caps3Cluster, 300L)
+        assertThat(cap).isNotNull()
+        // Low budget → should select one of the lower OPP steps.
+        assertThat(cap!!).isAtMost(caps3Cluster.bigClusterOppStepsKhz[1])
+    }
+
+    @Test
+    fun `bug-d deriveBudgetCap does NOT always return top OPP for 3000mW`() {
+        // Pre-bug: 3000 mW / (2803000 kHz * 0.001 MHz) = 3000/2803 ≈ 1.07 → top OPP.
+        // Post-fix: 3000 mW / 3000 mW proxy = 1.0 → top OPP (still correct but for
+        // the RIGHT reason). The critical test: 1500 mW should NOT map to top OPP.
+        val capAt3000 = AutoTdpEngine.deriveBudgetCap(caps3Cluster, 3_000L)
+        val capAt1500 = AutoTdpEngine.deriveBudgetCap(caps3Cluster, 1_500L)
+        // Both return non-null OPP steps on the table.
+        assertThat(capAt3000).isNotNull()
+        assertThat(capAt1500).isNotNull()
+        // The 1500 mW cap must be strictly LESS than the 3000 mW cap.
+        assertThat(capAt1500!!).isLessThan(capAt3000!!)
+    }
+
+    @Test
+    fun `bug-d deriveBudgetCap returns null for zero and negative budgets`() {
+        assertThat(AutoTdpEngine.deriveBudgetCap(caps3Cluster, 0L)).isNull()
+    }
 }

@@ -32,7 +32,10 @@ import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -72,6 +75,12 @@ import kotlinx.coroutines.delay
  * permissions (overlay, usage access, battery opt). Advanced unlock
  * (Force SELinux + unlock script) lives in Tune → Advanced unlock and
  * is surfaced as an optional next-step at the end of this wizard.
+ *
+ * On applicable devices (AYN/Odin/Retroid/AYANEO — any device with a
+ * vendor runner or PServer), the advanced steps are FORCED: the user
+ * must either complete them or confirm a full-screen scary warning that
+ * the app will be read-only. On non-applicable devices the steps remain
+ * optional (they cannot complete them — no vendor runner present).
  */
 /**
  * Terminal state machine that runs AFTER the 3 universal permission
@@ -94,10 +103,17 @@ fun OnboardingScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // Resolved once; cheap (package-manager check).
+    val advancedApplicable = remember { ForceSelinuxSetupItem.isApplicable(context) }
+
     // Terminal advanced sub-wizard phase. Starts at None — only enters
     // the advanced flow once the user opts in from the all-done step.
     var advancedPhase by remember { mutableStateOf(AdvPhase.None) }
     val grants by advancedUnlockVm.grants.collectAsState()
+
+    // Full-screen scary-skip dialog: shown when the user tries to bypass
+    // the forced advanced step on an applicable device.
+    var showScarySkipDialog by remember { mutableStateOf(false) }
 
     // Last action timestamp — bumped every time the user taps a "Grant"
     // button. For the first 8 seconds after they tap, we poll at 250 ms
@@ -118,6 +134,15 @@ fun OnboardingScreen(
             if (advancedPhase == AdvPhase.ScriptGuide || advancedPhase == AdvPhase.Done) {
                 advancedUnlockVm.refresh()
             }
+        }
+    }
+
+    // Re-probe capability whenever we enter SELinux or Script phases so
+    // the isDone() signals are fresh (PServer cache may be stale from
+    // cold start before the user ran anything).
+    LaunchedEffect(advancedPhase) {
+        if (advancedPhase == AdvPhase.SelinuxGuide || advancedPhase == AdvPhase.ScriptGuide) {
+            advancedUnlockVm.refresh()
         }
     }
 
@@ -176,8 +201,28 @@ fun OnboardingScreen(
     val scriptUnlocked = grants.dump || grants.writeSecureSettings || grants.sysfsWritable
     LaunchedEffect(advancedPhase, scriptUnlocked) {
         if (advancedPhase == AdvPhase.ScriptGuide && scriptUnlocked) {
+            // Advanced setup completed — clear the skipped flag so gated-feature
+            // re-surface logic knows the user did it properly.
+            viewModel.setAdvancedSetupSkipped(false)
             advancedPhase = AdvPhase.Done
         }
+    }
+
+    // ── Scary-skip confirmation dialog ────────────────────────────────────────
+    // Only shown when the user tries to leave a forced advanced step on an
+    // applicable device without completing it. Covers both the SELinux and
+    // Script phases (and the AllDone "Skip" path on applicable devices).
+    if (showScarySkipDialog) {
+        ScarySkipDialog(
+            onGoBack = { showScarySkipDialog = false },
+            onSkipAnyway = {
+                showScarySkipDialog = false
+                // Record the skip so gated features can re-surface the prompt.
+                viewModel.setAdvancedSetupSkipped(true)
+                viewModel.markComplete()
+                onFinished()
+            },
+        )
     }
 
     Column(
@@ -191,10 +236,23 @@ fun OnboardingScreen(
         OnboardingHeader(stepIdx, totalSteps, items.size)
 
         val allDoneStepIdx = items.size + 1 // last step index
+
+        // enterApp used ONLY for non-applicable devices and genuine
+        // completion paths — never for the silent TextButton skip on
+        // applicable devices.
         val enterApp: () -> Unit = {
             viewModel.markComplete()
             onFinished()
         }
+
+        // On applicable devices, the "skip advanced" exit path must go
+        // through ScarySkipDialog instead of silently entering the app.
+        val requestSkip: () -> Unit = if (advancedApplicable) {
+            { showScarySkipDialog = true }
+        } else {
+            enterApp
+        }
+
         // Once the user is in the advanced sub-wizard, it owns the body
         // and the universal-step dispatch is bypassed entirely.
         if (advancedPhase != AdvPhase.None) {
@@ -202,11 +260,13 @@ fun OnboardingScreen(
             when (advancedPhase) {
                 AdvPhase.Ask -> AdvancedAskStep(
                     vendorName = vendorName,
+                    advancedApplicable = advancedApplicable,
                     onYes = { advancedPhase = AdvPhase.SelinuxGuide },
-                    onNo = enterApp,
+                    onNo = requestSkip,
                 )
                 AdvPhase.SelinuxGuide -> AdvancedSelinuxStep(
                     vendorName = vendorName,
+                    advancedApplicable = advancedApplicable,
                     selinuxDone = ForceSelinuxSetupItem.isDone(context),
                     onOpenVendor = {
                         lastActionAtMs = System.currentTimeMillis()
@@ -216,11 +276,20 @@ fun OnboardingScreen(
                         ForceSelinuxSetupItem.setManuallyConfirmed(context, true)
                         advancedPhase = AdvPhase.ScriptGuide
                     },
-                    onSkip = { advancedPhase = AdvPhase.ScriptGuide },
-                    onEnterApp = enterApp,
+                    onSkip = {
+                        // "Skip this step" on an applicable device → scary dialog.
+                        // On non-applicable: advance freely (can't do it anyway).
+                        if (advancedApplicable) {
+                            showScarySkipDialog = true
+                        } else {
+                            advancedPhase = AdvPhase.ScriptGuide
+                        }
+                    },
+                    onEnterApp = requestSkip,
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
                     vendorName = vendorName,
+                    advancedApplicable = advancedApplicable,
                     grants = grants,
                     onGenerate = { advancedUnlockVm.deployScript() },
                     onOpenVendor = {
@@ -228,7 +297,7 @@ fun OnboardingScreen(
                         OdinIntents.openVendorSettings(context)
                     },
                     onShowFile = { path -> OdinIntents.openScriptDirectory(context, path) },
-                    onEnterApp = enterApp,
+                    onEnterApp = requestSkip,
                 )
                 AdvPhase.Done -> AdvancedDoneStep(
                     grants = grants,
@@ -244,10 +313,11 @@ fun OnboardingScreen(
                 onSkipAll = enterApp,
             )
             allDoneStepIdx -> AllDoneStep(
-                advancedApplicable = ForceSelinuxSetupItem.isApplicable(context),
+                advancedApplicable = advancedApplicable,
                 onSetupAdvanced = { advancedPhase = AdvPhase.Ask },
                 onEnterApp = enterApp,
                 onBack = { stepIdx-- },
+                onSkipAdvanced = requestSkip,
             )
             else -> {
                 val itemIdx = stepIdx - 1
@@ -286,6 +356,95 @@ fun OnboardingScreen(
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Scary skip dialog — full-screen warning for applicable devices
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Full-screen warning dialog shown when the user tries to skip the
+ * advanced unlock steps on an applicable (AYN/vendor-runner) device.
+ *
+ * Without the setup, ALL performance features — AutoTDP, live tuning,
+ * the in-game HUD ± buttons — are unavailable and the app is
+ * effectively read-only. This dialog makes the cost crystal-clear
+ * before letting the user proceed.
+ *
+ * Primary action: "Go back and set it up" (recommended / non-destructive).
+ * Secondary action: "Skip — read-only" (destructive — clearly labelled).
+ */
+@Composable
+private fun ScarySkipDialog(
+    onGoBack: () -> Unit,
+    onSkipAnyway: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onGoBack,
+        icon = {
+            Icon(
+                Icons.Outlined.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(36.dp),
+            )
+        },
+        title = {
+            Text(
+                "Skip advanced setup?",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Without this, you will NOT be able to use:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("• AutoTDP (automatic power budgeting)", style = MaterialTheme.typography.bodyMedium)
+                    Text("• Live tuning (HUD ± clock buttons)", style = MaterialTheme.typography.bodyMedium)
+                    Text("• In-game HUD controls", style = MaterialTheme.typography.bodyMedium)
+                    Text("• Any performance feature", style = MaterialTheme.typography.bodyMedium)
+                }
+                Text(
+                    "The app will be read-only — monitoring and benchmarks still work, " +
+                        "but you cannot change anything.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                ) {
+                    Text(
+                        "You can always complete this setup later from Settings → Advanced unlock.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onGoBack) {
+                Text("Go back and set it up")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onSkipAnyway,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) {
+                Text("Skip — read-only")
+            }
+        },
+    )
 }
 
 @Composable
@@ -422,8 +581,11 @@ private fun WelcomeStep(onNext: () -> Unit, onSkipAll: () -> Unit) {
 /**
  * Final universal step — all 3 permissions done. Branches the terminal
  * flow: if advanced unlock is achievable on this device, offer a clear
- * choice between setting it up now or entering the app; otherwise just
- * let the user in.
+ * choice between setting it up now or confirming the scary skip dialog;
+ * otherwise just let the user in.
+ *
+ * On applicable devices, [onSkipAdvanced] routes through ScarySkipDialog.
+ * On non-applicable devices, [onSkipAdvanced] == [onEnterApp] (same lambda).
  */
 @Composable
 private fun AllDoneStep(
@@ -431,6 +593,7 @@ private fun AllDoneStep(
     onSetupAdvanced: () -> Unit,
     onEnterApp: () -> Unit,
     onBack: () -> Unit,
+    onSkipAdvanced: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -464,14 +627,14 @@ private fun AllDoneStep(
                 ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "One more (optional) thing — live in-app tuning",
+                            "One more thing — live in-app tuning (required for this device)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            "Your device can do instant ± CPU/GPU clock changes straight from the HUD — " +
-                                "no script round-trips. It's a one-time ~2-minute setup. Totally optional; " +
-                                "monitoring and benchmarks already work without it.",
+                            "Your device supports instant ± CPU/GPU clock changes straight from the HUD, " +
+                                "AutoTDP, and vendor preset tuning. This one-time ~2-minute setup is needed " +
+                                "to use those features.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -486,8 +649,10 @@ private fun AllDoneStep(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(onClick = onBack) { Text("Back") }
+                    // On applicable devices this routes through ScarySkipDialog
+                    // so the user sees the consequences before skipping.
                     OutlinedButton(
-                        onClick = onEnterApp,
+                        onClick = onSkipAdvanced,
                         modifier = Modifier.weight(1f),
                     ) { Text("Skip — enter app") }
                 }
@@ -508,8 +673,9 @@ private fun AllDoneStep(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Advanced unlock sub-wizard (optional, terminal). All steps below have
-// a skip / enter-app escape so the user is never trapped.
+// Advanced unlock sub-wizard (optional for non-applicable devices,
+// forced gate for applicable devices). All steps have a proper exit
+// path: either genuine completion or confirmed ScarySkipDialog.
 // ─────────────────────────────────────────────────────────────────────
 
 /** Shared card scaffold for the advanced steps — icon badge + title +
@@ -667,10 +833,17 @@ private fun GrantsChecklist(grants: AdvancedPermissionsScript.Grants) {
     }
 }
 
-/** Phase 2 — friendly explainer of what advanced unlock gets/costs. */
+/**
+ * Phase 2 — friendly explainer of what advanced unlock gets/costs.
+ *
+ * On applicable devices [onNo] routes through ScarySkipDialog (caller
+ * passes [requestSkip] which triggers the dialog). On non-applicable
+ * devices it goes straight to the app.
+ */
 @Composable
 private fun AdvancedAskStep(
     vendorName: String,
+    advancedApplicable: Boolean,
     onYes: () -> Unit,
     onNo: () -> Unit,
 ) {
@@ -682,7 +855,10 @@ private fun AdvancedAskStep(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            AdvCardHeader(Icons.Outlined.Bolt, "Advanced unlock (optional)")
+            AdvCardHeader(
+                Icons.Outlined.Bolt,
+                if (advancedApplicable) "Advanced unlock (required for live tuning)" else "Advanced unlock (optional)",
+            )
             Text(
                 "Turn this on and you get real in-game FPS, vendor preset tuning without Shizuku, " +
                     "and — on devices with a custom kernel — instant ± clock changes right from the HUD. " +
@@ -694,23 +870,41 @@ private fun AdvancedAskStep(
                 "The cost: a one-time ~2-minute setup — flip a system toggle in $vendorName and run a " +
                     "one-time script as root. That's it; it persists afterward.",
             )
-            Text(
-                "It's completely optional. Monitoring, the HUD, and benchmarks already work without it — " +
-                    "this just unlocks live tuning.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.secondary,
-            )
+            if (advancedApplicable) {
+                Text(
+                    "Your device supports this setup. Without it, AutoTDP, live tuning, and HUD controls " +
+                        "are unavailable — the app will be read-only.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else {
+                Text(
+                    "It's completely optional. Monitoring, the HUD, and benchmarks already work without it — " +
+                        "this just unlocks live tuning.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
             Button(onClick = onYes, modifier = Modifier.fillMaxWidth()) { Text("Yes, set it up") }
-            OutlinedButton(onClick = onNo, modifier = Modifier.fillMaxWidth()) { Text("No thanks, enter app") }
+            // On applicable devices the label reflects the scary consequence.
+            OutlinedButton(onClick = onNo, modifier = Modifier.fillMaxWidth()) {
+                Text(if (advancedApplicable) "Skip (read-only mode)" else "No thanks, enter app")
+            }
         }
     }
 }
 
-/** Phase 3 — Step 1 of 2: turn ON Force SELinux. The app can't deep-link
- *  to the exact toggle, so this is a breadcrumb guide + manual confirm. */
+/**
+ * Phase 3 — Step 1 of 2: turn ON Force SELinux. The app can't deep-link
+ * to the exact toggle, so this is a breadcrumb guide + manual confirm.
+ *
+ * On applicable devices the "Skip this" button is REMOVED — trying to
+ * skip goes through [onSkip] which the parent maps to ScarySkipDialog.
+ */
 @Composable
 private fun AdvancedSelinuxStep(
     vendorName: String,
+    advancedApplicable: Boolean,
     selinuxDone: Boolean,
     onOpenVendor: () -> Unit,
     onConfirmed: () -> Unit,
@@ -767,19 +961,39 @@ private fun AdvancedSelinuxStep(
             OutlinedButton(onClick = onConfirmed, modifier = Modifier.fillMaxWidth()) {
                 Text(if (selinuxDone) "Continue" else "I turned it ON — continue")
             }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onSkip, modifier = Modifier.weight(1f)) { Text("Skip this — I'll do it later") }
-                TextButton(onClick = onEnterApp, modifier = Modifier.weight(1f)) { Text("Enter app") }
+            // On applicable devices: no silent "I'll do it later" — show the
+            // scary dialog instead so the user understands the consequence.
+            // On non-applicable: keep both escape buttons (they can't do this anyway).
+            if (advancedApplicable) {
+                TextButton(
+                    onClick = onSkip, // → ScarySkipDialog on applicable devices
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text("Skip (read-only mode)") }
+            } else {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onSkip, modifier = Modifier.weight(1f)) { Text("Skip this — I'll do it later") }
+                    TextButton(onClick = onEnterApp, modifier = Modifier.weight(1f)) { Text("Enter app") }
+                }
             }
         }
     }
 }
 
-/** Phase 4 — Step 2 of 2: generate + run the unlock script, with live
- *  grant detection. */
+/**
+ * Phase 4 — Step 2 of 2: generate + run the unlock script, with live
+ * grant detection.
+ *
+ * Auto-deploys the script on entry (so the user doesn't have to tap
+ * "Generate" manually — the file is ready the moment they see this screen).
+ * Also auto-opens the vendor settings runner if applicable.
+ */
 @Composable
 private fun AdvancedScriptStep(
     vendorName: String,
+    advancedApplicable: Boolean,
     grants: AdvancedPermissionsScript.Grants,
     onGenerate: () -> AdvancedPermissionsScript.Deployed,
     onOpenVendor: () -> Unit,
@@ -788,6 +1002,14 @@ private fun AdvancedScriptStep(
 ) {
     var deployed by remember { mutableStateOf<AdvancedPermissionsScript.Deployed?>(null) }
     val generated = deployed != null
+
+    // Auto-deploy the script the first time this composable is shown.
+    // This means the file is ready before the user even reads the instructions.
+    LaunchedEffect(Unit) {
+        if (deployed == null) {
+            deployed = runCatching { onGenerate() }.getOrNull()
+        }
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -835,7 +1057,7 @@ private fun AdvancedScriptStep(
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                NumberedStep(1, "Tap Generate script above — we save calibratesoc_unlock.sh to your CalibrateSoC folder.")
+                NumberedStep(1, "Script was auto-generated — look for calibratesoc_unlock.sh in your CalibrateSoC folder.")
                 NumberedStep(2, "Tap \"Open $vendorName\" below.", dimmed = !generated)
                 NumberedStep(3, "Find Run script as Root (often under a 'Root', 'Advanced', or 'Tools' menu).", dimmed = !generated)
                 NumberedStep(4, "In its file picker, browse to /CalibrateSoC/ and pick calibratesoc_unlock.sh.", dimmed = !generated)
@@ -861,7 +1083,15 @@ private fun AdvancedScriptStep(
                 enabled = generated,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Show me the script file") }
-            TextButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) { Text("Skip — enter app") }
+            // On applicable devices this routes through ScarySkipDialog;
+            // on non-applicable it directly enters the app.
+            TextButton(
+                onClick = onEnterApp,
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (advancedApplicable) ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ) else ButtonDefaults.textButtonColors(),
+            ) { Text(if (advancedApplicable) "Skip (read-only mode)" else "Skip — enter app") }
         }
     }
 }
@@ -887,7 +1117,7 @@ private fun AdvancedDoneStep(
                 modifier = Modifier.size(48.dp),
             )
             Text(
-                "Advanced unlock complete! 🎉",
+                "Advanced unlock complete!",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold,
             )

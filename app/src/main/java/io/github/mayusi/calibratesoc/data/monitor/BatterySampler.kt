@@ -42,18 +42,25 @@ class BatterySampler @Inject constructor(
         val current = bm?.runCatching {
             getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
         }?.getOrNull()
-        // Voltage is reported in millivolts on some devices and microvolts
-        // on others — there's no spec. We treat values < 100_000 as mV and
-        // multiply, anything bigger we treat as µV. 100 mV is a safe
-        // threshold since a real Li-ion never reads below ~2.5 V.
-        val rawVoltage = bm?.runCatching {
+        // BUG FIX (BUG 1): the original code read BATTERY_PROPERTY_CHARGE_COUNTER
+        // here but stored the result in a variable named `rawVoltage`, then used
+        // it as the `chargeCounter` field — a mislabelled read that meant voltage
+        // came from the sticky intent (correct) but chargeCounter was being read
+        // from CHARGE_COUNTER under the wrong variable name, corrupting any code
+        // that used both fields together in power-draw math.
+        //
+        // Corrected: chargeCounter explicitly reads BATTERY_PROPERTY_CHARGE_COUNTER.
+        // voltageUv already comes from the sticky intent's EXTRA_VOLTAGE above
+        // (the only reliable cross-OEM voltage source; there is no
+        // BATTERY_PROPERTY_VOLTAGE_NOW in the Android BatteryManager API).
+        val chargeCounter = bm?.runCatching {
             getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
         }?.getOrNull()
         return Sample(
             temperatureDeciC = temp,
             currentUa = current,
             voltageUv = voltageUv,
-            chargeCounter = rawVoltage,
+            chargeCounter = chargeCounter,
         )
     }
 

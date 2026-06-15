@@ -1,13 +1,17 @@
 package io.github.mayusi.calibratesoc.data.tunables
 
+import android.util.Log
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import io.github.mayusi.calibratesoc.data.tunables.writer.RootWriter
 import io.github.mayusi.calibratesoc.data.tunables.writer.WriteProtocol
 import io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private const val TAG = "TunableWriter"
 
 /**
  * The ONLY entry point for performing a tunable write in this app. Every
@@ -37,6 +41,7 @@ class TunableWriter @Inject constructor(
     private val snapshotStore: TunableSnapshotStore,
     private val deviceAdapterRegistry: DeviceAdapterRegistry,
     private val rootWriter: RootWriter,
+    private val pServerWriter: PServerWriter,
 ) {
 
     suspend fun write(
@@ -56,17 +61,42 @@ class TunableWriter @Inject constructor(
             ),
         )
 
-        // On Root tier, give the per-device adapter a chance to dictate
-        // the write protocol (stop daemons, chmod-lock). Adapters that
-        // don't declare any are no-ops and we fall through to the
-        // generic path. This is what makes AYN Odin 3 underclocks sticky
-        // against perfd / vendor.perf-hal-* races.
+        // On Root or PServer tier, give the per-device adapter a chance to
+        // dictate the write protocol (stop daemons, chmod-lock). Adapters that
+        // don't declare any are no-ops and we fall through to the generic path.
+        // This is what makes AYN Odin 3 underclocks sticky against
+        // perfd / vendor.perf-hal-* races.
+        //
+        // BUG FIX (BUG 3): previously only rootWriter received the protocol;
+        // PServerWriter also performs chmod+write and the vendor daemons race
+        // against it on PServer-LIVE tier just as they do on Root tier.
+        // We now dispatch protocol.pre/post via PServer's executeShell for the
+        // PServer case; the chmod sandwich is already baked into writeSysfs so
+        // we only need the daemon stop/start hooks from the protocol.
         val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
         val protocol = adapter?.let { writeProtocolFor(it, id) } ?: WriteProtocol.NONE
-        return if (writer === rootWriter && protocol != WriteProtocol.NONE) {
-            rootWriter.writeWithProtocol(id, value, protocol)
-        } else {
-            writer.write(id, value)
+        return when {
+            writer === rootWriter && protocol != WriteProtocol.NONE ->
+                rootWriter.writeWithProtocol(id, value, protocol)
+            writer === pServerWriter && protocol != WriteProtocol.NONE -> {
+                // Run pre-hooks (daemon stop) through PServer before the write.
+                for (cmd in protocol.pre) {
+                    val result = pServerWriter.executeShell(cmd)
+                    if (result == null) {
+                        Log.w(TAG, "write(): PServer pre-hook '$cmd' returned null (circuit-breaker or binder gone)")
+                    }
+                }
+                val writeResult = writer.write(id, value)
+                // Run post-hooks (daemon start) regardless of write result.
+                for (cmd in protocol.post) {
+                    val result = pServerWriter.executeShell(cmd)
+                    if (result == null) {
+                        Log.w(TAG, "write(): PServer post-hook '$cmd' returned null")
+                    }
+                }
+                writeResult
+            }
+            else -> writer.write(id, value)
         }
     }
 
@@ -115,6 +145,13 @@ class TunableWriter @Inject constructor(
             }
             when (writer.write(entry.id, prev)) {
                 is WriteResult.Success -> ok++
+                // CapabilityDenied means the current privilege tier cannot write
+                // this tunable at all (e.g. rebooted from ROOT → AYN_SETTINGS
+                // tier). The sysfs value is unchanged — nothing was reverted but
+                // nothing was made worse either. Treat as a skip (counts toward
+                // ok) so the journal can still be cleared and the revert loop
+                // terminates rather than looping forever on every boot.
+                is WriteResult.CapabilityDenied -> ok++
                 else -> failed++
             }
         }

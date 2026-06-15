@@ -21,4 +21,16 @@ class OnboardingViewModel @Inject constructor(
     fun markComplete() {
         viewModelScope.launch { userPrefs.setOnboardingComplete(true) }
     }
+
+    /**
+     * Record whether the user confirmed the "Skip — read-only" scary dialog
+     * on an applicable (AYN/vendor-runner) device.
+     *
+     * Pass true when the user confirms the full-screen ScarySkipDialog.
+     * Pass false when they complete the advanced setup (so gated-feature
+     * re-surface logic knows they did it properly).
+     */
+    fun setAdvancedSetupSkipped(skipped: Boolean) {
+        viewModelScope.launch { userPrefs.setAdvancedSetupSkipped(skipped) }
+    }
 }

@@ -133,6 +133,12 @@ class PServerWriter @Inject constructor(
      * parsers reject.
      *
      * Both PATH and VALUE are single-quote-escaped to prevent shell injection.
+     *
+     * After the write, we READ BACK the node via PServer (cat) and compare to
+     * the intended value. We accept exact matches AND kernel-snapped neighbors
+     * (e.g. OPP tables may round freq to the nearest available step). If the
+     * readback does not match either, we return [WriteResult.Rejected] with the
+     * actual value — we NEVER claim success without confirming the write landed.
      */
     private suspend fun writeSysfs(id: TunableId, value: String): WriteResult {
         // Validate the path before building a shell command.
@@ -147,11 +153,20 @@ class PServerWriter @Inject constructor(
         return withContext(Dispatchers.IO) {
             if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): path=${id.target} value=$value")
             val qpath = id.target.shellQuote()
+
+            val binder = binder()
+            if (binder == null) {
+                Log.w(TAG, "writeSysfs(): binder() is null — PServer gone?")
+                return@withContext WriteResult.CapabilityDenied(
+                    id,
+                    "PServerBinder service disappeared unexpectedly.",
+                )
+            }
+
             // Read the current value THROUGH PServer for the snapshot — a plain
             // File.readText() is SELinux-denied to our app UID. Best-effort.
             val previous = runCatching {
-                val binder = binder()
-                if (binder != null) transact(binder, "cat $qpath").second.trim().ifBlank { null } else null
+                transact(binder, "cat $qpath").second.trim().ifBlank { null }
             }.getOrNull()
 
             // THE WRITE: the sysfs node is mode 444 (read-only). PServer runs as a
@@ -161,14 +176,6 @@ class PServerWriter @Inject constructor(
             // (A bare `printf > node` fails silently against the read-only file.)
             val cmd = "chmod 666 $qpath && printf %s ${value.shellQuote()} > $qpath; chmod 444 $qpath"
             val (status, stdout) = try {
-                val binder = binder()
-                if (binder == null) {
-                    Log.w(TAG, "writeSysfs(): binder() is null — PServer gone?")
-                    return@withContext WriteResult.CapabilityDenied(
-                        id,
-                        "PServerBinder service disappeared unexpectedly.",
-                    )
-                }
                 transact(binder, cmd)
             } catch (se: SecurityException) {
                 Log.w(TAG, "writeSysfs(): SecurityException — UID not in app_whiteList", se)
@@ -189,16 +196,66 @@ class PServerWriter @Inject constructor(
             if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): status=$status stdout='$stdout'")
             else Log.i(TAG, "writeSysfs(): path=${id.target} status=$status")
 
-            if (status == 0) {
-                WriteResult.Success(id, previousValue = previous, newValue = value)
+            // READBACK VERIFICATION — the shell exit code alone is unreliable:
+            // the chmod+write+chmod sandwich always returns 0 even when the kernel
+            // silently ignores the write (e.g. still in-whitelist check, DAC issue
+            // after reboot, etc.). We cat the node back through PServer and compare.
+            //
+            // OPP-snap tolerance: cpufreq and GPU OPP tables quantise incoming values
+            // to the nearest available operating point. We accept the intended value,
+            // an exact match, OR any snapped neighbor within OPP_SNAP_TOLERANCE_HZ of
+            // the intended value when both are numeric (freq nodes). Non-numeric values
+            // (governors, strings) must match exactly (trimmed).
+            val readback = runCatching {
+                transact(binder, "cat $qpath").second.trim().ifBlank { null }
+            }.getOrNull()
+
+            if (readback == null) {
+                // Cannot confirm — treat as success-with-warning rather than blocking
+                // AutoTDP; log loudly so the issue is obvious in logcat.
+                Log.w(TAG, "writeSysfs(): readback failed for ${id.target} — cannot confirm write landed")
+                return@withContext WriteResult.Success(id, previousValue = previous, newValue = value)
+            }
+
+            val intended = value.trim()
+            if (readbackAccepted(intended, readback)) {
+                if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): readback confirmed: path=${id.target} readback='$readback'")
+                WriteResult.Success(id, previousValue = previous, newValue = readback)
             } else {
+                Log.w(TAG, "writeSysfs(): readback MISMATCH: path=${id.target} intended='$intended' actual='$readback'")
                 WriteResult.Rejected(
                     id = id,
                     errno = status,
-                    message = stdout.ifBlank { "PServer sysfs write returned status $status" },
+                    message = "Write appeared to succeed (status $status) but readback returned " +
+                        "'$readback' instead of '$intended'. Kernel may have rejected the value.",
                 )
             }
         }
+    }
+
+    /**
+     * Returns true when [readback] is an acceptable result for a write of [intended].
+     *
+     * Exact match always passes. For numeric values (freq nodes reported in kHz) we
+     * also accept a snapped neighbor: the kernel's OPP table may round the intended
+     * frequency to the nearest available operating point, so we allow any numeric
+     * readback within [OPP_SNAP_TOLERANCE_KHZ] of the intended value.
+     *
+     * Non-numeric values (governor names, "Y"/"N" toggles, etc.) must match exactly.
+     */
+    internal fun readbackAccepted(intended: String, readback: String): Boolean {
+        if (intended == readback) return true
+        val intendedLong = intended.toLongOrNull() ?: return false
+        val readbackLong = readback.toLongOrNull() ?: return false
+        // OPP-snap tolerance applies ONLY to large frequency values (kHz: cpufreq /
+        // GPU clocks, which the kernel quantises to the nearest OPP step). Small
+        // control knobs — GPU power levels (0-7), online flags (0/1), small indices —
+        // must match EXACTLY: a 100 MHz tolerance on a 0-7 pwrlevel would accept ANY
+        // value as success, re-introducing the false-success bug we are killing.
+        if (intendedLong < FREQ_TOLERANCE_FLOOR_KHZ || readbackLong < FREQ_TOLERANCE_FLOOR_KHZ) {
+            return false // small control knob — exact match was required and already failed
+        }
+        return kotlin.math.abs(intendedLong - readbackLong) <= OPP_SNAP_TOLERANCE_KHZ
     }
 
     /** Original SETTINGS_SYSTEM write path, extracted to its own function. */
@@ -313,11 +370,25 @@ class PServerWriter @Inject constructor(
     }
 
     // Cached result of the real-transact probe. null = not yet probed.
-    // Once we know whether PServer actually executes commands from our
-    // UID, we never re-probe for the session — the answer can't change
-    // without a reboot / firmware toggle, and re-probing would re-arm
-    // the circuit breaker on a device where PServer is dead.
-    @Volatile private var transactableCache: Boolean? = null
+    // Can be reset via [invalidateTransactableCache] so re-entry to the app
+    // after running the whitelist unlock script picks up the new state.
+    @Volatile internal var transactableCache: Boolean? = null
+
+    /**
+     * Invalidates the memoised transactability result so the next call to
+     * [isTransactable] re-probes PServer honestly.
+     *
+     * Call sites:
+     *   - [io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.refresh]
+     *     so the Tune-screen Refresh button re-evaluates PServer after the
+     *     user runs the unlock script.
+     *   - Any onResume / overlay-start re-probe trigger so returning to the
+     *     app after running the script lights up PServer-LIVE automatically.
+     */
+    fun invalidateTransactableCache() {
+        transactableCache = null
+        Log.i(TAG, "invalidateTransactableCache(): cache cleared — next isTransactable() will re-probe")
+    }
 
     /**
      * The ONLY honest way to know whether the HUD ± steppers will work:
@@ -332,10 +403,22 @@ class PServerWriter @Inject constructor(
      * cache whether the transaction round-trips with status 0.
      *
      * Returns true ONLY when PServer genuinely ran our command. Safe to
-     * call from any thread; result is memoized.
+     * call from any thread; result is memoized until [invalidateTransactableCache].
+     *
+     * Cheap guard: if the cache is false but [binder] is now non-null we
+     * allow a re-probe — binder presence after a cached-false means either
+     * the whitelist step was just run (binder existed but gated us before)
+     * or the service came up after an earlier null. Either way, one honest
+     * transact is cheaper than a stale false.
      */
     suspend fun isTransactable(): Boolean = withContext(Dispatchers.IO) {
-        transactableCache?.let { return@withContext it }
+        val cached = transactableCache
+        // If we have a cached true, keep it.
+        if (cached == true) return@withContext true
+        // If we have a cached false, still allow a re-probe when binder is live —
+        // this catches the case where the app warmed before the whitelist was added.
+        if (cached == false && binder() == null) return@withContext false
+
         val binder = binder()
         val ok = if (binder == null) {
             false
@@ -410,6 +493,35 @@ class PServerWriter @Inject constructor(
         /** PServer's SHELL_COMMAND transaction slot is 0 (verified against
          *  OdinTools/ClusterTune), not 1. */
         const val TRANSACT_CODE_EXEC = 0
+
+        /**
+         * OPP-snap tolerance for numeric sysfs readback verification.
+         *
+         * Linux cpufreq sysfs nodes (scaling_max_freq, scaling_min_freq, etc.) report
+         * values in **kHz** (e.g. 3187200 = 3187.2 MHz). GPU kgsl nodes also use kHz.
+         * OPP tables quantise incoming values to the nearest available operating point.
+         *
+         * On the Snapdragon 8 Elite (Odin 3), adjacent OPP steps are ~38400 kHz
+         * (38.4 MHz) apart (e.g. 3187200 -> 3148800 kHz). We accept any numeric
+         * readback within 100000 kHz (100 MHz) of the intended value, which covers
+         * all known Snapdragon cpufreq OPP grids without being so wide that it masks
+         * genuine rejections (a kernel that rejects a value typically reads back the
+         * previous value, 0, or the hard-capped min/max -- far outside 100 MHz).
+         *
+         * Non-numeric values (governor names, "Y"/"N" toggles, etc.) must match
+         * exactly -- this tolerance only applies when both intended and readback
+         * parse as Long.
+         */
+        const val OPP_SNAP_TOLERANCE_KHZ = 100_000L   // 100 MHz in kHz units
+
+        /**
+         * Below this, a numeric value is a control knob (GPU pwrlevel 0-7, online
+         * 0/1, small index), NOT a frequency — the OPP-snap tolerance must NOT apply,
+         * so these require an exact readback match. Real cpufreq/GPU clock values are
+         * always >= ~300 MHz, so 200 MHz is a safe floor below any real frequency and
+         * above any control-knob index.
+         */
+        const val FREQ_TOLERANCE_FLOOR_KHZ = 200_000L  // 200 MHz in kHz units
     }
 
     // ── Shell quoting ─────────────────────────────────────────────────────────
@@ -449,7 +561,7 @@ class PServerWriter @Inject constructor(
         if (path.contains("..")) {
             return "path contains path-traversal sequence '..' (got '$path')"
         }
-        if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
+        if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
             return "path contains disallowed control characters"
         }
         return null

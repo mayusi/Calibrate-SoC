@@ -1,12 +1,15 @@
 package io.github.mayusi.calibratesoc.data.profiles
 
 import android.content.Context
+import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -15,6 +18,8 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private const val TAG = "ProfileRepository"
 
 /**
  * File-backed user-profile store. One JSON document atomically
@@ -34,12 +39,23 @@ class ProfileRepository @Inject constructor(
     private val json: Json,
 ) {
     private val file: File = File(context.filesDir, FILE_NAME)
+    private val bakFile: File = File(context.filesDir, "$FILE_NAME.bak")
     private val mutex = Mutex()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val _store = MutableStateFlow(loadBlocking())
+    // BUG FIX (BUG 6): previously called loadBlocking() (runBlocking) directly
+    // from the field initializer during Hilt singleton construction, blocking
+    // the main thread and causing jank / potential ANR on first launch when the
+    // file has grown (many profiles). Fixed by initialising with an empty store
+    // and loading asynchronously in the init block.
+    private val _store = MutableStateFlow(ProfileStore())
     val store: Flow<ProfileStore> = _store.asStateFlow()
 
     fun snapshot(): ProfileStore = _store.value
+
+    init {
+        scope.launch { _store.value = loadFromDisk() }
+    }
 
     suspend fun saveProfile(profile: UserProfile) = mutex.withLock {
         withContext(Dispatchers.IO) {
@@ -79,26 +95,48 @@ class ProfileRepository @Inject constructor(
     private fun persist(next: ProfileStore) {
         val tmp = File(context.filesDir, "$FILE_NAME.tmp")
         tmp.writeText(json.encodeToString(next))
-        // Atomic on POSIX. Keeps the file from ever appearing
-        // half-written to a concurrent reader.
+        // Write a .bak of the current live file BEFORE overwriting it, so we
+        // have a recovery copy if the rename/copy step is interrupted.
+        if (file.exists()) {
+            runCatching { file.copyTo(bakFile, overwrite = true) }
+        }
+        // Atomic on POSIX. Keeps the file from ever appearing half-written
+        // to a concurrent reader (BootRevertReceiver, ProfileApplier).
         if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
-            tmp.delete()
+            // renameTo failed (e.g. cross-filesystem move). Fall back to copy +
+            // delete, but guarantee the temp file is removed even if copyTo throws.
+            try {
+                tmp.copyTo(file, overwrite = true)
+            } finally {
+                tmp.delete()
+            }
         }
         _store.value = next
     }
 
-    /** Read the store eagerly at construction so first-frame UI doesn't
-     *  see a brief empty state. runBlocking is fine on Hilt singleton
-     *  construction — Application is on the main thread but the file
-     *  is tiny (<5 KB). */
-    private fun loadBlocking(): ProfileStore = runBlocking {
-        withContext(Dispatchers.IO) {
-            runCatching {
-                if (!file.exists()) ProfileStore()
-                else json.decodeFromString<ProfileStore>(file.readText())
-            }.getOrElse { ProfileStore() }
+    private suspend fun loadFromDisk(): ProfileStore = withContext(Dispatchers.IO) {
+        // Try the primary file first.
+        val primary = runCatching {
+            if (!file.exists()) null
+            else json.decodeFromString<ProfileStore>(file.readText())
+        }.getOrNull()
+        if (primary != null) return@withContext primary
+
+        // Primary missing or corrupt — attempt restore from .bak.
+        if (bakFile.exists()) {
+            Log.w(TAG, "loadFromDisk(): primary file missing/corrupt — trying .bak")
+            val backup = runCatching {
+                json.decodeFromString<ProfileStore>(bakFile.readText())
+            }.getOrNull()
+            if (backup != null) {
+                Log.w(TAG, "loadFromDisk(): restored from .bak successfully")
+                // Restore bak → primary so the next persist works correctly.
+                runCatching { bakFile.copyTo(file, overwrite = true) }
+                return@withContext backup
+            }
+            Log.e(TAG, "loadFromDisk(): .bak also corrupt — starting fresh")
         }
+        ProfileStore()
     }
 
     private companion object {

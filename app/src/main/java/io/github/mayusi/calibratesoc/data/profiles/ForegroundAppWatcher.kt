@@ -1,16 +1,21 @@
 package io.github.mayusi.calibratesoc.data.profiles
 
 import android.accessibilityservice.AccessibilityService
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
+import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+
+private const val TAG = "ForegroundAppWatcher"
 
 /**
  * AccessibilityService that fires TYPE_WINDOW_STATE_CHANGED whenever
@@ -40,6 +45,10 @@ class ForegroundAppWatcher : AccessibilityService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundPackage: String? = null
     private var inFlight: Job? = null
+    // True once the in-flight job has entered the write phase (after snapshot,
+    // before write completes). Cancelling mid-write would leave an orphaned
+    // snapshot journal entry with no matching write, corrupting boot-revert.
+    private val inFlightWriting = AtomicBoolean(false)
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -53,13 +62,40 @@ class ForegroundAppWatcher : AccessibilityService() {
     }
 
     private fun scheduleApply(pkg: String) {
+        // BUG FIX (BUG 5): only cancel a pending job if it has NOT yet entered
+        // the write phase. Cancelling mid-write (between snapshot and write in
+        // TunableWriter) orphans a snapshot journal entry — the snapshot is
+        // recorded but the write is never attempted, so boot-revert will try
+        // to revert a value we never actually changed. Let a writing job finish.
+        if (inFlightWriting.get()) {
+            // The previous job is actively writing; let it complete and drop
+            // the new apply request. The app will reapply on the next genuine
+            // foreground switch.
+            Log.d(TAG, "scheduleApply($pkg): previous job is writing — skipping cancel")
+            return
+        }
         inFlight?.cancel()
+        inFlightWriting.set(false)
         inFlight = scope.launch {
             val store = profileRepository.snapshot()
             val profileId = store.perAppOverrides[pkg] ?: return@launch
             val profile = store.profiles.firstOrNull { it.id == profileId } ?: return@launch
             val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
-            profileApplier.apply(profile.toPreset(), report, reason = "per-app: $pkg")
+            // Mark write phase BEFORE calling apply so any concurrent
+            // foreground switch sees the flag and doesn't cancel us.
+            inFlightWriting.set(true)
+            val results = try {
+                profileApplier.apply(profile.toPreset(), report, reason = "per-app: $pkg")
+            } finally {
+                inFlightWriting.set(false)
+            }
+            // BUG FIX (BUG 5): log/surface total write failures rather than
+            // silently swallowing them.
+            val failures = results.filterNot { it is WriteResult.Success || it is WriteResult.CapabilityDenied }
+            if (failures.isNotEmpty()) {
+                Log.w(TAG, "scheduleApply($pkg): ${failures.size}/${results.size} writes failed — " +
+                    failures.joinToString { r -> "${r.id.target}: ${r::class.simpleName}" })
+            }
         }
     }
 

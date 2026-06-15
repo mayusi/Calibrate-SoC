@@ -7,11 +7,23 @@ package io.github.mayusi.calibratesoc.data.monitor
  *
  * Missing data is represented with empty lists / nulls rather than
  * sentinels so the UI can render "—" instead of a wrong number.
+ *
+ * ## cpuLoadSource
+ *
+ * [cpuLoadSource] indicates how [perCoreLoadPct] was obtained. When it is
+ * [CpuLoadReading.Source.FREQ_PROXY] the values are a frequency-ratio
+ * approximation, not true jiffie-based utilisation. The HUD renders a "~"
+ * prefix and AutoTDP applies a more conservative saturation threshold.
+ * When it is [CpuLoadReading.Source.UNAVAILABLE], [perCoreLoadPct] is empty
+ * and the engine holds without acting on phantom zeros.
  */
 data class Telemetry(
     val timestampMs: Long,
     val perCoreCpuFreqKhz: List<Int>,
     val perCoreLoadPct: List<Int>,
+    /** How [perCoreLoadPct] was obtained. Default is UNAVAILABLE for callers
+     *  (tests, benchmarks) that construct Telemetry without a real load source. */
+    val cpuLoadSource: CpuLoadReading.Source = CpuLoadReading.Source.UNAVAILABLE,
     val gpuLoadPct: Int?,
     val gpuFreqHz: Long?,
     val zoneTempsMilliC: List<ZoneTemp>,
@@ -42,3 +54,9 @@ val Telemetry.batteryDrawMilliW: Long?
         val absUa = if (ua < 0) -ua else ua
         return (absUa * uv) / 1_000_000_000L
     }
+
+/** True when [perCoreLoadPct] values came from a real /proc/stat read
+ *  (either root or direct). False for freq-proxy or unavailable. */
+val Telemetry.hasTrueLoadData: Boolean
+    get() = cpuLoadSource == CpuLoadReading.Source.ROOT_PROC_STAT ||
+            cpuLoadSource == CpuLoadReading.Source.DIRECT_PROC_STAT

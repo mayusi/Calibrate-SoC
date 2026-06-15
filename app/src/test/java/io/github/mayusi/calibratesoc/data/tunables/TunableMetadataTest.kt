@@ -213,7 +213,7 @@ class TunableMetadataTest {
     @Test
     fun `custom sysfs path rejects real NUL byte in path`() {
         // A path containing an actual NUL character (code point 0) must be rejected.
-        val pathWithNul = "/sys/block/sda" + ' ' + "evil"
+        val pathWithNul = "/sys/block/sda" + ' ' + "evil"
         assertThat(TunableMetadata.validateCustomSysfsPath(pathWithNul)).isNotNull()
     }
 
@@ -278,7 +278,7 @@ class TunableMetadataTest {
     @Test
     fun `custom sysfs path rejects NUL byte`() {
         // NUL is the classic string-terminator injection.
-        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda evil")).isNotNull()
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/block/sda evil")).isNotNull()
     }
 
     @Test

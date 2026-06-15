@@ -2,11 +2,13 @@ package io.github.mayusi.calibratesoc.data.tunables
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -36,9 +38,20 @@ class TuneHistoryStore @Inject constructor(
 ) {
     private val file: File by lazy { File(context.filesDir, FILE_NAME) }
     private val mutex = Mutex()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val _entries = MutableStateFlow(loadBlocking())
+    // BUG FIX (BUG 6): previously called loadBlocking() (runBlocking) directly
+    // from the field initializer during Hilt singleton construction, blocking
+    // the main thread and causing jank / potential ANR. Fixed by initialising
+    // with an empty list and loading asynchronously in the init block.
+    private val _entries = MutableStateFlow<List<TuneHistoryEntry>>(emptyList())
     val entries: Flow<List<TuneHistoryEntry>> = _entries.asStateFlow()
+
+    init {
+        scope.launch {
+            _entries.value = loadFromDisk()
+        }
+    }
 
     suspend fun append(entry: TuneHistoryEntry) = mutex.withLock {
         withContext(Dispatchers.IO) {
@@ -78,13 +91,11 @@ class TuneHistoryStore @Inject constructor(
         _entries.value = next
     }
 
-    private fun loadBlocking(): List<TuneHistoryEntry> = runBlocking {
-        withContext(Dispatchers.IO) {
-            runCatching {
-                if (!file.exists()) emptyList()
-                else json.decodeFromString<TuneHistory>(file.readText()).entries
-            }.getOrElse { emptyList() }
-        }
+    private suspend fun loadFromDisk(): List<TuneHistoryEntry> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (!file.exists()) emptyList()
+            else json.decodeFromString<TuneHistory>(file.readText()).entries
+        }.getOrElse { emptyList() }
     }
 
     private companion object {

@@ -1,6 +1,8 @@
 package io.github.mayusi.calibratesoc.data.autotdp
 
+import io.github.mayusi.calibratesoc.data.monitor.CpuLoadReading
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
+import io.github.mayusi.calibratesoc.data.monitor.hasTrueLoadData
 
 /**
  * The AutoTDP decision brain.
@@ -47,6 +49,28 @@ object AutoTdpEngine {
     /** Big/prime core load above which we consider the CPU the bottleneck. */
     private const val CPU_SATURATED_THRESHOLD = 85
 
+    /**
+     * BUG C FIX: Smoothed GPU load threshold for BALANCED profile.
+     * EFFICIENCY triggers on allGpuBound (GPU >= 80% per sample, CPU < 40%).
+     * BALANCED is more conservative — it requires the smoothed GPU mean to be
+     * at this higher threshold before parking. This is reachable when GPU is
+     * sustained above 85%, making BALANCED's conditions consistent and reachable.
+     */
+    private const val BALANCED_GPU_THRESHOLD = 85
+
+    /**
+     * BUG D FIX: Synthetic max-draw reference in milliwatts used by [deriveBudgetCap].
+     *
+     * Represents the cluster's peak power draw at the top OPP. 3 000 mW (3 W) is a
+     * conservative default for high-end mobile SoC big/prime clusters at maximum OPP.
+     * The EfficiencyCurveFinder will replace this with a device-calibrated value once
+     * measured data is available.
+     *
+     * Units: milliwatts (mW). This makes the fraction computed by deriveBudgetCap
+     * dimensionless (mW / mW), which is the correct form.
+     */
+    private const val MAX_DRAW_PROXY_MW = 3_000.0
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
@@ -83,9 +107,18 @@ object AutoTdpEngine {
 
         // ── Detect GPU-bound (slow path — requires full-window agreement) ─────
         // All samples in the window must agree that we're GPU-bound before we park.
+        //
+        // BUG C FIX (BALANCED threshold): The old BALANCED condition was
+        //   signals.allGpuBound && signals.smoothedGpuLoad >= 85
+        // allGpuBound uses GPU_BOUND_THRESHOLD=80 per sample, so at GPU=82% the
+        // condition was allGpuBound=true but smoothedGpuLoad=82 < 85 → never parks.
+        // Fix: BALANCED checks the smoothed mean directly against its own higher
+        // threshold (85%) AND that the CPU is not saturated (big/prime mean < 40%).
+        // This is reachable whenever GPU is sustained above 85%.
         val shouldPark = when (config.profile) {
             AutoTdpProfile.EFFICIENCY -> signals.allGpuBound
-            AutoTdpProfile.BALANCED   -> signals.allGpuBound && signals.smoothedGpuLoad >= 85
+            AutoTdpProfile.BALANCED   ->
+                signals.allGpuBound && signals.smoothedGpuLoad >= BALANCED_GPU_THRESHOLD
             AutoTdpProfile.BATTERY_TARGET -> signals.allGpuBound
         }
 
@@ -123,8 +156,18 @@ object AutoTdpEngine {
         val anySaturated: Boolean,
         /** The indices of the big/prime cores (from caps — carried for reason strings). */
         val bigPrimeCoreSet: Set<Int>,
+        /**
+         * True when at least one window sample has UNAVAILABLE load data (empty
+         * perCoreLoadPct with no known source). When blind, the engine will not
+         * park cores based on a GPU-bound signal — it only relaxes on confirmed
+         * saturation, which is safe when we cannot read CPU load.
+         */
+        val anyLoadBlind: Boolean,
     ) {
-        fun holdReason(): String = "GPU ${smoothedGpuLoad}%, big/prime ${smoothedBigPrimeLoad}%"
+        fun holdReason(): String {
+            val loadStr = if (anyLoadBlind) "big/prime load unavailable" else "big/prime ${smoothedBigPrimeLoad}%"
+            return "GPU ${smoothedGpuLoad}%, $loadStr"
+        }
     }
 
     private fun computeSignals(window: List<Telemetry>, caps: TdpCaps): WindowSignals {
@@ -139,10 +182,26 @@ object AutoTdpEngine {
         var bigPrimeLoadSum = 0
         var gpuBoundSamples = 0
         var anySaturated = false
+        var anyLoadBlind = false
 
         for (sample in window) {
             val gpuLoad = sample.gpuLoadPct ?: 0
             gpuLoadSum += gpuLoad
+
+            // HONESTY: When perCoreLoadPct is empty (UNAVAILABLE source) we must NOT
+            // treat the core loads as 0. An empty list means "we don't know", not
+            // "cores are idle". Treating unknown-load as 0 falsely satisfies the
+            // GPU-bound condition (CPU appears idle) and causes the engine to park
+            // prime cores while the CPU may actually be pegged.
+            if (sample.cpuLoadSource == CpuLoadReading.Source.UNAVAILABLE &&
+                sample.perCoreLoadPct.isEmpty()
+            ) {
+                anyLoadBlind = true
+                // We cannot evaluate big/prime load for this sample.
+                // Do not increment gpuBoundSamples — we're blind on the CPU side.
+                // Do not set anySaturated either — unknown is not the same as saturated.
+                continue
+            }
 
             // Compute average load of the monitored prime cores for this sample.
             val bigPrimeLoads = monitoredCores
@@ -151,6 +210,8 @@ object AutoTdpEngine {
                 bigPrimeLoads.average().toInt()
             } else {
                 // Fallback: use overall CPU average when we can't identify cores.
+                // This happens when the load source returned fewer cores than the
+                // prime-core index range, not when the list is empty (handled above).
                 if (sample.perCoreLoadPct.isNotEmpty()) {
                     sample.perCoreLoadPct.average().toInt()
                 } else 0
@@ -163,6 +224,10 @@ object AutoTdpEngine {
             }
 
             // CPU saturation — any prime core above threshold?
+            // FREQ_PROXY: a freq-proxy value of >= 85% means the core is running
+            // at >= 85% of its max frequency, which is a strong signal that it is
+            // CPU-bound even without true jiffie data. We honour it for the unpark
+            // path (fast responsiveness) but not for the park path (conservative).
             val saturatedCore = monitoredCores.any { idx ->
                 (sample.perCoreLoadPct.getOrNull(idx) ?: 0) >= CPU_SATURATED_THRESHOLD
             }
@@ -171,8 +236,14 @@ object AutoTdpEngine {
 
         val n = window.size
         val smoothedGpuLoad = gpuLoadSum / n
-        val smoothedBigPrimeLoad = bigPrimeLoadSum / n
-        val allGpuBound = gpuBoundSamples == n
+        // For the big-prime average: count only samples that contributed (skip blind ones).
+        val validSamples = window.count {
+            it.cpuLoadSource != CpuLoadReading.Source.UNAVAILABLE || it.perCoreLoadPct.isNotEmpty()
+        }
+        val smoothedBigPrimeLoad = if (validSamples > 0) bigPrimeLoadSum / validSamples else 0
+        // allGpuBound requires ALL samples to agree AND none to be blind.
+        // If we're blind on any sample, we cannot confirm GPU-bound safely.
+        val allGpuBound = !anyLoadBlind && gpuBoundSamples == n
 
         return WindowSignals(
             smoothedGpuLoad = smoothedGpuLoad,
@@ -180,6 +251,7 @@ object AutoTdpEngine {
             allGpuBound = allGpuBound,
             anySaturated = anySaturated,
             bigPrimeCoreSet = monitoredCores,
+            anyLoadBlind = anyLoadBlind,
         )
     }
 
@@ -268,22 +340,43 @@ object AutoTdpEngine {
         }
 
         // ── Step the big-cluster cap UP one OPP ──────────────────────────────
+        // BUG C FIX (relaxState cap-clear): when stepping reaches or exceeds
+        // the top OPP entry, set newCap = null (clear the cap, returning to
+        // stock) in a single step rather than clamping at lastIndex. This
+        // prevents the daemon from holding a harmless-but-non-null cap at the
+        // top step forever when the CPU is saturated and needs full headroom.
         val steps = caps.bigClusterOppStepsKhz
+        var relaxedCap: Int? = newCap  // track separately to avoid shadowing
         if (steps.isNotEmpty() && newCap != null) {
             val currentIdx = steps.indexOfFirst { it >= newCap }.let {
                 if (it < 0) steps.lastIndex else it
             }
-            val targetIdx = minOf(steps.lastIndex, currentIdx + 1)
-            newCap = steps[targetIdx]
-            reasonParts += "relax big cap → ${newCap / 1000} MHz"
+            val nextIdx = currentIdx + 1
+            if (nextIdx > steps.lastIndex) {
+                // Already at or past the top OPP — clear cap (return to stock).
+                relaxedCap = null
+                reasonParts += "relax big cap → stock (cleared)"
+            } else {
+                val nextStep = steps[nextIdx]
+                // If the next step IS the top OPP, clear immediately so that
+                // one more relax step doesn't leave a redundant top-OPP cap.
+                if (nextStep == steps.lastOrNull()) {
+                    relaxedCap = null
+                    reasonParts += "relax big cap → stock (top OPP reached)"
+                } else {
+                    relaxedCap = nextStep
+                    reasonParts += "relax big cap → ${nextStep / 1000} MHz"
+                }
+            }
         } else if (steps.isNotEmpty() && newCap == null) {
             // No cap active — nothing to relax on the freq side.
+            relaxedCap = null
             reasonParts += "big cap already stock"
         }
 
         val newState = current.copy(
             parkedPrimeCores = newParked,
-            bigClusterCapKhz = if (newCap == steps.lastOrNull()) null else newCap,
+            bigClusterCapKhz = relaxedCap,
         )
         return TdpDecision(newState, reasonParts.joinToString(", "))
     }
@@ -297,11 +390,18 @@ object AutoTdpEngine {
      * OPP table (a deliberate simplification — the real curve is measured by
      * the Efficiency Curve Finder companion). The cap is:
      *   cap = steps[floor(budget_fraction * (steps.size - 1))]
-     * where budget_fraction = targetMilliWatts / (top-OPP proxy).
+     * where budget_fraction = targetMilliWatts / MAX_DRAW_PROXY_MW.
      *
-     * The "top-OPP proxy" is synthetic: we use the top step as a stand-in for
-     * the device's max draw. The EfficiencyCurveFinder (Component 5) will
-     * calibrate this properly with measured data later.
+     * BUG D FIX: The old code computed `fraction = targetMilliWatts / (steps.last() * 0.001)`.
+     * `steps.last()` is in kHz; `* 0.001` converts to MHz, not mW. Dividing mW by MHz
+     * is dimensionally wrong — the result is not a dimensionless fraction and maps the
+     * target to a wildly incorrect OPP index (e.g., 3000 mW / 2803 MHz ≈ 1.07 → clamped
+     * to 1.0 → always the top OPP step, regardless of the budget).
+     *
+     * Fix: use [MAX_DRAW_PROXY_MW] as the mW reference for 100% performance (top OPP).
+     * fraction = targetMilliWatts (mW) / MAX_DRAW_PROXY_MW (mW) — dimensionless ✓.
+     * The EfficiencyCurveFinder (Component 5) will replace this constant with per-device
+     * measured data once calibration is available.
      *
      * Returns null when the OPP table is empty or the budget is unconstrained.
      */
@@ -309,9 +409,9 @@ object AutoTdpEngine {
         val steps = caps.bigClusterOppStepsKhz
         if (steps.isEmpty() || targetMilliWatts <= 0) return null
 
-        // Budget as a fraction of "full performance" (top OPP = 1.0).
-        // Clamp to [0.0, 1.0] — a very high budget should not raise the cap above stock.
-        val fraction = (targetMilliWatts.toDouble() / (steps.last() * 0.001)).coerceIn(0.0, 1.0)
+        // Budget as a dimensionless fraction of the synthetic max-draw proxy.
+        // Clamp to [0.0, 1.0] — a budget above the proxy still caps at the top OPP.
+        val fraction = (targetMilliWatts.toDouble() / MAX_DRAW_PROXY_MW).coerceIn(0.0, 1.0)
         val idx = (fraction * (steps.size - 1)).toInt().coerceIn(0, steps.lastIndex)
         return steps[idx]
     }

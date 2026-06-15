@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,7 +50,8 @@ import javax.inject.Inject
  *
  * SAFETY:
  *   - cpu0 is asserted-not-parked in [TdpStateTransition.delta] before every write.
- *   - Temperature kill: if any zone exceeds [TEMP_KILL_MILLI_C] we stop.
+ *   - Temperature kill: if any zone exceeds [ThermalKillEvaluator.KILL_THRESHOLD_MILLI_C]
+ *     for [ThermalKillEvaluator.REQUIRED_CONSECUTIVE] consecutive samples, we stop.
  *   - Battery kill: if [batteryDrawMilliW] shows charge below [BATTERY_KILL_PCT_APPROX]
  *     (approximated from current UA sign flip) we stop. Proper pct check needs
  *     BatteryManager — we use the sign flip as a conservative proxy.
@@ -170,6 +172,7 @@ class AutoTdpService : Service() {
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
+        val thermalKill = ThermalKillEvaluator()   // stateful: tracks consecutive over-threshold samples
 
         try {
             monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS).collect { sample ->
@@ -178,7 +181,7 @@ class AutoTdpService : Service() {
                 if (window.size > WINDOW_SIZE) window.removeFirst()
 
                 // ── Safety checks ──────────────────────────────────────────────
-                val tempKill = checkTempKill(sample)
+                val tempKill = thermalKill.evaluate(sample)
                 if (tempKill != null) {
                     Log.w(TAG, "Temp kill: $tempKill")
                     stopDaemon(AutoTdpStatus.KILLED_BY_SAFETY, killReason = tempKill)
@@ -200,6 +203,10 @@ class AutoTdpService : Service() {
                 )
 
                 // ── Apply delta ────────────────────────────────────────────────
+                // BUG E FIX (honest Applied): track at the tick level whether all ops
+                // succeeded. Declared outside the `if` block so displayReason can use it.
+                var allOpsSucceeded = true
+
                 if (decision.target != currentState) {
                     val ops = TdpStateTransition.delta(
                         from = currentState,
@@ -209,12 +216,11 @@ class AutoTdpService : Service() {
                     )
 
                     for (op in ops) {
-                        val result = tunableWriter.write(
-                            id = op.id,
-                            value = op.value,
-                            report = report,
-                            reason = "AutoTDP: ${op.description}",
-                        )
+                        // BUG A FIX: retry transient failures (Rejected / Failed) up to
+                        // WRITE_RETRY_ATTEMPTS times with WRITE_RETRY_DELAY_MS backoff before
+                        // giving up. CapabilityDenied is structural (no writer tier) and is
+                        // never retried — the daemon stops immediately and honestly on that.
+                        val result = writeWithRetry(op, report)
                         when (result) {
                             is WriteResult.Success -> {
                                 // Good — continue to next op.
@@ -229,33 +235,54 @@ class AutoTdpService : Service() {
                                 stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
                                 return@collect
                             }
-                            is WriteResult.Rejected,
+                            is WriteResult.Rejected -> {
+                                // Still rejected after all retries — transient became persistent
+                                // (e.g. governor is permanently protecting this OPP). Log it and
+                                // keep the daemon running; this op is skipped for this cycle.
+                                // The engine will try again next tick; if the condition clears
+                                // the write will succeed. We do NOT stop because a single
+                                // transient EBUSY from a governor that has since moved on should
+                                // not terminate the daemon session.
+                                Log.w(TAG, "Write still rejected after retries for ${op.description}: ${result.message}")
+                                allOpsSucceeded = false
+                                // Do not return@collect — skip this op, continue the loop.
+                            }
                             is WriteResult.Failed -> {
-                                // Rejected / Failed: the tier was tried (PServer or libsu) but
-                                // the write didn't land. This could be transient (binder hiccup,
-                                // EBUSY from a governor protecting an OPP). Log it and stop —
-                                // we don't retry here because re-trying a Rejected write in a
-                                // tight loop would spam logcat and potentially corrupt the clock
-                                // state. Stopping cleanly and letting the user restart is safer.
-                                val failure = "Write failed for ${op.description}: $result"
-                                Log.e(TAG, failure)
-                                stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
-                                return@collect
+                                // Unexpected failure (binder death, IO) after retries. Log it
+                                // and keep running; the next tick will try again. If the device
+                                // has entered a state where binder is permanently dead the
+                                // safety-kill path will handle shutdown through temp / battery.
+                                Log.w(TAG, "Write failed after retries for ${op.description}: ${result.error.message}")
+                                allOpsSucceeded = false
+                                // Do not return@collect — skip this op, continue the loop.
                             }
                         }
                     }
-                    currentState = decision.target
+                    // Only advance currentState when all ops succeeded (BUG E FIX).
+                    // If any op was skipped, currentState stays at the last fully-applied
+                    // state so the HUD shows the ACTUAL written state, not the intent.
+                    if (allOpsSucceeded) {
+                        currentState = decision.target
+                    }
                 }
 
-                Log.v(TAG, "decision: ${decision.reason}")
+                // BUG E FIX: show the actual applied state reason, not just the engine intent.
+                // If any ops were skipped (!allOpsSucceeded), tag the reason as partial
+                // so the HUD honestly reflects that not all writes landed this tick.
+                val displayReason = if (!allOpsSucceeded) {
+                    "${decision.reason} [partial — some writes skipped]"
+                } else {
+                    decision.reason
+                }
+                Log.v(TAG, "decision: $displayReason")
                 controller.updateState(
                     controller.state.value.copy(
                         status = AutoTdpStatus.RUNNING,
-                        lastReason = decision.reason,
+                        lastReason = displayReason,
                         appliedState = currentState,
                     )
                 )
-                updateNotification(status = "Running", detail = decision.reason)
+                updateNotification(status = "Running", detail = displayReason)
             }
         } finally {
             // ── Revert all writes (CRITICAL) ───────────────────────────────────
@@ -265,6 +292,49 @@ class AutoTdpService : Service() {
             // Update notification if service is still technically alive
             updateNotification(status = "Stopped", detail = "All writes reverted")
         }
+    }
+
+    /**
+     * BUG A FIX: Wraps [TunableWriter.write] with per-op retry for transient errors.
+     *
+     * Classification:
+     *  - [WriteResult.CapabilityDenied] → structural, no retry (no writer tier exists).
+     *  - [WriteResult.Rejected]         → transient (EBUSY, binder hiccup), retry up to
+     *                                     [WRITE_RETRY_ATTEMPTS] times with [WRITE_RETRY_DELAY_MS].
+     *  - [WriteResult.Failed]           → unexpected I/O / binder death, retry same policy.
+     *  - [WriteResult.Success]          → return immediately.
+     *
+     * If the final attempt is still Rejected/Failed the last result is returned to the
+     * caller which logs it and skips the op (daemon keeps running).
+     */
+    private suspend fun writeWithRetry(
+        op: TdpStateTransition.WriteOp,
+        report: CapabilityReport,
+    ): WriteResult {
+        var lastResult: WriteResult = tunableWriter.write(
+            id = op.id,
+            value = op.value,
+            report = report,
+            reason = "AutoTDP: ${op.description}",
+        )
+        if (lastResult is WriteResult.Success || lastResult is WriteResult.CapabilityDenied) {
+            return lastResult
+        }
+        // Transient: retry with backoff.
+        repeat(WRITE_RETRY_ATTEMPTS - 1) { attempt ->
+            Log.d(TAG, "Write retry ${attempt + 1}/$WRITE_RETRY_ATTEMPTS for ${op.description}")
+            delay(WRITE_RETRY_DELAY_MS)
+            lastResult = tunableWriter.write(
+                id = op.id,
+                value = op.value,
+                report = report,
+                reason = "AutoTDP retry ${attempt + 2}: ${op.description}",
+            )
+            if (lastResult is WriteResult.Success || lastResult is WriteResult.CapabilityDenied) {
+                return lastResult
+            }
+        }
+        return lastResult
     }
 
     private fun stopDaemon(
@@ -286,18 +356,8 @@ class AutoTdpService : Service() {
     }
 
     // ── Safety checks ─────────────────────────────────────────────────────────
-
-    /**
-     * Returns a kill reason if any thermal zone exceeds [TEMP_KILL_MILLI_C].
-     * Skin/CPU/GPU zones all apply — we use the zone max rather than a
-     * specific zone so this works across device topologies.
-     */
-    private fun checkTempKill(sample: Telemetry): String? {
-        val hotZone = sample.zoneTempsMilliC.maxByOrNull { it.tempMilliC } ?: return null
-        return if (hotZone.tempMilliC >= TEMP_KILL_MILLI_C) {
-            "Thermal kill: ${hotZone.label} ${hotZone.tempMilliC / 1000}°C ≥ ${TEMP_KILL_MILLI_C / 1000}°C"
-        } else null
-    }
+    // Thermal kill is now handled by [ThermalKillEvaluator] (stateful, debounced).
+    // See ThermalKillEvaluator.kt for threshold and debounce rationale.
 
     /**
      * Returns a kill reason if battery is critically low.
@@ -403,17 +463,23 @@ class AutoTdpService : Service() {
         private const val WINDOW_SIZE = 4
 
         /**
-         * Thermal kill threshold in milli-°C. 95 000 = 95 °C — a conservative
-         * but safe ceiling for sustained operation on phone-derived SoCs.
-         */
-        private const val TEMP_KILL_MILLI_C = 95_000
-
-        /**
          * Battery percentage below which the daemon stops. 5% is the same
          * floor the benchmark runner uses — leaves enough headroom for the OS
          * to save state cleanly.
          */
         private const val BATTERY_KILL_PCT = 5
+
+        /**
+         * BUG A FIX: Maximum number of write attempts for transient failures.
+         * First attempt + (WRITE_RETRY_ATTEMPTS - 1) retries = 2 total tries.
+         */
+        private const val WRITE_RETRY_ATTEMPTS = 2
+
+        /**
+         * BUG A FIX: Backoff delay between write retry attempts (milliseconds).
+         * 50 ms is enough for a binder glitch or EBUSY from a governor to clear.
+         */
+        private const val WRITE_RETRY_DELAY_MS = 50L
 
         // Intent actions
         const val ACTION_START = "io.github.mayusi.calibratesoc.AUTOTDP_START"

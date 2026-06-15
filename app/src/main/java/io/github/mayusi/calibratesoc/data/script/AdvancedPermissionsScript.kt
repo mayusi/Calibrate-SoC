@@ -37,6 +37,17 @@ class AdvancedPermissionsScript @Inject constructor(
 
     fun deploy(): Deployed {
         val pkg = context.packageName
+        // FIX 3: whitelist BOTH the current build variant AND the base package id.
+        // A script generated from the DEBUG build (io.github.mayusi.calibratesoc.debug)
+        // must also whitelist the RELEASE package (io.github.mayusi.calibratesoc) so
+        // the user doesn't have to regenerate/re-run the script after installing the
+        // release build. Similarly, a release-build script whitelists the .debug variant
+        // so testers switching between builds both work.
+        val basePkg = pkg.removeSuffix(".debug")
+        val debugPkg = if (basePkg == pkg) "$pkg.debug" else pkg
+        // Collect all variants that differ from the base (avoid duplicates if pkg == basePkg).
+        val extraPkgs = listOf(basePkg, debugPkg).distinct().filter { it != pkg }
+
         val manufacturer = Build.MANUFACTURER.orEmpty().lowercase()
         val model = Build.MODEL.orEmpty().lowercase()
         val isAynDevice = "ayn" in manufacturer || "odin" in model
@@ -51,10 +62,20 @@ class AdvancedPermissionsScript @Inject constructor(
             appendLine("pm grant $pkg android.permission.DUMP")
             appendLine("pm grant $pkg android.permission.PACKAGE_USAGE_STATS")
             appendLine("pm grant $pkg android.permission.WRITE_SECURE_SETTINGS")
+            // Also grant to the sibling build variants so switching debug↔release works.
+            for (extra in extraPkgs) {
+                appendLine("# Grant to sibling build variant ($extra) — idempotent if not installed.")
+                appendLine("pm grant $extra android.permission.DUMP 2>/dev/null || true")
+                appendLine("pm grant $extra android.permission.PACKAGE_USAGE_STATS 2>/dev/null || true")
+                appendLine("pm grant $extra android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true")
+            }
             appendLine()
             // AYN-specific PServer whitelist step.
             // Only emitted when we detect an AYN/Odin device at script-deploy time;
             // also includes a runtime shell guard (service list check) as defence-in-depth.
+            //
+            // FIX 3: Whitelist BOTH the current package AND all sibling variants (base +
+            // .debug) so any build the user installs works without re-running the script.
             //
             // MECHANISM: AYN's PServerBinder gates transact() on the caller UID matching
             // an entry in Settings.System/app_whiteList. langerhans' OdinTools is in the
@@ -71,25 +92,32 @@ class AdvancedPermissionsScript @Inject constructor(
             // label), this step will be a harmless no-op and transactableNow() will remain
             // false — the app will then honestly fall back to UnlockedFileWriter/NoopWriter.
             if (isAynDevice) {
+                // All package variants to whitelist (current + siblings, deduped).
+                val allPkgs = (listOf(pkg) + extraPkgs).distinct()
                 appendLine("# === 1a. AYN/Odin PServer whitelist (PSERVER-LIVE tier) ===")
-                appendLine("# This adds our package to PServer's app_whiteList so the binder")
+                appendLine("# This adds our package(s) to PServer's app_whiteList so the binder")
                 appendLine("# accepts our transact() calls. After this, Calibrate SoC can write")
                 appendLine("# sysfs nodes (cpu freq, GPU pwrlevel) via PServer's root shell —")
                 appendLine("# no per-boot chmod needed.")
+                appendLine("# Whitelists all build variants: ${allPkgs.joinToString(", ")}")
                 appendLine("# Self-guards: only runs if PServerBinder is present on this device.")
                 appendLine("if service list 2>/dev/null | grep -q 'PServerBinder'; then")
                 appendLine("  current_list=\$(settings get system app_whiteList 2>/dev/null)")
-                appendLine("  if echo \"\$current_list\" | grep -qF '$pkg'; then")
-                appendLine("    echo 'PServer whitelist: $pkg already present, skipping.'")
-                appendLine("  else")
-                appendLine("    if [ -z \"\$current_list\" ] || [ \"\$current_list\" = 'null' ]; then")
-                appendLine("      settings put system app_whiteList '$pkg'")
-                appendLine("    else")
-                appendLine("      settings put system app_whiteList \"\$current_list,$pkg\"")
-                appendLine("    fi")
-                appendLine("    echo 'PServer whitelist: added $pkg'")
-                appendLine("    echo 'Verify: settings get system app_whiteList'")
-                appendLine("  fi")
+                for (p in allPkgs) {
+                    appendLine("  # --- Whitelist $p ---")
+                    appendLine("  if echo \"\$current_list\" | grep -qF '$p'; then")
+                    appendLine("    echo 'PServer whitelist: $p already present, skipping.'")
+                    appendLine("  else")
+                    appendLine("    if [ -z \"\$current_list\" ] || [ \"\$current_list\" = 'null' ]; then")
+                    appendLine("      settings put system app_whiteList '$p'")
+                    appendLine("    else")
+                    appendLine("      settings put system app_whiteList \"\$current_list,$p\"")
+                    appendLine("    fi")
+                    appendLine("    current_list=\$(settings get system app_whiteList 2>/dev/null)")
+                    appendLine("    echo 'PServer whitelist: added $p'")
+                    appendLine("  fi")
+                }
+                appendLine("  echo 'Verify: settings get system app_whiteList'")
                 appendLine("else")
                 appendLine("  echo 'PServer whitelist: PServerBinder not present on this device, skipping.'")
                 appendLine("fi")

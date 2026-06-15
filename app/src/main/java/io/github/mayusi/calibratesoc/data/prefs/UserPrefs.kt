@@ -114,6 +114,20 @@ class UserPrefs @Inject constructor(
         prefs[UPDATE_REMIND_AFTER_MS_KEY] ?: 0L
     }
 
+    /**
+     * True when the user confirmed the "scary skip" dialog on an applicable
+     * (AYN/vendor-runner) device during the advanced-unlock wizard. When true
+     * and the user tries to use a gated feature (AutoTDP, HUD ± buttons, live
+     * tuning), the main app can re-surface the advanced setup prompt rather
+     * than silently failing.
+     *
+     * Default false (not skipped). Reset to false when the user completes the
+     * advanced setup successfully.
+     */
+    val advancedSetupSkipped: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[ADVANCED_SETUP_SKIPPED_KEY] ?: false
+    }
+
     // ── AutoTDP: idle/charge trigger ──────────────────────────────────────────
 
     /**
@@ -233,6 +247,16 @@ class UserPrefs @Inject constructor(
         }
     }
 
+    /**
+     * Persist whether the user confirmed the scary "Skip — read-only" path on
+     * an applicable (AYN/vendor-runner) device. Pass true when the user
+     * confirms the full-screen ScarySkipDialog. Pass false when they complete
+     * the advanced setup (so re-surface logic knows they did it properly).
+     */
+    suspend fun setAdvancedSetupSkipped(value: Boolean) {
+        context.dataStore.edit { it[ADVANCED_SETUP_SKIPPED_KEY] = value }
+    }
+
     /** Sync read for the capability-probe path which already runs on
      *  Dispatchers.IO. runBlocking is acceptable there because nothing
      *  upstream is on the main thread. Returns false on any error. */
@@ -258,6 +282,8 @@ class UserPrefs @Inject constructor(
         val DISMISSED_UPDATE_TAG_KEY           = stringPreferencesKey("dismissed_update_tag")
         // ── AutoTDP keys ──────────────────────────────────────────────────────
         val IDLE_CHARGE_TRIGGER_ENABLED_KEY    = booleanPreferencesKey("autotdp_idle_charge_trigger_enabled")
+        // ── Advanced setup gate ────────────────────────────────────────────────
+        val ADVANCED_SETUP_SKIPPED_KEY         = booleanPreferencesKey("advanced_setup_skipped")
 
         const val DEFAULT_ALERT_THRESHOLD_C = 80
     }

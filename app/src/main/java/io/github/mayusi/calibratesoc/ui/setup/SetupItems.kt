@@ -263,6 +263,19 @@ object UnlockScriptSetupItem : SetupItem {
      *  to look for in Odin's picker. */
     @Volatile var lastDeployedPath: String? = null
 
+    /**
+     * Mirrors [ForceSelinuxSetupItem.isApplicable]: the unlock script step
+     * is only forceable on devices that have a vendor runner to execute it —
+     * AYN (com.odin.settings), Retroid (com.rp.settings), AYANEO
+     * (com.ayaneo.settings), or any device whose PServer already transacts
+     * (the script whitelists us there).
+     *
+     * On a generic Android phone with none of these, the user has no "Run
+     * script as Root" menu, so we must NOT force them through this step.
+     */
+    override fun isApplicable(context: Context): Boolean =
+        ForceSelinuxSetupItem.isApplicable(context)
+
     override fun isDone(context: Context): Boolean {
         return context.packageManager.checkPermission(
             android.Manifest.permission.DUMP,
