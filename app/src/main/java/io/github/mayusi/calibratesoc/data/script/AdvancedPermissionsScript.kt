@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -31,6 +32,7 @@ import javax.inject.Singleton
 @Singleton
 class AdvancedPermissionsScript @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val pServerWriter: PServerWriter,
 ) {
 
     fun deploy(): Deployed {
@@ -206,47 +208,17 @@ class AdvancedPermissionsScript @Inject constructor(
         )
     }
 
-    /** True when we have ANY path that lets us write CPU sysfs:
-     *   (a) direct write (chmod 666 + SELinux happy), OR
-     *   (b) PServer binder actually executes our commands.
-     *  Either way, the HUD ± steppers will work.
+    /**
+     * True when the one-time unlock script has been run AND the cpufreq
+     * nodes are chmod 666 (app-UID-writable without root).
      *
-     *  We check direct-write FIRST (cheap, no IPC) and only fall back
-     *  to the PServer transact probe if that fails. The PServer probe
-     *  is a REAL no-op transact, not a getService()!=null existence
-     *  check — on the Odin 3 / Thor the binder is registered but
-     *  rejects our UID, so existence alone is a false positive. */
-    private fun isSysfsWritable(): Boolean {
-        if (isSysfsDirectlyWritable()) return true
-        return isPServerTransactable()
-    }
-
-    /** Probe whether Odin's PServer binder actually EXECUTES a no-op
-     *  shell command from our UID (not merely that the service is
-     *  published). Runs `true` and checks for a clean status. With
-     *  Force SELinux ON + an allow-listed UID this opens the entire
-     *  root-shell pathway; on stock firmware it returns false because
-     *  the wire format gates on caller UID. */
-    private fun isPServerTransactable(): Boolean = runCatching {
-        val clazz = Class.forName("android.os.ServiceManager")
-        val getService = clazz.getMethod("getService", String::class.java)
-        val binder = getService.invoke(null, "PServerBinder") as? android.os.IBinder
-            ?: return false
-        val data = android.os.Parcel.obtain()
-        val reply = android.os.Parcel.obtain()
-        try {
-            data.writeInterfaceToken("PServerBinder")
-            data.writeString("true")
-            val ok = binder.transact(1, data, reply, 0)
-            if (!ok) return false
-            reply.setDataPosition(0)
-            val status = runCatching { reply.readInt() }.getOrDefault(-1)
-            status == 0
-        } finally {
-            reply.recycle()
-            data.recycle()
-        }
-    }.getOrDefault(false)
+     * This intentionally does NOT include PServer writability: PServer
+     * is probed separately by [PServerWriter.isTransactable] and stored
+     * in [CapabilityReport.pserverSysfsLive]. Keeping the two signals
+     * separate ensures [CapabilityReport.sysfsDirectlyWritable] is true
+     * ONLY for the chmod-direct path, not as a proxy for "anything can write".
+     */
+    private fun isSysfsWritable(): Boolean = isSysfsDirectlyWritable()
 
     /** Original direct-write probe; reads the value and writes it back
      *  unchanged. Reliable per-UID signal, no kernel effect. */

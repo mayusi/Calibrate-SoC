@@ -86,17 +86,33 @@ class ThrottleAnalysisTest {
     }
 
     @Test
-    fun `time to throttle returns elapsed of first sub-threshold sample after ramp-up`() {
+    fun `time to throttle returns DELTA from ramp-up point not absolute elapsed`() {
+        // BUG 6 fix: timeToThrottleMs is now delta (time held peak before dropping).
         // peakMhz=3000, rampThreshold=2700, throttleThreshold=2850.
-        // Sample at 500ms is first to reach >=90% of peak (3000≥2700 → rampedIndex=0).
-        // After that, sample at 500ms drops to 2800 which is <=2850 → throttle at 500ms.
+        // rampedIndex=0 (3000 @ 0ms ≥ 2700), rampElapsedMs=0ms.
+        // First drop after ramp: 2800 @ 500ms → delta = 500ms - 0ms = 500ms.
         val samples = listOf(
             sample(0,   3000),
             sample(250, 3000),
             sample(500, 2800),
         )
         val a = ThrottleAnalysis.from(samples)!!
-        // rampedIndex=0 (3000>=2700), look in drop(1)=[250ms:3000, 500ms:2800], first <=2850 is 2800→500ms
+        assertThat(a.timeToThrottleMs).isEqualTo(500L)
+    }
+
+    @Test
+    fun `time to throttle is delta when ramp-up starts mid-run`() {
+        // Ramp-up completes at 1000ms (first sample ≥ 90% of 3000 = 2700).
+        // Throttle at 1500ms (2800 ≤ 2850). Delta = 1500ms - 1000ms = 500ms.
+        val samples = listOf(
+            sample(0,    1000),   // below ramp threshold (2700)
+            sample(500,  2000),   // still ramping
+            sample(1000, 3000),   // ramp complete
+            sample(1500, 2800),   // throttle
+        )
+        val a = ThrottleAnalysis.from(samples)!!
+        // rampedIndex=2 (3000 @ 1000ms), rampElapsedMs=1000ms.
+        // First drop after: 2800 @ 1500ms → delta = 1500 - 1000 = 500ms.
         assertThat(a.timeToThrottleMs).isEqualTo(500L)
     }
 

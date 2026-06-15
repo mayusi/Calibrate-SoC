@@ -20,6 +20,10 @@ import io.github.mayusi.calibratesoc.data.autotdp.TdpCaps
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyAdvisor
+import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
+import io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapability
+import io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityProbe
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
@@ -80,6 +84,8 @@ class AutoTdpViewModel @Inject constructor(
     private val idleChargeTrigger: IdleChargeTrigger,
     private val perAppEfficiencyMap: PerAppEfficiencyMap,
     private val userPrefs: UserPrefs,
+    private val efficiencyAdvisor: EfficiencyAdvisor,
+    private val undervoltCapabilityProbe: UndervoltCapabilityProbe,
 ) : ViewModel() {
 
     // ── Exposed state ─────────────────────────────────────────────────────────
@@ -116,6 +122,25 @@ class AutoTdpViewModel @Inject constructor(
     /** The last successful knee result (fed into the profile as the calibrated cap). */
     private val _kneeKhz = MutableStateFlow<Int?>(null)
     val kneeKhz: StateFlow<Int?> = _kneeKhz.asStateFlow()
+
+    // ── EfficiencyAdvisor plan ────────────────────────────────────────────────
+
+    /**
+     * Latest [EfficiencyPlan] from [EfficiencyAdvisor]. Null until the first
+     * capability report is available. Updated whenever the sweep completes or
+     * the capability report changes.
+     */
+    private val _efficiencyPlan = MutableStateFlow<EfficiencyPlan?>(null)
+    val efficiencyPlan: StateFlow<EfficiencyPlan?> = _efficiencyPlan.asStateFlow()
+
+    // ── UndervoltCapability tier ──────────────────────────────────────────────
+
+    /**
+     * Detected undervolt capability tier. Null until first capability report.
+     * Drives honest UI disclosure (KNEE_EQUIVALENT vs REAL_VOLTAGE_TABLE vs READ_ONLY).
+     */
+    private val _undervoltCapability = MutableStateFlow<UndervoltCapability?>(null)
+    val undervoltCapability: StateFlow<UndervoltCapability?> = _undervoltCapability.asStateFlow()
 
     // ── Script rung ───────────────────────────────────────────────────────────
 
@@ -215,6 +240,28 @@ class AutoTdpViewModel @Inject constructor(
                     state.status == AutoTdpStatus.WRITE_DENIED
                 ) {
                     _manuallyOn.value = false
+                }
+            }
+            .launchIn(viewModelScope)
+
+        // Build the EfficiencyAdvisor plan whenever the capability report arrives.
+        // Also probe the undervolt capability tier on first report.
+        capabilityProbe.report
+            .onEach { report ->
+                if (report != null) {
+                    val caps = TdpCaps.from(report)
+                    val freqCapWritable = report.sysfsDirectlyWritable || report.pserverSysfsLive ||
+                        report.privilege == PrivilegeTier.ROOT
+                    viewModelScope.launch(Dispatchers.IO) {
+                        val uvCap = undervoltCapabilityProbe.probe(freqCapWritable)
+                        _undervoltCapability.value = uvCap
+                        // Build initial plan (no curve yet)
+                        _efficiencyPlan.value = efficiencyAdvisor.buildPlan(
+                            report = report,
+                            caps = caps,
+                            curveResult = null,
+                        )
+                    }
                 }
             }
             .launchIn(viewModelScope)
@@ -321,6 +368,16 @@ class AutoTdpViewModel @Inject constructor(
                     is SweepProgress.Finished -> {
                         _sweepProgress.value = SweepUiState.Done(progress.result)
                         _kneeKhz.value = progress.result.knee?.capKhz
+                        // Refresh the EfficiencyAdvisor plan with the measured curve result.
+                        val report = capabilityProbe.report.value
+                        if (report != null) {
+                            val caps = TdpCaps.from(report)
+                            _efficiencyPlan.value = efficiencyAdvisor.buildPlan(
+                                report = report,
+                                caps = caps,
+                                curveResult = progress.result,
+                            )
+                        }
                     }
                     is SweepProgress.Aborted -> {
                         _sweepProgress.value = SweepUiState.Failed(progress.reason)

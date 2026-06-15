@@ -13,7 +13,8 @@ data class StabilityRun(
     val startedAtMs: Long,
     val loopCount: Int,
     val loopMs: Long,
-    val stabilityPct: Int,
+    /** Null means the run had fewer than 2 loops (no sustained-vs-peak signal). */
+    val stabilityPct: Int?,
     val minFps: Double,
     val maxFps: Double,
     val peakTempC: Float,

@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.yield
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,12 +38,22 @@ class StabilityTestRunner @Inject constructor(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    // BUG 11: mutex prevents two concurrent run() calls from both passing the
+    // `is Idle` check before either writes Running (TOCTOU race).
+    private val runMutex = Mutex()
+
     suspend fun run(
         loopCount: Int = 6,
         loopMs: Long = 20_000L,
         killTempC: Float = 95f,
     ): StabilityResult = coroutineScope {
-        check(_state.value is State.Idle) { "Stability test already in progress" }
+        if (!runMutex.tryLock()) error("Stability test already in progress")
+        try {
+            check(_state.value is State.Idle) { "Stability test already in progress (state)" }
+        } catch (e: IllegalStateException) {
+            runMutex.unlock()
+            throw e
+        }
 
         val startedAt = System.currentTimeMillis()
         val samples = mutableListOf<ThrottleSample>()
@@ -101,6 +112,7 @@ class StabilityTestRunner @Inject constructor(
             samplerJob.cancel()
             runCatching { cpuDispatcher.close() }  // release the dedicated thread pool
             _state.value = State.Idle
+            runMutex.unlock()   // release the single-flight guard (BUG 11)
         }
 
         StabilityResult(

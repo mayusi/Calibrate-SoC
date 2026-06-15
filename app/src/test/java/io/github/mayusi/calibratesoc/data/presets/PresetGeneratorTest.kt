@@ -715,6 +715,126 @@ class PresetGeneratorTest {
     }
 
     // -------------------------------------------------------------------------
+    // inferTargetHandheldKeys — mis-tag recovery helper
+    // -------------------------------------------------------------------------
+
+    private fun generator(): PresetGenerator = generatorWithRemote(emptyRemoteContent())
+
+    private fun presetWith(id: String, name: String = "Test", desc: String = "desc") = Preset(
+        id = id,
+        name = name,
+        description = desc,
+        verification = VerificationTier.GENERIC_UNKNOWN_FAMILY,
+        cpuPolicyMaxKhz = emptyMap(),
+        targetHandheldKeys = null,
+    )
+
+    @Test
+    fun `inferTargetHandheldKeys - rp6_ prefix returns retroid_pocket6`() {
+        val preset = presetWith("rp6_cool")
+        val result = generator().inferTargetHandheldKeys(preset)
+        assertThat(result).isEqualTo(listOf("retroid_pocket6"))
+    }
+
+    @Test
+    fun `inferTargetHandheldKeys - odin3_ prefix returns ayn_odin3`() {
+        val preset = presetWith("odin3_x")
+        val result = generator().inferTargetHandheldKeys(preset)
+        assertThat(result).isEqualTo(listOf("ayn_odin3"))
+    }
+
+    @Test
+    fun `inferTargetHandheldKeys - generic id returns null`() {
+        val preset = presetWith("balanced_efficiency")
+        val result = generator().inferTargetHandheldKeys(preset)
+        assertThat(result).isNull()
+    }
+
+    @Test
+    fun `inferTargetHandheldKeys - name containing Retroid Pocket 6 returns retroid_pocket6`() {
+        val preset = presetWith(
+            id = "some_preset",
+            name = "Retroid Pocket 6 Sustained",
+            desc = "optimised for Retroid Pocket 6",
+        )
+        val result = generator().inferTargetHandheldKeys(preset)
+        assertThat(result).isEqualTo(listOf("retroid_pocket6"))
+    }
+
+    @Test
+    fun `inferTargetHandheldKeys - thor_ prefix returns ayn_thor`() {
+        val preset = presetWith("thor_anti_throttle")
+        val result = generator().inferTargetHandheldKeys(preset)
+        assertThat(result).isEqualTo(listOf("ayn_thor"))
+    }
+
+    // -------------------------------------------------------------------------
+    // Mis-tagged OTA preset is hidden on the wrong device via generator
+    // -------------------------------------------------------------------------
+
+    /**
+     * An OTA preset with id "rp6_*" and targetHandheldKeys==null (mis-tagged)
+     * must be hidden on an ayn_odin3 report because inferTargetHandheldKeys
+     * infers ["retroid_pocket6"] from the id prefix.
+     */
+    @Test
+    fun `mis-tagged rp6_ preset is hidden on ayn_odin3 via mis-tag recovery`() {
+        val misTaggedPreset = Preset(
+            id = "rp6_ps2_sustained",
+            name = "RP6 PS2 Sustained",
+            description = "Optimised for Retroid Pocket 6 three-cluster topology",
+            verification = VerificationTier.COMMUNITY_TUNED,
+            cpuPolicyMaxKhz = mapOf(0 to 1555000, 3 to 1920000, 7 to 2227000),
+            targetHandheldKeys = null, // mis-tagged — should be ["retroid_pocket6"]
+        )
+        val remote = remoteContentWith(listOf(misTaggedPreset))
+
+        val odin3Report = reportWith("ayn_odin3", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(384, 2745, 3532)),
+            policy(6, listOf(1017, 3072, 4320)),
+        ))
+        val odin3Presets = generatorWithRemote(remote).presetsFor(odin3Report)
+        assertThat(odin3Presets.map { it.id }).doesNotContain("rp6_ps2_sustained")
+
+        // Same preset IS shown on an RP6 (the inferred key matches).
+        val rp6Report = reportWith("retroid_pocket6", GpuFamily.ADRENO, listOf(
+            policy(0, listOf(307, 1555, 2016)),
+            policy(3, listOf(499, 1920, 2803)),
+            policy(7, listOf(595, 2227, 3187)),
+        ))
+        val rp6Presets = generatorWithRemote(remote).presetsFor(rp6Report)
+        assertThat(rp6Presets.map { it.id }).contains("rp6_ps2_sustained")
+    }
+
+    /**
+     * A genuinely universal OTA preset (no device token anywhere) is still
+     * shown on every device after the mis-tag recovery logic runs.
+     */
+    @Test
+    fun `genuinely universal preset is still shown on all devices after mis-tag check`() {
+        val universalPreset = Preset(
+            id = "balanced_efficiency",
+            name = "Balanced Efficiency",
+            description = "Works on all devices",
+            verification = VerificationTier.GENERIC_UNKNOWN_FAMILY,
+            cpuPolicyMaxKhz = mapOf(0 to 1000000),
+            targetHandheldKeys = null,
+        )
+        val remote = remoteContentWith(listOf(universalPreset))
+
+        val odin3Report = reportWith("ayn_odin3", GpuFamily.ADRENO, listOf(policy(0, listOf(384, 3532))))
+        val rp6Report = reportWith("retroid_pocket6", GpuFamily.ADRENO, listOf(policy(0, listOf(307, 2016))))
+        val unknownReport = reportWith(null, GpuFamily.ADRENO, listOf(policy(0, listOf(300, 2000))))
+
+        assertThat(generatorWithRemote(remote).presetsFor(odin3Report).map { it.id })
+            .contains("balanced_efficiency")
+        assertThat(generatorWithRemote(remote).presetsFor(rp6Report).map { it.id })
+            .contains("balanced_efficiency")
+        assertThat(generatorWithRemote(remote).presetsFor(unknownReport).map { it.id })
+            .contains("balanced_efficiency")
+    }
+
+    // -------------------------------------------------------------------------
     // SocFamilyRules — governor safety regression
     // -------------------------------------------------------------------------
 

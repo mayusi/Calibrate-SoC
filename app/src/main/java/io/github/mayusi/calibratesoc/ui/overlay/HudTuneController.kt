@@ -255,24 +255,43 @@ class HudTuneController @Inject constructor(
         deltaMhz: Int,
         rootAvailable: Boolean,
     ): StepWriteResult {
-        // Path 1: direct sysfs.
         var failureReason: String? = null
-        val directOk = runCatching { tryDirectSysfsWrite(perPolicyNewKhz) }.getOrElse {
-            hudEventLog.add(HudEventLog.Level.ERROR, "sysfs write threw: ${it.message}")
-            failureReason = it.message ?: "sysfs write threw an exception"
-            false
-        }
-        if (directOk) return StepWriteResult(applied = true, via = "direct", failureReason = null)
 
-        // Path 2: PServer binder.
-        val pserverOk = runCatching {
-            tryPServerWrite(perPolicyNewKhz, report, summary)
-        }.getOrElse {
-            hudEventLog.add(HudEventLog.Level.ERROR, "PServer write threw: ${it.message}")
-            failureReason = it.message ?: "PServer write threw an exception"
-            false
+        // Tier order MUST match WriterRegistry / AutoTDP (PServer before direct)
+        // so the HUD stepper and the AutoTDP daemon never split onto different
+        // write paths for the same device state.
+        //
+        // Path 1: PServer binder — preferred on AYN/Odin devices where the
+        // package is in app_whiteList. PServer runs as root and writes any
+        // sysfs node with no per-boot chmod, and it cannot be invalidated by a
+        // chmod wearing off after reboot. This is the robust path; try it first.
+        if (report.pserverSysfsLive) {
+            val pserverOk = runCatching {
+                tryPServerWrite(perPolicyNewKhz, report, summary)
+            }.getOrElse {
+                hudEventLog.add(HudEventLog.Level.ERROR, "PServer write threw: ${it.message}")
+                failureReason = it.message ?: "PServer write threw an exception"
+                false
+            }
+            if (pserverOk) return StepWriteResult(applied = true, via = "pserver", failureReason = null)
         }
-        if (pserverOk) return StepWriteResult(applied = true, via = "pserver", failureReason = null)
+
+        // Path 2: direct sysfs — ONLY when the capability probe confirmed the
+        // nodes are app-UID-writable (chmod 666 via unlock script + SELinux
+        // permissive). If sysfsDirectlyWritable is false we must NOT attempt
+        // the write: on stock Snapdragon AYN devices the cpufreq node is mode
+        // 644 owned by system, the app can stat/open it, but SELinux MAC
+        // unconditionally denies the actual write — producing avc: denied
+        // { write } for scontext=untrusted_app every time. Skipping this path
+        // entirely when the probe says "no" means ZERO avc denials in logcat.
+        if (report.sysfsDirectlyWritable) {
+            val directOk = runCatching { tryDirectSysfsWrite(perPolicyNewKhz) }.getOrElse {
+                hudEventLog.add(HudEventLog.Level.ERROR, "sysfs write threw: ${it.message}")
+                failureReason = it.message ?: "sysfs write threw an exception"
+                false
+            }
+            if (directOk) return StepWriteResult(applied = true, via = "direct", failureReason = null)
+        }
 
         // Path 3: libsu root.
         if (rootAvailable) {

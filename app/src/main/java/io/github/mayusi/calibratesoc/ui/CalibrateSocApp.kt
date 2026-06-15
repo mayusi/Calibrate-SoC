@@ -3,34 +3,34 @@ package io.github.mayusi.calibratesoc.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BarChart
-import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,8 +38,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
@@ -47,34 +51,38 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import io.github.mayusi.calibratesoc.data.update.UpdateInfo
-import io.github.mayusi.calibratesoc.ui.benchmark.BenchmarkScreen
 import io.github.mayusi.calibratesoc.ui.capability.CapabilityReportScreen
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.dashboard.DashboardScreen
 import io.github.mayusi.calibratesoc.ui.hardware.HardwareScreen
-import io.github.mayusi.calibratesoc.ui.profiles.ProfilesScreen
+import io.github.mayusi.calibratesoc.ui.performance.PerformanceHubScreen
 import io.github.mayusi.calibratesoc.ui.session.AppStatsScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionDetailScreen
-import io.github.mayusi.calibratesoc.ui.session.SessionsScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
-import io.github.mayusi.calibratesoc.ui.autotdp.AutoTdpScreen
-import io.github.mayusi.calibratesoc.ui.tune.TuneHistoryScreen
-import io.github.mayusi.calibratesoc.ui.tune.TuneScreen
-import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
+import io.github.mayusi.calibratesoc.ui.tune.TuneHubScreen
 import io.github.mayusi.calibratesoc.ui.update.UpdateBannerViewModel
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
- * Top-level Compose root. Six-tab bottom nav:
- *   Dashboard — live telemetry (home)
- *   Tune      — sliders + universal preset list
- *   Profiles  — saved tunes + per-app override map
- *   Benchmark — Quick/Full bench + history + compare drawer
- *   Hardware  — identify SoC/RAM/storage + speed-test them
- *   Settings  — privilege badge + Accessibility grant + About
+ * Top-level Compose root — Direction C v2 IA.
  *
- * Device Info (the Phase 1 capability dump) lives off-nav as a deep
- * link from Settings. It's a power-user diagnostic, not part of the
- * main user journey.
+ * Five-tab bottom nav (Arsenal dark bar, accent underline on active item):
+ *   Dashboard   — live telemetry home
+ *   Tune        — hub [Presets | Advanced | AutoTDP | Profiles]
+ *   Performance — hub [Benchmark | Stability | Sessions]
+ *   Hardware    — SoC/RAM/storage identify + speed-test
+ *   Settings    — privilege badge + grant flows + About
+ *
+ * AutoTDP and Advanced Tuning are now FIRST-CLASS SURFACES inside the
+ * Tune hub. They are no longer sub-screens reachable only by scrolling
+ * past sliders — they have dedicated tabs in the Arsenal segmented
+ * control at the top of the Tune hub.
+ *
+ * Deep-links (e.g. Dashboard "AutoTDP" strip) navigate to the Tune
+ * route with an initialTab argument so the correct tab is pre-selected.
+ *
+ * Off-nav screens (DeviceInfo, SessionDetail, AppStats) remain reachable
+ * via the NavHost; the bottom bar just stays hidden on those routes.
  */
 @Composable
 fun CalibrateSocApp(
@@ -86,46 +94,26 @@ fun CalibrateSocApp(
 
     val pendingUpdate by bannerVm.pendingUpdate.collectAsStateWithLifecycle()
 
+    // Whether the bottom bar should be visible.
+    // Uses prefix-based matching so deep-link routes like "tune?tab=2" are
+    // correctly treated as bar-visible (see Destination.isBottomBarVisible).
+    val showBottomBar = Destination.isBottomBarVisible(current)
+
     Scaffold(
         bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                Destination.bottomBar.forEach { dest ->
-                    NavigationBarItem(
-                        selected = current == dest.route,
-                        onClick = {
-                            if (current != dest.route) {
-                                nav.navigate(dest.route) {
-                                    popUpTo(Destination.Dashboard.route) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
+            if (showBottomBar) {
+                ArsenalBottomBar(
+                    current = current,
+                    onNavigate = { dest ->
+                        if (current != dest.route) {
+                            nav.navigate(dest.route) {
+                                popUpTo(Destination.Dashboard.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
                             }
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = when (dest) {
-                                    Destination.Dashboard -> Icons.Outlined.Speed
-                                    Destination.Tune -> Icons.Outlined.Tune
-                                    Destination.Profiles -> Icons.Outlined.Bookmarks
-                                    Destination.Benchmark -> Icons.Outlined.BarChart
-                                    Destination.Hardware -> Icons.Outlined.Memory
-                                    Destination.Settings -> Icons.Outlined.Settings
-                                    Destination.DeviceInfo -> Icons.Outlined.Info
-                                    Destination.TuneHistory -> Icons.Outlined.Bookmarks
-                                    // Sessions/SessionDetail/AdvancedTuning/AppStats are not
-                                    // in the bottom bar; these arms keep the when exhaustive.
-                                    Destination.Sessions -> Icons.Outlined.BarChart
-                                    Destination.SessionDetail -> Icons.Outlined.BarChart
-                                    Destination.AdvancedTuning -> Icons.Outlined.Tune
-                                    Destination.AppStats -> Icons.Outlined.BarChart
-                                    Destination.AutoTdp -> Icons.Outlined.Speed
-                                },
-                                contentDescription = dest.label,
-                            )
-                        },
-                        label = { Text(dest.label) },
-                    )
-                }
+                        }
+                    },
+                )
             }
         },
     ) { padding ->
@@ -134,42 +122,127 @@ fun CalibrateSocApp(
                 navController = nav,
                 startDestination = Destination.Dashboard.route,
             ) {
+                // ── 1. Dashboard ──────────────────────────────────────────
                 composable(Destination.Dashboard.route) {
                     DashboardScreen(
-                        onOpenSessions = { nav.navigate(Destination.Sessions.route) },
-                        onOpenAutoTdp = { nav.navigate(Destination.AutoTdp.route) },
+                        onOpenSessions = {
+                            nav.navigate(Destination.Performance.route) {
+                                popUpTo(Destination.Dashboard.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        onOpenAutoTdp = {
+                            // Deep-link: Tune hub pre-selected to AutoTDP tab (index 2)
+                            nav.navigate("${Destination.Tune.route}?tab=2") {
+                                popUpTo(Destination.Dashboard.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
                     )
                 }
+
+                // ── 2. Tune Hub ───────────────────────────────────────────
+                // Default entry (tab=0 Presets)
                 composable(Destination.Tune.route) {
-                    TuneScreen(
-                        onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
-                        onOpenAdvancedTuning = { nav.navigate(Destination.AdvancedTuning.route) },
-                        onOpenAutoTdp = { nav.navigate(Destination.AutoTdp.route) },
+                    TuneHubScreen(
+                        initialTab = 0,
+                        onOpenHistory = {
+                            nav.navigate(Destination.TuneHistory.route)
+                        },
                     )
                 }
+                // Deep-link variant with tab argument
+                composable("${Destination.Tune.route}?tab={tab}") { backStackEntry ->
+                    val tab = backStackEntry.arguments?.getString("tab")?.toIntOrNull() ?: 0
+                    TuneHubScreen(
+                        initialTab = tab,
+                        onOpenHistory = {
+                            nav.navigate(Destination.TuneHistory.route)
+                        },
+                    )
+                }
+
+                // ── 3. Tune Hub sub-screens (off-nav, pushable) ───────────
+                // These routes exist so external deep-links (e.g. from the
+                // Dashboard strip) can also land on a specific surface directly.
                 composable(Destination.AdvancedTuning.route) {
-                    AdvancedTuningScreen(onBack = { nav.popBackStack() })
+                    TuneHubScreen(
+                        initialTab = 1,
+                        onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
+                    )
                 }
                 composable(Destination.AutoTdp.route) {
-                    AutoTdpScreen(onBack = { nav.popBackStack() })
-                }
-                composable(Destination.TuneHistory.route) { TuneHistoryScreen() }
-                composable(Destination.Profiles.route) { ProfilesScreen() }
-                composable(Destination.Benchmark.route) { BenchmarkScreen() }
-                composable(Destination.Hardware.route) { HardwareScreen() }
-                composable(Destination.Settings.route) {
-                    SettingsScreen(onOpenDeviceInfo = { nav.navigate(Destination.DeviceInfo.route) })
-                }
-                composable(Destination.DeviceInfo.route) { CapabilityReportScreen() }
-                composable(Destination.Sessions.route) {
-                    SessionsScreen(
-                        onOpenDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
-                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
-                        onBack = { nav.popBackStack() },
+                    TuneHubScreen(
+                        initialTab = 2,
+                        onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
                     )
                 }
-                composable(Destination.SessionDetail.route) { backStack ->
-                    val sessionId = backStack.arguments?.getString("sessionId")?.toLongOrNull() ?: return@composable
+                composable(Destination.Profiles.route) {
+                    TuneHubScreen(
+                        initialTab = 3,
+                        onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
+                    )
+                }
+                composable(Destination.TuneHistory.route) {
+                    io.github.mayusi.calibratesoc.ui.tune.TuneHistoryScreen()
+                }
+
+                // ── 4. Performance Hub ────────────────────────────────────
+                composable(Destination.Performance.route) {
+                    PerformanceHubScreen(
+                        initialTab = 0,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+                // Stability deep-link route (tab 1)
+                composable(Destination.Stability.route) {
+                    PerformanceHubScreen(
+                        initialTab = 1,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+                // Sessions deep-link route (tab 2)
+                composable(Destination.Sessions.route) {
+                    PerformanceHubScreen(
+                        initialTab = 2,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+                // Benchmark deep-link route (tab 0 = same as Performance default)
+                composable(Destination.Benchmark.route) {
+                    PerformanceHubScreen(
+                        initialTab = 0,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+                // Insights deep-link route (tab 3)
+                composable(Destination.Insights.route) {
+                    PerformanceHubScreen(
+                        initialTab = 3,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+                // Game-Aware deep-link route (tab 4)
+                composable(Destination.GameAware.route) {
+                    PerformanceHubScreen(
+                        initialTab = 4,
+                        onOpenSessionDetail = { id -> nav.navigate(Destination.SessionDetail.route(id)) },
+                        onOpenAppStats = { nav.navigate(Destination.AppStats.route) },
+                    )
+                }
+
+                // ── 5. Off-nav deep-link screens ──────────────────────────
+                composable(Destination.SessionDetail.route) { backStackEntry ->
+                    val sessionId = backStackEntry.arguments
+                        ?.getString("sessionId")?.toLongOrNull()
+                        ?: return@composable
                     SessionDetailScreen(
                         sessionId = sessionId,
                         onBack = { nav.popBackStack() },
@@ -178,13 +251,20 @@ fun CalibrateSocApp(
                 composable(Destination.AppStats.route) {
                     AppStatsScreen(onBack = { nav.popBackStack() })
                 }
+
+                // ── 6. Hardware ───────────────────────────────────────────
+                composable(Destination.Hardware.route) { HardwareScreen() }
+
+                // ── 7. Settings + DeviceInfo ──────────────────────────────
+                composable(Destination.Settings.route) {
+                    SettingsScreen(
+                        onOpenDeviceInfo = { nav.navigate(Destination.DeviceInfo.route) },
+                    )
+                }
+                composable(Destination.DeviceInfo.route) { CapabilityReportScreen() }
             }
 
-            // ── App-level "update available" banner ───────────────────────────
-            // Slides in from the top; non-modal; dismissible via three actions:
-            //   "Update" → navigates to Settings (existing download/install path)
-            //   "Later"  → snoozes for 7 days
-            //   "×"      → dismisses this tag permanently (re-shows on newer tag)
+            // ── App-level "update available" banner ───────────────────────
             AnimatedVisibility(
                 visible = pendingUpdate != null,
                 enter = slideInVertically { -it },
@@ -195,7 +275,6 @@ fun CalibrateSocApp(
                         info = info,
                         onUpdate = {
                             bannerVm.consume()
-                            // Navigate to Settings → the existing Updates card handles download
                             if (current != Destination.Settings.route) {
                                 nav.navigate(Destination.Settings.route) {
                                     popUpTo(Destination.Dashboard.route) { saveState = true }
@@ -213,15 +292,132 @@ fun CalibrateSocApp(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Arsenal Bottom Navigation Bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Direction-C bottom navigation bar.
+ *
+ * Design:
+ *   - Near-black background (#0C0C10), 1 dp top border in white/6 %.
+ *   - Active item: [AccentBar.Red] indicator bar at the top (3 dp),
+ *     white icon + label, bold weight.
+ *   - Inactive items: [0xFF6B7280] muted gray, lighter weight.
+ *   - Labels: uppercase, tight letter-spacing.
+ *   - No Material [NavigationBar] — custom to enforce the angular C aesthetic.
+ *
+ * Hub routes (Tune sub-tabs, Performance sub-tabs) are resolved back to their
+ * parent hub bottom-bar item so the active indicator stays correct when the
+ * user is on a sub-surface inside a hub.
+ *
+ * @param current    The current route string from [NavBackStackEntry].
+ * @param onNavigate Called with the destination when the user taps a tab.
+ */
+@Composable
+private fun ArsenalBottomBar(
+    current: String,
+    onNavigate: (Destination) -> Unit,
+) {
+    val bgColor      = Color(0xFF0C0C10)
+    val borderColor  = Color.White.copy(alpha = 0.06f)
+    val activeAccent = AccentBar.Red
+    val activeText   = Color.White
+    val inactiveText = Color(0xFF6B7280)
+    val indicatorH   = 3.dp
+    val barHeight    = 60.dp
+
+    // Resolve which bottom-bar item is "active" given the current route.
+    // Delegates to the shared pure helper in Destination so the logic is
+    // testable and consistent with isBottomBarVisible.
+    val activeDest = Destination.activeDestFor(current)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bgColor)
+            .border(
+                width = 0.5.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(0.dp),
+            ),
+    ) {
+        // Active indicator — accent stripe at the very top of the bar,
+        // spanning only the active tab's column.
+        Row(
+            modifier = Modifier.fillMaxWidth().height(indicatorH),
+        ) {
+            Destination.bottomBar.forEach { dest ->
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(indicatorH)
+                        .background(
+                            if (dest == activeDest) activeAccent else Color.Transparent,
+                        ),
+                )
+            }
+        }
+
+        // Tab items
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(barHeight),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Destination.bottomBar.forEach { dest ->
+                val isActive = dest == activeDest
+                val itemColor = if (isActive) activeText else inactiveText
+                val icon: ImageVector = when (dest) {
+                    Destination.Dashboard   -> Icons.Outlined.Dashboard
+                    Destination.Tune        -> Icons.Outlined.Tune
+                    Destination.Performance -> Icons.Outlined.BarChart
+                    Destination.Hardware    -> Icons.Outlined.Memory
+                    Destination.Settings    -> Icons.Outlined.Settings
+                    // Remaining destinations are not in the bottom bar;
+                    // these arms keep the `when` exhaustive.
+                    else -> Icons.Outlined.Speed
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(barHeight)
+                        .clickable { onNavigate(dest) }
+                        .padding(vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = dest.label,
+                        tint = itemColor,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = dest.label.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = itemColor,
+                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = 0.04.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  UpdateAvailableBanner — unchanged from v1; kept in this file for locality
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Non-modal "update available" banner shown at the top of the main scaffold.
- * Matches the style of the existing [WhatsNewBanner] in SettingsScreen
- * (primaryContainer, rounded card, same action-button idiom).
- *
- * Three actions:
- *   "Update" (FilledTonalButton) → routes to Settings updater card.
- *   "Later"  (TextButton)        → snoozes for 7 days.
- *   "×"      (IconButton)        → dismisses this tag permanently.
+ * Three actions: "Update" (routes to Settings), "Later" (snooze 7d), "×" (dismiss tag).
  */
 @Composable
 private fun UpdateAvailableBanner(
@@ -230,15 +426,15 @@ private fun UpdateAvailableBanner(
     onLater: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Card(
+    androidx.compose.material3.Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.screen, vertical = Spacing.dense),
-        colors = CardDefaults.cardColors(
+        colors = androidx.compose.material3.CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer,
         ),
         shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        elevation = androidx.compose.material3.CardDefaults.cardElevation(defaultElevation = 4.dp),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = Spacing.card, vertical = Spacing.group),

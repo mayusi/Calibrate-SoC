@@ -144,7 +144,7 @@ object ForceSelinuxSetupItem : SetupItem {
         // actually MATTERS for us is whether PServer starts executing
         // our commands. So that's the real signal. If it transacts,
         // permissive is effectively on for our purposes.
-        val viaPServer = isPServerTransactable()
+        val viaPServer = isPServerTransactable(context)
         if (viaPServer) return true
 
         // Best-effort sysfs write probe (works only if a prior unlock
@@ -165,28 +165,36 @@ object ForceSelinuxSetupItem : SetupItem {
         return manuallyConfirmed(context)
     }
 
-    /** Real no-op transact to PServer. Returns true only when the
-     *  vendor service actually runs `true` and reports status 0 —
-     *  proof that Force SELinux has unlocked the root-shell path. */
-    private fun isPServerTransactable(): Boolean = runCatching {
-        val clazz = Class.forName("android.os.ServiceManager")
-        val getService = clazz.getMethod("getService", String::class.java)
-        val binder = getService.invoke(null, "PServerBinder") as? android.os.IBinder
-            ?: return false
-        val data = android.os.Parcel.obtain()
-        val reply = android.os.Parcel.obtain()
-        try {
-            data.writeInterfaceToken("PServerBinder")
-            data.writeString("true")
-            val ok = binder.transact(1, data, reply, 0)
-            if (!ok) return false
-            reply.setDataPosition(0)
-            runCatching { reply.readInt() }.getOrDefault(-1) == 0
-        } finally {
-            reply.recycle()
-            data.recycle()
-        }
+    /**
+     * Delegates to [PServerWriter.transactableNow] — the ONLY correct
+     * probe for whether PServer actually executes our commands.
+     *
+     * [PServerWriter.transactableNow] reads the memoised result of the
+     * real [PServerWriter.isTransactable] probe that [CapabilityProbe.refresh]
+     * already ran. This avoids:
+     *   (a) duplicating the wire format (the old local copy used the
+     *       WRONG format: writeInterfaceToken + writeString + transact(1),
+     *       which always returns UNKNOWN_TRANSACTION on AYN firmware — a
+     *       permanent false negative); and
+     *   (b) issuing a second live transact, which would re-arm the
+     *       circuit breaker on slow devices.
+     *
+     * If the cache has not been warmed yet (cold path before first
+     * CapabilityProbe.refresh) this returns false — conservative, never
+     * a false positive.
+     */
+    private fun isPServerTransactable(context: Context): Boolean = runCatching {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            PServerEntryPoint::class.java,
+        ).pServerWriter().transactableNow()
     }.getOrDefault(false)
+
+    @dagger.hilt.EntryPoint
+    @dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
+    interface PServerEntryPoint {
+        fun pServerWriter(): io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+    }
 
     /** Read the user's manual "I enabled Force SELinux" confirmation
      *  from SharedPreferences. Synchronous + cheap so isDone() stays
@@ -220,7 +228,7 @@ object ForceSelinuxSetupItem : SetupItem {
         val hasVendorToggle = vendorSettingsPkgs.any { pkg ->
             runCatching { pm.getPackageInfo(pkg, 0); true }.getOrDefault(false)
         }
-        return hasVendorToggle || isPServerTransactable()
+        return hasVendorToggle || isPServerTransactable(context)
     }
 
     override fun launch(context: Context) {

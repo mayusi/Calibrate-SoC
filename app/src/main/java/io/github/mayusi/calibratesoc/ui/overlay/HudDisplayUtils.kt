@@ -81,4 +81,103 @@ object HudDisplayUtils {
         val isLikelyReal = fps != hudHz && fps !in 59..61 && fps !in 119..121
         return if (isLikelyReal) "FPS" to "game" else "REFRESH" to "Hz"
     }
+
+    /**
+     * Format the per-cluster cap label for a stepper button row.
+     *
+     * Example: "2918MHz" or "—" when null.
+     */
+    @JvmStatic
+    fun formatClusterMhz(mhz: Int?): String = mhz?.let { "${it}MHz" } ?: "—"
+
+    /**
+     * Format a watts reading concisely for the HUD.
+     *
+     * Examples: "4.2W", "0.8W", "—".
+     */
+    @JvmStatic
+    fun formatWatts(watts: Double?): String = watts?.let { "%.1fW".format(it) } ?: "—"
+
+    /**
+     * Format a temperature reading with one decimal.
+     *
+     * Examples: "72°C", "—".
+     */
+    @JvmStatic
+    fun formatTemp(tempC: Float?): String = tempC?.let { "%.0f°C".format(it) } ?: "—"
+
+    /**
+     * Format a GHz value from MHz — returns e.g. "2.92G" or "—".
+     */
+    @JvmStatic
+    fun formatGhzFromMhz(mhz: Int?): String = mhz?.let { "%.2fG".format(it / 1000.0) } ?: "—"
+
+    /**
+     * HUD width in dp for a given size index.
+     *
+     * 0 = small  (220dp)
+     * 1 = medium (270dp, default)
+     * 2 = large  (330dp)
+     */
+    @JvmStatic
+    fun hudWidthDp(sizeIndex: Int): Int = when (sizeIndex.coerceIn(0, 2)) {
+        0 -> 220
+        1 -> 270
+        else -> 330
+    }
+
+    /**
+     * Label for the HUD size cycle button shown in verbose mode.
+     *
+     * Examples: "SM", "MD", "LG".
+     */
+    @JvmStatic
+    fun hudSizeLabel(sizeIndex: Int): String = when (sizeIndex.coerceIn(0, 2)) {
+        0 -> "SM"
+        1 -> "MD"
+        else -> "LG"
+    }
+
+    /**
+     * Format an AutoTDP profile name concisely.
+     *
+     * "EFFICIENCY" → "EFF"
+     * "BALANCED"   → "BAL"
+     * "BATTERY_TARGET" → "TGT"
+     */
+    @JvmStatic
+    fun formatAutoTdpProfileShort(profileName: String): String = when (profileName.uppercase()) {
+        "EFFICIENCY"     -> "EFF"
+        "BALANCED"       -> "BAL"
+        "BATTERY_TARGET" -> "TGT"
+        else -> profileName.take(3).uppercase()
+    }
+
+    /**
+     * Format an AutoTDP savings value for the verbose panel.
+     *
+     * [savingsMw] null or [savingsReady] false → "measuring…"
+     * Otherwise → "−1.8W (12%)" or "−1.8W" if pct is null.
+     */
+    @JvmStatic
+    fun formatAutoTdpSavings(savingsMw: Int?, savingsPct: Double?, savingsReady: Boolean): String {
+        if (!savingsReady || savingsMw == null) return "measuring…"
+        val w = "%.1f".format(savingsMw / 1000.0)
+        return if (savingsPct != null) "−${w}W (${savingsPct.toInt()}%)" else "−${w}W"
+    }
+
+    /**
+     * Format a Hz value for the refresh-rate picker chip label.
+     *
+     * Example: 120.0f → "120Hz"
+     */
+    @JvmStatic
+    fun formatHz(hz: Float): String = "${hz.toInt()}Hz"
+
+    /**
+     * Compute the opacity percentage string for display.
+     * E.g. 0.94f → "94%"
+     */
+    @JvmStatic
+    fun formatOpacityPct(opacity: Float): String = "${(opacity * 100).toInt()}%"
 }

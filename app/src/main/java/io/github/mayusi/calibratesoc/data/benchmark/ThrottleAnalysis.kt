@@ -12,7 +12,7 @@ data class ThrottleAnalysis(
     val endMhz: Int,
     val peakMhz: Int,             // max cpuMaxMhz across all samples — true reference for throttle math
     val dropPct: Double,          // 100 * (peakMhz - sustainedMhz)/peakMhz, clamped >= 0
-    val timeToThrottleMs: Long?,  // first elapsed after ramp-up where cpuMaxMhz <= 95% of peakMhz; null if never
+    val timeToThrottleMs: Long?,  // ms the chip held ≥95% of peak AFTER ramp-up before dropping; null if never throttled
     val peakCpuTempC: Float,
     val peakGpuTempC: Float?,
     val thermalHeadroomC: Float?, // killTempC - peakCpuTempC
@@ -37,11 +37,18 @@ data class ThrottleAnalysis(
             // Time-to-throttle: find when clocks first reach ≥90% of peak (ramp-up complete),
             // then find the first sample after that point where clocks drop to ≤95% of peak.
             // This prevents the idle ramp-up from being misread as a throttle event.
+            //
+            // BUG 6 fix: return the DELTA from the ramp-up point, not the absolute elapsed
+            // from run start. Semantic: "held peak for X ms before dropping", not "first drop
+            // at Xms absolute". KDoc and UI label updated to match.
             val rampThreshold = peakMhz * 0.90
             val throttleThreshold = peakMhz * 0.95
             val rampedIndex = samples.indexOfFirst { it.cpuMaxMhz >= rampThreshold }
             val timeToThrottleMs = if (rampedIndex >= 0) {
-                samples.drop(rampedIndex + 1).firstOrNull { it.cpuMaxMhz <= throttleThreshold }?.elapsedMs
+                val rampElapsedMs = samples[rampedIndex].elapsedMs
+                samples.drop(rampedIndex + 1)
+                    .firstOrNull { it.cpuMaxMhz <= throttleThreshold }
+                    ?.let { it.elapsedMs - rampElapsedMs }
             } else null
 
             val peakCpuTempC = samples.maxOf { it.cpuMaxTempC }

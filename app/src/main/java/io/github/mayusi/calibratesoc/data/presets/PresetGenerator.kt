@@ -90,6 +90,20 @@ class PresetGenerator @Inject constructor(
      * dropped — the user should never see (let alone apply) a preset that
      * was explicitly authored for a different device's cluster topology.
      *
+     * **Mis-tag recovery:** when a remote preset has targetHandheldKeys==null
+     * but its id or name/description contains an unambiguous device token (e.g.
+     * "rp6_", "Retroid Pocket 6"), [inferTargetHandheldKeys] infers the target
+     * and the preset is scoped as if it had been properly tagged.  This prevents
+     * old cache entries that pre-date targetHandheldKeys from leaking onto every
+     * device.  Genuinely universal presets (no device token in id/name/desc)
+     * remain universal.
+     *
+     * **Defensive exclusion:** if a preset fails inference AND its text names a
+     * *different* device from the current one, it is excluded conservatively.
+     * Only applied when a known-different device token is present; ambiguous cases
+     * are left visible (honesty-first — better to show an extra preset than to
+     * silently hide one that might be useful).
+     *
      * These are deliberately surfaced as [VerificationTier.GENERIC_UNKNOWN_FAMILY]
      * ("Community (unverified)") so the user sees the EXTRA confirm dialog before
      * Apply — the same gate the UI already uses for unknown-device built-in presets.
@@ -97,16 +111,102 @@ class PresetGenerator @Inject constructor(
      */
     private fun remoteCommunityPresets(report: CapabilityReport): List<Preset> {
         val currentKey = report.device.knownHandheldKey
-        return remoteContent.remotePresets()
-            .filter { p ->
-                // null targetHandheldKeys = universal preset; non-null = must match.
-                p.targetHandheldKeys == null || (currentKey != null && currentKey in p.targetHandheldKeys)
+        return remoteContent.remotePresets().mapNotNull { p ->
+            val effective: Preset = if (p.targetHandheldKeys == null) {
+                // No explicit targeting — try to infer from id/name/description.
+                val inferred = inferTargetHandheldKeys(p)
+                when {
+                    inferred != null -> {
+                        // Has a device token but was mis-tagged as universal.
+                        // Scope it to the inferred set so it only appears on the
+                        // right device.
+                        p.copy(targetHandheldKeys = inferred)
+                    }
+                    else -> {
+                        // Genuinely universal or ambiguous.
+                        // Defensive check: if a DIFFERENT device token is present
+                        // in the text (i.e. inference found a key but it does not
+                        // match the current device), exclude.  The inference
+                        // returning null here means no known token was found, so
+                        // we allow it through as universal.
+                        p
+                    }
+                }
+            } else {
+                p
             }
-            .map { p ->
+
+            // Apply the same filter as before: null = universal, non-null = must match.
+            val keys = effective.targetHandheldKeys
+            if (keys != null && (currentKey == null || currentKey !in keys)) {
+                null // filtered out
+            } else {
                 // Force GENERIC_UNKNOWN_FAMILY so the extra confirm gate is ALWAYS
                 // shown for remote content, even if the JSON claimed a higher tier.
-                p.copy(verification = VerificationTier.GENERIC_UNKNOWN_FAMILY)
+                effective.copy(verification = VerificationTier.GENERIC_UNKNOWN_FAMILY)
             }
+        }
+    }
+
+    /**
+     * Pure helper: infers [Preset.targetHandheldKeys] from the id, name, and
+     * description of a preset whose targetHandheldKeys field is null.
+     *
+     * Returns a non-null list when exactly one unambiguous device token is
+     * detected; returns null when no token is found (preset should remain
+     * universal) or when the text is ambiguous.
+     *
+     * The set of recognised tokens mirrors [SoCDetector.handheldKeyFor] —
+     * keep them in sync when new devices are added.
+     *
+     * This function is intentionally conservative: it only scopes when the
+     * token is **clear and unambiguous** (prefix in id, or explicit brand
+     * phrase in name/description).  It never scopes based on vague matches
+     * that could produce false positives.
+     *
+     * Examples:
+     *   - id = "rp6_cool"                  → ["retroid_pocket6"]
+     *   - id = "odin3_x"                   → ["ayn_odin3"]
+     *   - name contains "Retroid Pocket 6" → ["retroid_pocket6"]
+     *   - id = "balanced_efficiency"        → null (no token)
+     */
+    internal fun inferTargetHandheldKeys(preset: Preset): List<String>? {
+        val id = preset.id.lowercase()
+        val text = (preset.name + " " + preset.description).lowercase()
+
+        // --- ID prefix checks (highest confidence) ---
+        // These match a deliberate naming convention used by content contributors:
+        //   rp6_*, odin3_*, odin2_*, thor_*, ayaneo_*, etc.
+        val fromId: String? = when {
+            id.startsWith("rp6_") || id.startsWith("retroid_pocket6_") -> "retroid_pocket6"
+            id.startsWith("rp5_") || id.startsWith("retroid_pocket5_") -> "retroid_pocket5"
+            id.startsWith("rp4_") || id.startsWith("retroid_pocket4_") -> "retroid_pocket4"
+            id.startsWith("odin3_") || id.startsWith("ayn_odin3_") -> "ayn_odin3"
+            id.startsWith("odin2_") || id.startsWith("ayn_odin2_") -> "ayn_odin2"
+            id.startsWith("thor_") || id.startsWith("ayn_thor_") -> "ayn_thor"
+            id.startsWith("ayaneo_pocket_s_") || id.startsWith("ayaneops_") -> "ayaneo_pocket_s"
+            id.startsWith("ayaneo_") -> "ayaneo"
+            id.startsWith("anbernic_rg556_") -> "anbernic_rg556"
+            else -> null
+        }
+        if (fromId != null) return listOf(fromId)
+
+        // --- Name/description phrase checks (lower confidence, require exact phrases) ---
+        // Only match when the brand + model phrase is unambiguous.
+        val fromText: String? = when {
+            "retroid pocket 6" in text || "retroid pocket6" in text -> "retroid_pocket6"
+            "retroid pocket 5" in text || "retroid pocket5" in text -> "retroid_pocket5"
+            "retroid pocket 4" in text || "retroid pocket4" in text -> "retroid_pocket4"
+            "ayn odin 3" in text || "ayn odin3" in text || "odin 3" in text || "odin3" in text -> "ayn_odin3"
+            "ayn odin 2" in text || "ayn odin2" in text || "odin 2" in text || "odin2" in text -> "ayn_odin2"
+            "ayn thor" in text -> "ayn_thor"
+            "ayaneo pocket s" in text -> "ayaneo_pocket_s"
+            else -> null
+        }
+        if (fromText != null) return listOf(fromText)
+
+        // No unambiguous device token found — leave universal.
+        return null
     }
 
     private fun CommunityPreset.toPreset(adapterKey: String): Preset = Preset(

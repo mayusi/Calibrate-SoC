@@ -1,5 +1,8 @@
 package io.github.mayusi.calibratesoc.ui.tune.advanced
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,20 +14,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.BatteryAlert
 import androidx.compose.material.icons.outlined.Bolt
-import androidx.compose.material.icons.outlined.ChevronLeft
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DeviceThermostat
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Memory
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Storage
@@ -32,23 +31,16 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,6 +57,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.capability.AdrenoExtrasProbe
@@ -77,6 +70,9 @@ import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.capability.SchedBoostInterface
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
 import io.github.mayusi.calibratesoc.data.capability.VmSysctlsProbe
+import io.github.mayusi.calibratesoc.data.thermal.FanCurveModel
+import io.github.mayusi.calibratesoc.data.thermal.PredictiveThrottleGuard
+import io.github.mayusi.calibratesoc.data.thermal.ThrottleForecast
 import io.github.mayusi.calibratesoc.data.tunables.KernelTunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
@@ -86,25 +82,28 @@ import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.VoltageControl
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
+import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.MetricTile
+import io.github.mayusi.calibratesoc.ui.components.PanelAccentEdge
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
+import io.github.mayusi.calibratesoc.ui.components.StatBar
+import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
-import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
- * Advanced Tuning screen: exposes the extended kernel knob set discovered
- * by the foundation's probe layer. Every control is gated by three
- * independent safety checks:
+ * Advanced Tuning screen — Direction C Arsenal rebuild.
  *
- *   1. CAPABILITY — only shown when the [CapabilityReport] confirms the
- *      sysfs node actually exists on this device (no phantom controls).
- *   2. PRIVILEGE  — when [Tunables.whyWriteDenied] returns non-null (e.g.
- *      no root), the control is greyed out with the honest reason.
- *   3. RISK       — HIGH/DANGEROUS knobs require an explicit confirm dialog
- *      with a blunt warning before any write is dispatched.
+ * EASY at the top: one clear primary action (Apply / Generate Script CTA).
+ * DEEP below: per-cluster CPU cards, GPU, thermal guard, fan curve, scheduler, VM, I/O.
  *
- * All writes go through [AdvancedTuningViewModel.write] → [TunableWriter],
- * which snapshots before writing and reverts on next boot.
+ * Arsenal look throughout: ArsenalPanel, MetricTile, StatBar, StatusPill, ArsenalButton.
+ * No plain Material rounded cards.
  */
 @Composable
 fun AdvancedTuningScreen(
@@ -116,23 +115,19 @@ fun AdvancedTuningScreen(
     val customHistory by viewModel.customRuleHistory.collectAsStateWithLifecycle()
     val pendingAdvanced by viewModel.pendingAdvanced.collectAsStateWithLifecycle()
     val lastDeploy by viewModel.lastDeploy.collectAsStateWithLifecycle()
+    val thermalGuardEnabled by viewModel.thermalGuardEnabled.collectAsStateWithLifecycle()
+    val throttleForecast by viewModel.throttleForecast.collectAsStateWithLifecycle()
+    val fanCurveModel by viewModel.fanCurveModel.collectAsStateWithLifecycle()
 
     val r = report
     if (r == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Probing device…", style = MaterialTheme.typography.bodyMedium)
+            Text("Probing device…", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF999999))
         }
         return
     }
 
-    // Script-builder mode: stock device (AYN_SETTINGS or NONE) AND no
-    // sysfsDirectlyWritable. In this mode controls stage knobs instead of
-    // writing directly. Even in script-builder mode, nodes that the unlock
-    // script covered AND the unlock was run go live (isScriptBuilderMode
-    // returns false for those).
     val globalScriptBuilderMode = r.privilege != PrivilegeTier.ROOT
-
-    // Dangerous-section expander state (collapsed by default for safety).
     var dangerousExpanded by rememberSaveable { mutableStateOf(false) }
 
     LazyColumn(
@@ -140,9 +135,9 @@ fun AdvancedTuningScreen(
         contentPadding = PaddingValues(Spacing.screen),
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        // ── Page header ───────────────────────────────────────────────────
+        // ── Page header ─────────────────────────────────────────────────────────
         item {
-            AdvancedHeader(
+            ArsenalAdvancedHeader(
                 report = r,
                 onBack = onBack,
                 scriptBuilderMode = globalScriptBuilderMode,
@@ -152,31 +147,50 @@ fun AdvancedTuningScreen(
             )
         }
 
-        // ── Script deploy result ──────────────────────────────────────────
+        // ── Script deploy result ────────────────────────────────────────────────
         lastDeploy?.let { deployed ->
             item {
-                ScriptDeployedCard(deployed = deployed, onDismiss = viewModel::clearLastDeploy)
+                ArsenalScriptDeployedCard(deployed = deployed, onDismiss = viewModel::clearLastDeploy)
             }
         }
 
-        // ── Last write result feedback (live-write mode) ──────────────────
+        // ── Last write result feedback (live-write mode) ───────────────────────
         lastResult?.let { result ->
             item {
-                WriteResultCard(result = result, onDismiss = viewModel::clearLastResult)
+                ArsenalWriteResultCard(result = result, onDismiss = viewModel::clearLastResult)
             }
         }
 
-        // ── 1. CPU CORES ──────────────────────────────────────────────────
+        // ══ EASY ZONE — Primary actions at the top ══════════════════════════════
+
+        // ── 1. Predictive Thermal Guard ─────────────────────────────────────────
         item {
-            CpuCoresSection(
+            ThermalGuardPanel(
+                enabled = thermalGuardEnabled,
+                forecast = throttleForecast,
+                onToggle = { viewModel.setThermalGuardEnabled(it) },
+            )
+        }
+
+        // ── 2. Fan curve (only if device has a controllable fan) ────────────────
+        fanCurveModel?.let { fan ->
+            if (fan.isActive) {
+                item {
+                    FanCurvePanel(fanCurveModel = fan)
+                }
+            }
+        }
+
+        // ══ DEEP ZONE — Power-user controls below ═══════════════════════════════
+
+        // ── 3. CPU per-cluster cards (one per policy) ───────────────────────────
+        item {
+            ArsenalCpuClustersSection(
                 report = r,
                 pending = pendingAdvanced,
                 onWrite = { id, value, reason ->
-                    if (viewModel.isScriptBuilderMode(id, r)) {
-                        viewModel.stageAdvancedKnob(id, value)
-                    } else {
-                        viewModel.write(id, value, reason)
-                    }
+                    if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                    else viewModel.write(id, value, reason)
                 },
                 onStage = { id, value -> viewModel.stageAdvancedKnob(id, value) },
                 onUnstage = { id -> viewModel.unstageAdvancedKnob(id) },
@@ -184,184 +198,147 @@ fun AdvancedTuningScreen(
             )
         }
 
-        // ── 2. CPU GOVERNOR TUNING ────────────────────────────────────────
+        // ── 4. CPU Governor Tunables ────────────────────────────────────────────
         if (r.cpuGovernorTunables.isNotEmpty()) {
             item {
-                CpuGovernorTunablesSection(
-                    report = r,
-                    pending = pendingAdvanced,
-                    onWrite = { id, value, reason ->
-                        if (viewModel.isScriptBuilderMode(id, r)) {
-                            viewModel.stageAdvancedKnob(id, value)
-                        } else {
-                            viewModel.write(id, value, reason)
+                ArsenalExpandableSection("CPU GOVERNOR TUNING", Icons.Outlined.Settings, AccentBar.Blue) {
+                    Text(
+                        "Per-policy governor tunables — values from last probe.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF999999),
+                    )
+                    r.cpuGovernorTunables.forEachIndexed { i, probe ->
+                        if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+                        Text(
+                            "policy${probe.policyId} — ${probe.governor}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = AccentBar.Blue,
+                            letterSpacing = 0.06.sp,
+                            modifier = Modifier.padding(top = Spacing.group),
+                        )
+                        probe.tunables.entries.sortedBy { it.key }.forEach { (name, currentValue) ->
+                            val id = KernelTunables.cpuGovernorTunable(probe.policyId, probe.governor, name)
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                            TunableControl(id = id, currentValue = currentValue, report = r, onWrite = { tid, v, rsn ->
+                                if (viewModel.isScriptBuilderMode(tid, r)) viewModel.stageAdvancedKnob(tid, v)
+                                else viewModel.write(tid, v, rsn)
+                            }, pending = pendingAdvanced, scriptBuilderMode = globalScriptBuilderMode)
                         }
-                    },
-                    scriptBuilderMode = globalScriptBuilderMode,
-                )
+                    }
+                }
             }
         }
 
-        // ── 3. GPU ADVANCED ───────────────────────────────────────────────
+        // ── 5. GPU Advanced ─────────────────────────────────────────────────────
         r.gpu?.let { gpu ->
             item {
-                GpuAdvancedSection(
+                ArsenalGpuAdvancedSection(
                     report = r,
                     gpu = gpu,
                     adrenoExtras = r.adrenoExtras,
                     pending = pendingAdvanced,
                     onWrite = { id, value, reason ->
-                        if (viewModel.isScriptBuilderMode(id, r)) {
-                            viewModel.stageAdvancedKnob(id, value)
-                        } else {
-                            viewModel.write(id, value, reason)
-                        }
+                        if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                        else viewModel.write(id, value, reason)
                     },
                     scriptBuilderMode = globalScriptBuilderMode,
                 )
             }
         }
 
-        // ── 4. SCHEDULER BOOST ───────────────────────────────────────────
-        // /dev/stune and /dev/cpuctl are cgroup paths — NOT scriptable from
-        // app UID. Show read-only info with honest "Root only" label on stock.
+        // ── 6. Scheduler Boost ──────────────────────────────────────────────────
         if (r.schedBoostInterface != SchedBoostInterface.NONE && r.schedBoostValues.isNotEmpty()) {
             item {
-                SchedBoostSection(
-                    report = r,
-                    scriptBuilderMode = globalScriptBuilderMode,
-                    onWrite = { id, value, reason ->
-                        // cgroup paths are always root-only — write() will gate them
-                        viewModel.write(id, value, reason)
-                    },
-                )
+                ArsenalExpandableSection("SCHEDULER BOOST", Icons.Outlined.Tune, AccentBar.Blue) {
+                    SchedBoostContent(report = r, scriptBuilderMode = globalScriptBuilderMode, onWrite = { id, value, reason -> viewModel.write(id, value, reason) })
+                }
             }
         }
 
-        // ── 5. INPUT BOOST ────────────────────────────────────────────────
+        // ── 7. Input Boost ──────────────────────────────────────────────────────
         if (r.inputBoostPresent) {
             item {
-                InputBoostSection(
-                    report = r,
-                    pending = pendingAdvanced,
-                    onWrite = { id, value, reason ->
-                        if (viewModel.isScriptBuilderMode(id, r)) {
-                            viewModel.stageAdvancedKnob(id, value)
-                        } else {
-                            viewModel.write(id, value, reason)
-                        }
-                    },
-                    scriptBuilderMode = globalScriptBuilderMode,
-                )
+                ArsenalExpandableSection("INPUT BOOST", Icons.Outlined.TouchApp, AccentBar.Blue) {
+                    InputBoostContent(report = r, pending = pendingAdvanced, onWrite = { id, value, reason ->
+                        if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                        else viewModel.write(id, value, reason)
+                    }, scriptBuilderMode = globalScriptBuilderMode)
+                }
             }
         }
 
-        // ── 6. MEMORY / BUS (devfreq) ────────────────────────────────────
+        // ── 8. Memory / Bus ─────────────────────────────────────────────────────
         if (r.devfreqDevices.isNotEmpty()) {
             item {
-                MemoryBusSection(
-                    report = r,
-                    devices = r.devfreqDevices,
-                    pending = pendingAdvanced,
-                    onWrite = { id, value, reason ->
-                        if (viewModel.isScriptBuilderMode(id, r)) {
-                            viewModel.stageAdvancedKnob(id, value)
-                        } else {
-                            viewModel.write(id, value, reason)
-                        }
-                    },
-                    scriptBuilderMode = globalScriptBuilderMode,
-                )
+                ArsenalExpandableSection("MEMORY / BUS (devfreq)", Icons.Outlined.Memory, AccentBar.Blue) {
+                    MemoryBusContent(report = r, devices = r.devfreqDevices, pending = pendingAdvanced, onWrite = { id, value, reason ->
+                        if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                        else viewModel.write(id, value, reason)
+                    }, scriptBuilderMode = globalScriptBuilderMode)
+                }
             }
         }
 
-        // ── 7. I/O SCHEDULER ─────────────────────────────────────────────
+        // ── 9. I/O Scheduler ────────────────────────────────────────────────────
         if (r.blockDevices.isNotEmpty()) {
             item {
-                IoSection(
-                    report = r,
-                    devices = r.blockDevices,
-                    pending = pendingAdvanced,
-                    onWrite = { id, value, reason ->
-                        if (viewModel.isScriptBuilderMode(id, r)) {
-                            viewModel.stageAdvancedKnob(id, value)
-                        } else {
-                            viewModel.write(id, value, reason)
-                        }
-                    },
-                    scriptBuilderMode = globalScriptBuilderMode,
-                )
+                ArsenalExpandableSection("I/O SCHEDULER", Icons.Outlined.Storage, AccentBar.Neutral) {
+                    IoContent(report = r, devices = r.blockDevices, pending = pendingAdvanced, onWrite = { id, value, reason ->
+                        if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                        else viewModel.write(id, value, reason)
+                    }, scriptBuilderMode = globalScriptBuilderMode)
+                }
             }
         }
 
-        // ── 8. VM / KERNEL ────────────────────────────────────────────────
-        // /proc/sys writes cannot be done from app UID under SELinux.
-        // These are SCRIPT-ONLY on stock (no live writes from app UID).
+        // ── 10. VM / Kernel Sysctls ─────────────────────────────────────────────
         r.vmSysctls?.let { vm ->
             item {
-                VmKernelSection(
-                    report = r,
-                    vm = vm,
-                    pending = pendingAdvanced,
-                    onWrite = { id, value, reason ->
-                        // /proc/sys = script-only on stock (SELinux blocks app UID)
-                        if (r.privilege == PrivilegeTier.ROOT) {
-                            viewModel.write(id, value, reason)
-                        } else {
-                            viewModel.stageAdvancedKnob(id, value)
-                        }
-                    },
-                    scriptBuilderMode = globalScriptBuilderMode,
-                )
+                ArsenalExpandableSection("VM / KERNEL SYSCTLS", Icons.Outlined.Settings, AccentBar.Neutral) {
+                    VmKernelContent(report = r, vm = vm, pending = pendingAdvanced, onWrite = { id, value, reason ->
+                        if (r.privilege == PrivilegeTier.ROOT) viewModel.write(id, value, reason)
+                        else viewModel.stageAdvancedKnob(id, value)
+                    }, scriptBuilderMode = globalScriptBuilderMode)
+                }
             }
         }
 
-        // ── 9. CUSTOM SYSFS RULE ─────────────────────────────────────────
+        // ── 11. Custom Sysfs Rule ───────────────────────────────────────────────
         item {
-            CustomSysfsSection(
-                report = r,
-                history = customHistory,
-                pending = pendingAdvanced,
-                scriptBuilderMode = globalScriptBuilderMode,
-                onWrite = { path, value ->
-                    viewModel.writeCustomRule(path, value)
-                },
-            )
+            ArsenalExpandableSection("CUSTOM SYSFS RULE", Icons.Outlined.Code, AccentBar.Amber) {
+                CustomSysfsContent(report = r, history = customHistory, pending = pendingAdvanced,
+                    scriptBuilderMode = globalScriptBuilderMode, onWrite = { path, value -> viewModel.writeCustomRule(path, value) })
+            }
         }
 
-        // ── 10. VOLTAGE / UNDERVOLT HONESTY CARD ─────────────────────────
-        item {
-            VoltageHonestyCard()
-        }
+        // ── 12. Voltage / Undervolt honesty card ────────────────────────────────
+        item { ArsenalVoltageHonestyPanel() }
 
-        // ── DANGEROUS section — thermal gating ───────────────────────────
-        // Thermal is NEVER scriptable (safety). Shows current values
-        // with an honest "Root only — thermal controls are never scriptable" label.
+        // ── 13. Dangerous thermal section ───────────────────────────────────────
         if (r.thermalExtras.isNotEmpty() || r.coolingDevices.isNotEmpty()) {
             item {
-                DangerousExpander(
+                ArsenalDangerousExpander(
                     expanded = dangerousExpanded,
                     onToggle = { dangerousExpanded = !dangerousExpanded },
                 )
             }
             if (dangerousExpanded) {
                 item {
-                    ThermalDangerousSection(
+                    ArsenalThermalDangerousSection(
                         report = r,
                         thermalExtras = r.thermalExtras,
                         coolingDevices = r.coolingDevices,
-                        onWrite = { id, value, reason ->
-                            viewModel.write(id, value, reason)
-                        },
+                        onWrite = { id, value, reason -> viewModel.write(id, value, reason) },
                     )
                 }
             }
         }
 
-        // ── Bottom Generate Script CTA ────────────────────────────────────
+        // ── Bottom Generate Script CTA ──────────────────────────────────────────
         if (globalScriptBuilderMode && pendingAdvanced.isNotEmpty()) {
             item {
-                GenerateScriptCta(
+                ArsenalGenerateScriptCta(
                     stagedCount = pendingAdvanced.size,
                     onGenerate = { viewModel.generateAdvancedScript() },
                     onClear = { viewModel.clearPendingAdvanced() },
@@ -369,10 +346,8 @@ fun AdvancedTuningScreen(
             }
         }
 
-        // ── Footer ───────────────────────────────────────────────────────
-        item {
-            RevertFooter(scriptBuilderMode = globalScriptBuilderMode)
-        }
+        // ── Footer ──────────────────────────────────────────────────────────────
+        item { ArsenalRevertFooter(scriptBuilderMode = globalScriptBuilderMode) }
     }
 }
 
@@ -381,7 +356,7 @@ fun AdvancedTuningScreen(
 // =============================================================================
 
 @Composable
-private fun AdvancedHeader(
+private fun ArsenalAdvancedHeader(
     report: CapabilityReport,
     onBack: () -> Unit,
     scriptBuilderMode: Boolean,
@@ -392,94 +367,106 @@ private fun AdvancedHeader(
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Outlined.ChevronLeft, contentDescription = "Back")
+                Icon(Icons.Outlined.Settings, contentDescription = "Back", tint = Color(0xFF999999), modifier = Modifier.size(20.dp))
             }
-            Text(
-                "Advanced Tuning",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
-        when {
-            report.privilege == PrivilegeTier.ROOT -> {
-                AlertCard(
-                    type = AlertType.INFO,
-                    title = "Root tier active — writes go live immediately",
-                    message = "Every change is snapshotted before writing and reverts automatically on the next reboot.",
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "ADVANCED TUNING",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.05.sp,
+                    color = Color.White,
                 )
-            }
-            scriptBuilderMode && !report.sysfsDirectlyWritable -> {
-                // No unlock run. Show prominent script-builder explanation + unlock path.
-                AlertCard(
-                    type = AlertType.INFO,
-                    title = "Script builder — configure knobs, then Generate Script",
-                    message = "Nothing is written until you run the script via your device's Settings → Run script as Root. " +
-                        "Controls are enabled — select values, then tap Generate Script to bundle them into a runnable .sh file.",
-                )
-                // Surface the one-time unlock card: makes CPU/GPU/I/O controls live-writable.
-                UnlockBannerCard()
-            }
-            scriptBuilderMode && report.sysfsDirectlyWritable -> {
-                // Unlock ran. CPU/GPU/I/O knobs are now live; only procfs + cgroups are script-only.
-                AlertCard(
-                    type = AlertType.INFO,
-                    title = "Unlock active — CPU/GPU/I/O knobs write live",
-                    message = "The one-time unlock script has been run. CPU, GPU, DDR, I/O, and input-boost controls " +
-                        "write directly. Scheduler boost (cgroups) and VM sysctls are script-only — " +
-                        "stage them and use Generate Script.",
-                )
-            }
-            else -> {
-                // SHIZUKU or other
-                AlertCard(
-                    type = AlertType.WARNING,
-                    title = "Script builder — configure knobs, then Generate Script",
-                    message = "Direct sysfs writes are not available on this tier. Configure knobs and Generate Script to apply.",
+                Text(
+                    "Per-cluster, GPU, thermal, I/O",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF999999),
+                    letterSpacing = 0.04.sp,
                 )
             }
         }
 
-        // Generate Script CTA at the top (visible when knobs are staged).
+        // Mode disclosure
+        val modeAccent = when {
+            report.privilege == PrivilegeTier.ROOT -> AccentBar.Emerald
+            report.sysfsDirectlyWritable -> AccentBar.Blue
+            else -> AccentBar.Amber
+        }
+        val modeLabel = when {
+            report.privilege == PrivilegeTier.ROOT -> "ROOT — writes go live immediately"
+            report.sysfsDirectlyWritable -> "UNLOCK ACTIVE — CPU/GPU/I/O write live"
+            else -> "SCRIPT BUILDER — stage knobs, then Generate Script"
+        }
+        val modeBody = when {
+            report.privilege == PrivilegeTier.ROOT ->
+                "Every change is snapshotted before writing and reverts automatically on next reboot."
+            report.sysfsDirectlyWritable ->
+                "The unlock script ran. CPU, GPU, DDR, I/O, input-boost write directly. Scheduler boost (cgroups) and VM sysctls are script-only."
+            else ->
+                "Nothing writes until you run the script via Settings → Run script as Root. Controls are enabled — select values, then Generate Script."
+        }
+
+        ArsenalPanel(accent = modeAccent) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group), verticalAlignment = Alignment.Top) {
+                StatusPill(text = modeLabel, accent = modeAccent)
+            }
+            Spacer(Modifier.height(Spacing.dense))
+            Text(modeBody, style = MaterialTheme.typography.bodySmall, color = Color(0xFFBBBBBB))
+        }
+
+        // Generate Script CTA at top when knobs are staged
         if (scriptBuilderMode && stagedCount > 0) {
-            GenerateScriptCta(
-                stagedCount = stagedCount,
-                onGenerate = onGenerateScript,
-                onClear = onClearStaged,
-            )
+            ArsenalGenerateScriptCta(stagedCount = stagedCount, onGenerate = onGenerateScript, onClear = onClearStaged)
         }
     }
 }
 
 // =============================================================================
-// Unlock banner (one-time prompt to run the unlock script)
+// Script deploy result
 // =============================================================================
 
 @Composable
-private fun UnlockBannerCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-        ),
-    ) {
-        Column(
-            Modifier.padding(Spacing.card),
-            verticalArrangement = Arrangement.spacedBy(Spacing.dense),
-        ) {
-            Text(
-                "Run the one-time unlock to make CPU/GPU/I/O controls live-adjustable",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-            Text(
-                "Without the unlock: controls work as a Script Builder — configure values, Generate Script, run it once. " +
-                    "With the unlock: those same knobs write instantly without generating a script each time. " +
-                    "Go to the Tune screen → Advanced unlock → Generate + Run script.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
+private fun ArsenalScriptDeployedCard(deployed: AynScriptDeployer.Deployed, onDismiss: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    ArsenalPanel(accent = AccentBar.Amber, title = "Script generated") {
+        Text(
+            "Saved to: ${deployed.path}\n\n${
+                if (deployed.visibleToOdinPicker) "Open your device Settings → Run script as Root → pick the .sh from the CalibrateSoC folder."
+                else "Script in app-private folder — copy to /sdcard/CalibrateSoC/ manually or grant storage permission."
+            }",
+            style = MaterialTheme.typography.bodySmall, color = Color(0xFFCCCCCC),
+        )
+        Spacer(Modifier.height(Spacing.group))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            if (deployed.visibleToOdinPicker) {
+                ArsenalButton(label = "Open Settings", onClick = {
+                    io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openVendorSettings(context)
+                }, accent = AccentBar.Amber)
+            }
+            ArsenalButton(label = "Dismiss", onClick = onDismiss, accent = AccentBar.Neutral, style = ArsenalButtonStyle.Secondary)
+        }
+    }
+}
+
+// =============================================================================
+// Write result feedback
+// =============================================================================
+
+@Composable
+private fun ArsenalWriteResultCard(result: WriteResult, onDismiss: () -> Unit) {
+    val (accent, title, message) = when (result) {
+        is WriteResult.Success -> Triple(AccentBar.Emerald, "WRITE ACCEPTED",
+            "${result.id.target.substringAfterLast("/")} = ${result.newValue}${result.previousValue?.let { " (was: $it)" } ?: ""}")
+        is WriteResult.CapabilityDenied -> Triple(AccentBar.Amber, "WRITE BLOCKED", result.reason)
+        is WriteResult.Rejected -> Triple(AccentBar.Red, "KERNEL REJECTED WRITE",
+            result.message + (result.errno?.let { " (errno $it)" } ?: ""))
+        is WriteResult.Failed -> Triple(AccentBar.Red, "WRITE FAILED", result.error.message ?: result.error.javaClass.simpleName)
+    }
+    ArsenalPanel(accent = accent) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+            StatusPill(text = title, accent = accent)
+            Text(message, style = MaterialTheme.typography.bodySmall, color = Color(0xFFCCCCCC), modifier = Modifier.weight(1f))
+            ArsenalButton(label = "Dismiss", onClick = onDismiss, accent = AccentBar.Neutral, style = ArsenalButtonStyle.Secondary)
         }
     }
 }
@@ -489,661 +476,167 @@ private fun UnlockBannerCard() {
 // =============================================================================
 
 @Composable
-private fun GenerateScriptCta(
-    stagedCount: Int,
-    onGenerate: () -> Unit,
-    onClear: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-        ),
-    ) {
-        Column(
-            Modifier.padding(Spacing.card),
-            verticalArrangement = Arrangement.spacedBy(Spacing.group),
-        ) {
-            Text(
-                "$stagedCount knob${if (stagedCount != 1) "s" else ""} staged",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Text(
-                "Generate a script with all staged knobs, then run it via your device's Settings → Run script as Root.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                Button(
-                    onClick = onGenerate,
-                    enabled = stagedCount > 0,
-                ) {
-                    Icon(
-                        Icons.Outlined.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text("Generate Script ($stagedCount)")
-                }
-                OutlinedButton(onClick = onClear) { Text("Clear") }
-            }
-        }
-    }
-}
-
-// =============================================================================
-// Script deploy feedback card (replaces transient dialog in script-builder mode)
-// =============================================================================
-
-@Composable
-private fun ScriptDeployedCard(
-    deployed: AynScriptDeployer.Deployed,
-    onDismiss: () -> Unit,
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    AlertCard(
-        type = AlertType.INFO,
-        title = "Script generated",
-        message = "Saved to: ${deployed.path}\n\n" +
-            if (deployed.visibleToOdinPicker) {
-                "Open your device Settings → Run script as Root → pick the .sh from the CalibrateSoC folder."
-            } else {
-                "The script is in the app-private folder — copy it to /sdcard/CalibrateSoC/ manually or grant storage permission."
-            },
-        action = {
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                if (deployed.visibleToOdinPicker) {
-                    TextButton(onClick = {
-                        io.github.mayusi.calibratesoc.data.vendor.OdinIntents
-                            .openVendorSettings(context)
-                    }) { Text("Open Settings") }
-                }
-                TextButton(onClick = onDismiss) { Text("Dismiss") }
-            }
-        },
-    )
-}
-
-// =============================================================================
-// Write result feedback card
-// =============================================================================
-
-@Composable
-private fun WriteResultCard(result: WriteResult, onDismiss: () -> Unit) {
-    val (alertType, title, message) = when (result) {
-        is WriteResult.Success -> Triple(
-            AlertType.INFO,
-            "Write accepted",
-            "${result.id.target.substringAfterLast("/")} = ${result.newValue}" +
-                (result.previousValue?.let { " (was: $it)" } ?: ""),
-        )
-        is WriteResult.CapabilityDenied -> Triple(
-            AlertType.WARNING,
-            "Write blocked",
-            result.reason,
-        )
-        is WriteResult.Rejected -> Triple(
-            AlertType.ERROR,
-            "Kernel rejected write",
-            result.message + (result.errno?.let { " (errno $it)" } ?: ""),
-        )
-        is WriteResult.Failed -> Triple(
-            AlertType.ERROR,
-            "Write failed",
-            result.error.message ?: result.error.javaClass.simpleName,
-        )
-    }
-    AlertCard(
-        type = alertType,
-        title = title,
-        message = message,
-        action = {
-            TextButton(onClick = onDismiss) { Text("Dismiss") }
-        },
-    )
-}
-
-// =============================================================================
-// Risk badge
-// =============================================================================
-
-@Composable
-private fun RiskBadge(risk: Risk) {
-    val (label, color) = when (risk) {
-        Risk.SAFE -> "SAFE" to MaterialTheme.colorScheme.onSurfaceVariant
-        Risk.LOW -> "LOW" to MaterialTheme.colorScheme.onSurfaceVariant
-        Risk.MEDIUM -> "MEDIUM" to Color(0xFFFFB300)
-        Risk.HIGH -> "HIGH" to MaterialTheme.colorScheme.error
-        Risk.DANGEROUS -> "DANGEROUS" to MaterialTheme.colorScheme.error
-    }
-    Surface(
-        shape = MaterialTheme.shapes.extraSmall,
-        color = color.copy(alpha = 0.12f),
-    ) {
+private fun ArsenalGenerateScriptCta(stagedCount: Int, onGenerate: () -> Unit, onClear: () -> Unit) {
+    ArsenalPanel(accent = AccentBar.Amber, accentEdge = PanelAccentEdge.Bottom, title = "$stagedCount knob${if (stagedCount != 1) "s" else ""} staged") {
         Text(
-            label,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = color,
+            "Generate a script with all staged knobs, then run it via Settings → Run script as Root.",
+            style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999),
         )
-    }
-}
-
-// =============================================================================
-// Generic tunable control — pick widget by ValueKind
-// =============================================================================
-
-/**
- * A single editable kernel knob. Renders the appropriate control based on
- * [TunableMetadata.ValueKind]. Validates before dispatching the write.
- * HIGH/DANGEROUS knobs require a confirm dialog first.
- *
- * @param id              The [TunableId] for this knob.
- * @param currentValue    String value currently in the kernel (from probe).
- * @param report          For privilege pre-flight.
- * @param onWrite         Callback returning an error string or null on success.
- *                        In script-builder mode this callback stages rather than writes.
- * @param pending         The current [pendingAdvanced] map — used to show "staged" chip.
- * @param scriptBuilderMode  If true the control is ENABLED even when [Tunables.whyWriteDenied]
- *                        is non-null: the user can select values to stage for script generation.
- * @param enumOptions     Override the options list for ENUM controls that need
- *                        live values from the probe (e.g. governors). Pass null
- *                        to use the options from [TunableMetadata].
- */
-@Composable
-private fun TunableControl(
-    id: TunableId,
-    currentValue: String,
-    report: CapabilityReport,
-    onWrite: (TunableId, String, String) -> String?,
-    pending: Map<String, String> = emptyMap(),
-    scriptBuilderMode: Boolean = false,
-    enumOptions: List<String>? = null,
-    modifier: Modifier = Modifier,
-) {
-    val meta = TunableMetadata.forId(id)
-    val denyReason = Tunables.whyWriteDenied(id, report)
-    // In script-builder mode, controls are ENABLED even without root.
-    // They stage knobs into pendingAdvanced instead of writing directly.
-    val isDisabled = if (scriptBuilderMode) false else denyReason != null
-    val isStaged = id.target in pending
-
-    // Confirmation pending: used for HIGH/DANGEROUS controls.
-    var pendingConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var inlineError by remember { mutableStateOf<String?>(null) }
-
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-        // Header row: name + risk badge + staged chip
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                meta.name,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
+        Spacer(Modifier.height(Spacing.group))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            ArsenalButton(
+                label = "Generate Script ($stagedCount)",
+                onClick = onGenerate,
+                accent = AccentBar.Amber,
                 modifier = Modifier.weight(1f),
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (isStaged) {
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("staged", style = MaterialTheme.typography.labelSmall) },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        ),
-                    )
-                }
-                RiskBadge(meta.risk)
-            }
+            ArsenalButton(label = "Clear", onClick = onClear, accent = AccentBar.Neutral, style = ArsenalButtonStyle.Secondary)
         }
+    }
+}
 
-        // Description
+// =============================================================================
+// Thermal Guard panel — EASY zone, primary power-user action
+// =============================================================================
+
+@Composable
+private fun ThermalGuardPanel(
+    enabled: Boolean,
+    forecast: ThrottleForecast?,
+    onToggle: (Boolean) -> Unit,
+) {
+    val accent = if (enabled && forecast?.actionRequired == true) AccentBar.Red
+                 else if (enabled) AccentBar.Emerald
+                 else AccentBar.Neutral
+
+    ArsenalPanel(accent = accent, title = "Predictive Thermal Guard") {
         Text(
-            meta.description,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            "Monitors CPU temperature trend using linear regression. Applies a pre-emptive frequency cap " +
+                "when a kernel throttle cliff is predicted within ${PredictiveThrottleGuard.DEFAULT_HORIZON_SECONDS}s — " +
+                "keeping FPS smooth instead of a sudden throttle drop.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
         )
-
-        // Privilege notice — honest context-sensitive label
-        when {
-            scriptBuilderMode && denyReason != null && !isStaged -> {
-                Text(
-                    "Will be included in generated script when staged",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            scriptBuilderMode && denyReason != null && isStaged -> {
-                Text(
-                    "Staged — will be written when you run the script",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary,
-                )
-            }
-            denyReason != null -> {
-                Text(
-                    "Write blocked: $denyReason",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-
-        // Inline validation error
-        inlineError?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-
-        // ── Control widget ────────────────────────────────────────────────
-        val effectiveOptions = enumOptions ?: (meta.valueKind as? ValueKind.ENUM)?.options ?: emptyList()
-
-        val doWrite: (String) -> Unit = { value ->
-            inlineError = null
-            val writeAction = {
-                val err = onWrite(id, value, "Advanced Tuning: ${meta.name}")
-                if (err != null) inlineError = err
-            }
-            if (meta.risk == Risk.HIGH || meta.risk == Risk.DANGEROUS) {
-                pendingConfirm = writeAction
-            } else {
-                writeAction()
-            }
-        }
-
-        when (val kind = meta.valueKind) {
-            is ValueKind.BOOL -> {
-                val on = currentValue.trim() == "1"
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        if (on) "Enabled" else "Disabled",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (isDisabled) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onSurface,
-                    )
-                    Switch(
-                        checked = on,
-                        onCheckedChange = { doWrite(if (it) "1" else "0") },
-                        enabled = !isDisabled,
-                    )
-                }
-            }
-
-            is ValueKind.ENUM -> {
-                if (effectiveOptions.isNotEmpty()) {
-                    EnumDropdown(
-                        current = currentValue.trim(),
-                        options = effectiveOptions,
-                        enabled = !isDisabled,
-                        onSelect = { doWrite(it) },
-                    )
-                } else {
-                    // No options available (probe didn't enumerate them)
-                    RawStringControl(
-                        current = currentValue,
-                        enabled = !isDisabled,
-                        onCommit = { doWrite(it) },
-                        actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply",
-                    )
-                }
-            }
-
-            is ValueKind.INT_RANGE -> {
-                IntRangeControl(
-                    current = currentValue.trim().toIntOrNull() ?: kind.min,
-                    min = kind.min,
-                    max = kind.max,
-                    step = kind.step,
-                    unit = kind.unit,
-                    enabled = !isDisabled,
-                    onCommit = { doWrite(it.toString()) },
-                )
-            }
-
-            is ValueKind.FREQ_KHZ -> {
-                FreqKhzControl(
-                    currentKhz = currentValue.trim().toIntOrNull() ?: kind.minKhz,
-                    minKhz = kind.minKhz,
-                    maxKhz = kind.maxKhz,
-                    enabled = !isDisabled,
-                    onCommit = { doWrite(it.toString()) },
-                )
-            }
-
-            is ValueKind.RAW_STRING -> {
-                RawStringControl(
-                    current = currentValue,
-                    enabled = !isDisabled,
-                    onCommit = { doWrite(it) },
-                    actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply",
-                )
-            }
-        }
-    }
-
-    // Confirm dialog for HIGH/DANGEROUS knobs.
-    // In script-builder mode the dialog says "add to script" instead of "apply".
-    pendingConfirm?.let { action ->
-        DangerousConfirmDialog(
-            meta = meta,
-            scriptBuilderMode = scriptBuilderMode && denyReason != null,
-            onConfirm = {
-                action()
-                pendingConfirm = null
-            },
-            onDismiss = { pendingConfirm = null },
-        )
-    }
-}
-
-// =============================================================================
-// Widget primitives
-// =============================================================================
-
-@Composable
-private fun EnumDropdown(
-    current: String,
-    options: List<String>,
-    enabled: Boolean,
-    onSelect: (String) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        OutlinedTextField(
-            value = current,
-            onValueChange = {},
-            readOnly = true,
-            enabled = enabled,
-            trailingIcon = {
-                IconButton(onClick = { if (enabled) expanded = true }) {
-                    Icon(
-                        if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = "Expand",
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(option, fontFamily = FontFamily.Monospace) },
-                    onClick = {
-                        expanded = false
-                        onSelect(option)
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun IntRangeControl(
-    current: Int,
-    min: Int,
-    max: Int,
-    step: Int,
-    unit: String,
-    enabled: Boolean,
-    onCommit: (Int) -> Unit,
-) {
-    val steps = if (step > 1 && max > min) (max - min) / step else 0
-    var position by remember(current) { mutableFloatStateOf(current.toFloat()) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                "${position.toInt()} $unit".trim(),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-            )
-            Text(
-                "$min … $max $unit".trim(),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Spacer(Modifier.height(Spacing.group))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
-        ) {
-            Slider(
-                value = position,
-                onValueChange = { position = it },
-                onValueChangeFinished = { onCommit(position.toInt()) },
-                valueRange = min.toFloat()..max.toFloat(),
-                steps = steps,
-                enabled = enabled,
-                modifier = Modifier.weight(1f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun FreqKhzControl(
-    currentKhz: Int,
-    minKhz: Int,
-    maxKhz: Int,
-    enabled: Boolean,
-    onCommit: (Int) -> Unit,
-) {
-    var position by remember(currentKhz) { mutableFloatStateOf(currentKhz.toFloat()) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                "${"%.1f".format(position / 1000f)} MHz",
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-            )
-            Text(
-                "${"%.0f".format(minKhz / 1000f)} … ${"%.0f".format(maxKhz / 1000f)} MHz",
+                "THERMAL GUARD",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                letterSpacing = 0.07.sp,
             )
+            Box(
+                modifier = Modifier
+                    .background(
+                        if (enabled) accent.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .border(1.dp, if (enabled) accent else Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                    .clickable { onToggle(!enabled) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (enabled) "ON" else "OFF",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (enabled) accent else Color(0xFF888888),
+                    letterSpacing = 0.06.sp,
+                )
+            }
         }
-        Slider(
-            value = position,
-            onValueChange = { position = it },
-            onValueChangeFinished = { onCommit(position.toInt()) },
-            valueRange = minKhz.toFloat()..maxKhz.toFloat(),
-            enabled = enabled,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
 
-@Composable
-private fun RawStringControl(
-    current: String,
-    enabled: Boolean,
-    onCommit: (String) -> Unit,
-    actionLabel: String = "Apply",
-) {
-    var text by remember(current) { mutableStateOf(current) }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            enabled = enabled,
-            singleLine = true,
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            modifier = Modifier.weight(1f),
-        )
-        Button(
-            onClick = { onCommit(text) },
-            enabled = enabled && text.isNotBlank() && text != current,
-        ) {
-            Text(actionLabel)
-        }
-    }
-}
-
-// =============================================================================
-// Dangerous-confirm dialog
-// =============================================================================
-
-@Composable
-private fun DangerousConfirmDialog(
-    meta: TunableMetadata.TunableInfo,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-    scriptBuilderMode: Boolean = false,
-) {
-    val warningText = when {
-        meta.name.contains("Throttling", ignoreCase = true) ->
-            "Disabling thermal protection on a fanless device usually makes performance WORSE " +
-                "from heat buildup and risks thermal shutdown or hardware damage. " +
-                "Only do this for short benchmarks in a controlled environment. Reverts on reboot."
-        meta.name.contains("Thermal Zone", ignoreCase = true) ->
-            "Disabling a thermal zone removes that temperature limit entirely. " +
-                "The device may overheat silently with no throttle applied. " +
-                "Reverts on reboot — but heat damage before then is permanent."
-        meta.name.contains("Trip Point", ignoreCase = true) ->
-            "Raising a thermal trip point delays throttling. An excessively high value " +
-                "means the SoC can sustain dangerous temperatures before the kernel reacts. " +
-                "Hardware damage risk on repeated exposure. Reverts on reboot."
-        meta.name.contains("Cooling Device", ignoreCase = true) ->
-            "Setting cur_state to 0 removes the thermal cap on this cooling device. " +
-                "The affected component can run uncapped under thermal load. " +
-                "Reverts on reboot, but heat damage before then is permanent."
-        meta.name.contains("CPU0", ignoreCase = true) ->
-            "CPU0 is the boot processor. Taking it offline will crash the device immediately."
-        else ->
-            "This is a ${meta.risk.name} risk change: ${meta.description} Reverts on reboot."
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = {
-            Icon(
-                Icons.Outlined.WarningAmber,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(32.dp),
-            )
-        },
-        title = {
+        if (enabled && forecast != null) {
+            Spacer(Modifier.height(Spacing.dense))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+            Spacer(Modifier.height(Spacing.dense))
+            if (forecast.actionRequired) {
+                StatusPill(text = "THROTTLE IMMINENT", accent = AccentBar.Red)
+                Spacer(Modifier.height(Spacing.dense))
+                Text(
+                    forecast.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = AccentBar.Red,
+                )
+                forecast.recommendedCapKhz?.let { cap ->
+                    Spacer(Modifier.height(Spacing.dense))
+                    MetricTile(
+                        label = "RECOMMENDED PRE-EMPTIVE CAP",
+                        value = "${cap / 1000}",
+                        unit = "MHz",
+                        accent = AccentBar.Red,
+                        valueColor = AccentBar.Red,
+                    )
+                }
+            } else {
+                StatusPill(text = "THERMAL OK", accent = AccentBar.Emerald)
+                Spacer(Modifier.height(Spacing.dense))
+                Text(
+                    forecast.reason,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF888888),
+                )
+            }
+        } else if (enabled) {
+            Spacer(Modifier.height(Spacing.dense))
             Text(
-                "${meta.risk.name} RISK — ${meta.name}",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.error,
+                "Collecting telemetry window… need ${PredictiveThrottleGuard.MIN_WINDOW_POINTS} samples.",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF888888),
             )
-        },
-        text = {
-            Text(warningText, style = MaterialTheme.typography.bodySmall)
-        },
-        confirmButton = {
-            Button(
-                onClick = onConfirm,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error,
-                    contentColor = MaterialTheme.colorScheme.onError,
-                ),
-            ) {
-                Text(if (scriptBuilderMode) "I understand — add to script" else "I understand — apply anyway")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
-}
-
-// =============================================================================
-// Expandable section card helper
-// =============================================================================
-
-@Composable
-private fun ExpandableSectionCard(
-    title: String,
-    icon: ImageVector,
-    initiallyExpanded: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                IconButton(onClick = { expanded = !expanded }) {
-                    Icon(
-                        if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = if (expanded) "Collapse" else "Expand",
-                    )
-                }
-            }
-            if (expanded) {
-                content()
-            }
         }
     }
 }
 
 // =============================================================================
-// Section: CPU Cores
+// Fan curve panel (only shown when device has a controllable fan)
 // =============================================================================
 
 @Composable
-private fun CpuCoresSection(
+private fun FanCurvePanel(fanCurveModel: FanCurveModel) {
+    ArsenalPanel(accent = AccentBar.Blue, title = "Fan curve") {
+        val probe = fanCurveModel.fanProbe!!
+        Text(
+            "Device has a controllable fan (${probe.source.name}). Default curve shown — curve editor coming in a future update. Current RPM: ${probe.currentRpm?.let { "$it RPM" } ?: "unknown"}.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+        fanCurveModel.points.forEachIndexed { i, pt ->
+            StatBar(
+                label = "${pt.tempC.toInt()}°C",
+                value = "${pt.dutyPct.toInt()}%",
+                fraction = pt.dutyPct / 100f,
+                accent = when {
+                    pt.dutyPct >= 90f -> AccentBar.Red
+                    pt.dutyPct >= 65f -> AccentBar.Amber
+                    pt.dutyPct >= 30f -> AccentBar.Blue
+                    else -> AccentBar.Neutral
+                },
+            )
+            if (i < fanCurveModel.points.size - 1) Spacer(Modifier.height(Spacing.dense))
+        }
+        Spacer(Modifier.height(Spacing.dense))
+        Text(
+            "Fan control path: ${probe.controlPath}. Source: ${probe.source.name}. Curve editor will be exposed once the write path is verified on this device.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF777777),
+        )
+    }
+}
+
+// =============================================================================
+// Per-cluster CPU cards
+// =============================================================================
+
+@Composable
+private fun ArsenalCpuClustersSection(
     report: CapabilityReport,
     pending: Map<String, String>,
     onWrite: (TunableId, String, String) -> String?,
@@ -1151,137 +644,182 @@ private fun CpuCoresSection(
     onUnstage: (TunableId) -> Unit,
     scriptBuilderMode: Boolean,
 ) {
-    ExpandableSectionCard("CPU Cores", Icons.Outlined.Speed) {
-        Text(
-            "Toggle individual cores online/offline. CPU0 cannot be offlined — it is the boot processor.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    val allPolicyMaxKhz = report.cpuPolicies.map { it.currentMaxKhz }.distinct().sorted()
 
-        val maxCore = report.cpuPolicies.flatMap { it.onlineCores }.maxOrNull() ?: 0
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        SectionHeader(title = "CPU Clusters", accent = AccentBar.Blue)
+        Spacer(Modifier.height(Spacing.dense))
 
-        for (coreIdx in 0..maxCore) {
-            val cluster = report.cpuPolicies.firstOrNull { coreIdx in it.onlineCores }
-            val clusterLabel = cluster?.let { "Cluster (policy${it.policyId})" } ?: ""
-            val id = KernelTunables.cpuOnline(coreIdx)
-            val meta = TunableMetadata.forId(id)
-            val isCpu0 = coreIdx == 0
-            val denyReason = Tunables.whyWriteDenied(id, report)
-            val isStaged = id.target in pending
+        report.cpuPolicies.forEach { policy ->
+            val tierLabel = clusterTierLabel(policy.currentMaxKhz, allPolicyMaxKhz).uppercase()
+            val clusterAccent = when (tierLabel) {
+                "EFFICIENCY" -> AccentBar.Emerald
+                "BIG" -> AccentBar.Blue
+                "PRIME" -> AccentBar.Red
+                else -> AccentBar.Blue
+            }
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+            ArsenalPanel(accent = clusterAccent) {
+                // Cluster header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
+                    StatusPill(text = tierLabel, accent = clusterAccent)
+                    Text(
+                        "policy${policy.policyId}  •  cores ${policy.onlineCores.min()}–${policy.onlineCores.max()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF888888),
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+
+                Spacer(Modifier.height(Spacing.group))
+
+                // Live frequency StatBars
+                val freqFraction = if (policy.currentMaxKhz > 0 && policy.availableFreqsKhz.isNotEmpty()) {
+                    val max = policy.availableFreqsKhz.max().toFloat()
+                    policy.currentMaxKhz.toFloat() / max
+                } else 0f
+
+                StatBar(
+                    label = "Max freq",
+                    value = "${policy.currentMaxKhz / 1000} MHz",
+                    fraction = freqFraction,
+                    accent = clusterAccent,
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                val minFraction = if (policy.currentMinKhz > 0 && policy.availableFreqsKhz.isNotEmpty()) {
+                    val max = policy.availableFreqsKhz.max().toFloat()
+                    policy.currentMinKhz.toFloat() / max
+                } else 0f
+                StatBar(
+                    label = "Min freq",
+                    value = "${policy.currentMinKhz / 1000} MHz",
+                    fraction = minFraction,
+                    accent = clusterAccent.copy(alpha = 0.6f),
+                )
+
+                Spacer(Modifier.height(Spacing.group))
+                HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                Spacer(Modifier.height(Spacing.group))
+
+                // Governor picker
+                if (policy.availableGovernors.size > 1) {
+                    val scalingGovId = Tunables.cpuGovernor(policy.policyId)
+                    Text("GOVERNOR", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                    Spacer(Modifier.height(Spacing.dense))
+                    GovernorDropdown(
+                        current = policy.currentGovernor,
+                        options = policy.availableGovernors,
+                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(scalingGovId, report) == null,
+                        onSelect = { gov ->
+                            onWrite(scalingGovId, gov, "CPU governor policy${policy.policyId}")
+                        },
+                    )
+                    Spacer(Modifier.height(Spacing.group))
+                }
+
+                // Max freq slider
+                if (policy.availableFreqsKhz.size > 1) {
+                    val maxId = Tunables.cpuMaxFreq(policy.policyId)
+                    Text("MAX FREQ (scaling_max_freq)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                    Spacer(Modifier.height(Spacing.dense))
+                    FreqKhzControl(
+                        currentKhz = policy.currentMaxKhz,
+                        minKhz = policy.availableFreqsKhz.min(),
+                        maxKhz = policy.availableFreqsKhz.max(),
+                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(maxId, report) == null,
+                        onCommit = { onWrite(maxId, it.toString(), "CPU max freq policy${policy.policyId}") },
+                    )
+                    Spacer(Modifier.height(Spacing.group))
+                }
+
+                // Min freq slider
+                if (policy.availableFreqsKhz.size > 1) {
+                    val minId = Tunables.cpuMinFreq(policy.policyId)
+                    Text("MIN FREQ (scaling_min_freq)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                    Spacer(Modifier.height(Spacing.dense))
+                    FreqKhzControl(
+                        currentKhz = policy.currentMinKhz,
+                        minKhz = policy.availableFreqsKhz.min(),
+                        maxKhz = policy.availableFreqsKhz.max(),
+                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(minId, report) == null,
+                        onCommit = { onWrite(minId, it.toString(), "CPU min freq policy${policy.policyId}") },
+                    )
+                }
+
+                // CPU0 protection note
+                if (0 in policy.onlineCores) {
+                    Spacer(Modifier.height(Spacing.dense))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                    Spacer(Modifier.height(Spacing.dense))
+                    Text(
+                        "cpu0 is the boot processor — cannot be offlined. Online/offline of other cores available in CPU Cores section.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentBar.Amber,
+                    )
+                }
+            }
+        }
+
+        // CPU Cores online/offline
+        ArsenalExpandableSection("CPU CORE ONLINE/OFFLINE", Icons.Outlined.Speed, AccentBar.Blue, initiallyExpanded = false) {
+            Text("CPU0 cannot be offlined — it is the boot processor.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+            val maxCore = report.cpuPolicies.flatMap { it.onlineCores }.maxOrNull() ?: 0
+            for (coreIdx in 0..maxCore) {
+                val isCpu0 = coreIdx == 0
+                val id = KernelTunables.cpuOnline(coreIdx)
+                val meta = TunableMetadata.forId(id)
+                val denyReason = Tunables.whyWriteDenied(id, report)
+                val isStaged = id.target in pending
+                val cluster = report.cpuPolicies.firstOrNull { coreIdx in it.onlineCores }
+                HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                            Text("CPU$coreIdx", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White)
+                            cluster?.let { Text("policy${it.policyId}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888)) }
+                            ArsenalRiskBadge(meta.risk)
+                            if (isStaged) StatusPill(text = "staged", accent = AccentBar.Blue)
+                        }
+                        if (isCpu0) Text("Boot processor — cannot be offlined", style = MaterialTheme.typography.labelSmall, color = AccentBar.Red)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                if (!isCpu0) AccentBar.Emerald.copy(alpha = 0.15f) else Color(0xFF0C0C10),
+                                RoundedCornerShape(4.dp),
+                            )
+                            .border(1.dp, if (!isCpu0) AccentBar.Emerald.copy(alpha = 0.4f) else Color.White.copy(alpha = 0.08f), RoundedCornerShape(4.dp))
+                            .let { mod ->
+                                if (!isCpu0) mod.clickable {
+                                    onWrite(id, "0", "CPU$coreIdx offline")
+                                } else mod
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
                     ) {
                         Text(
-                            "CPU$coreIdx",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        if (clusterLabel.isNotBlank()) {
-                            Text(
-                                clusterLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        RiskBadge(meta.risk)
-                        if (isStaged) {
-                            AssistChip(
-                                onClick = {},
-                                label = { Text("staged", style = MaterialTheme.typography.labelSmall) },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                ),
-                            )
-                        }
-                    }
-                    if (isCpu0) {
-                        Text(
-                            "Boot processor — cannot be offlined",
+                            "ONLINE",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    } else if (scriptBuilderMode && denyReason != null && !isStaged) {
-                        Text(
-                            "Will be included in generated script when staged",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                            color = if (!isCpu0) AccentBar.Emerald else Color(0xFF555555),
+                            letterSpacing = 0.06.sp,
                         )
                     }
                 }
-                Switch(
-                    checked = true, // All listed cores are online per probe
-                    onCheckedChange = { wantOn ->
-                        if (!isCpu0) {
-                            onWrite(id, if (wantOn) "1" else "0", "CPU$coreIdx online")
-                        }
-                    },
-                    enabled = !isCpu0 && (scriptBuilderMode || denyReason == null),
-                )
             }
         }
     }
 }
 
 // =============================================================================
-// Section: CPU Governor Tunables
+// GPU Advanced section
 // =============================================================================
 
 @Composable
-private fun CpuGovernorTunablesSection(
-    report: CapabilityReport,
-    pending: Map<String, String>,
-    onWrite: (TunableId, String, String) -> String?,
-    scriptBuilderMode: Boolean,
-) {
-    ExpandableSectionCard("CPU Governor Tuning", Icons.Outlined.Settings) {
-        Text(
-            "Per-policy governor tunables discovered dynamically from the kernel. " +
-                "Values shown are from the last capability probe — they may not reflect live changes.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        report.cpuGovernorTunables.forEachIndexed { i, probe ->
-            if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text(
-                "policy${probe.policyId} — ${probe.governor}",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = Spacing.group),
-            )
-
-            probe.tunables.entries.sortedBy { it.key }.forEach { (name, currentValue) ->
-                val id = KernelTunables.cpuGovernorTunable(probe.policyId, probe.governor, name)
-                HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                TunableControl(
-                    id = id,
-                    currentValue = currentValue,
-                    report = report,
-                    onWrite = onWrite,
-                    pending = pending,
-                    scriptBuilderMode = scriptBuilderMode,
-                )
-            }
-        }
-    }
-}
-
-// =============================================================================
-// Section: GPU Advanced
-// =============================================================================
-
-@Composable
-private fun GpuAdvancedSection(
+private fun ArsenalGpuAdvancedSection(
     report: CapabilityReport,
     gpu: GpuProbe,
     adrenoExtras: AdrenoExtrasProbe?,
@@ -1289,14 +827,13 @@ private fun GpuAdvancedSection(
     onWrite: (TunableId, String, String) -> String?,
     scriptBuilderMode: Boolean,
 ) {
-    ExpandableSectionCard("GPU Advanced", Icons.Outlined.Bolt) {
+    ArsenalExpandableSection("GPU ADVANCED", Icons.Outlined.Bolt, AccentBar.Purple) {
         Text(
-            "Adreno power levels (0 = fastest). Lower index = more GPU performance + power draw.",
+            "Adreno power levels (0 = fastest, higher = slower/lower voltage).",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF999999),
         )
 
-        // Power level controls (when Adreno extras present)
         if (adrenoExtras != null) {
             val numLevels = adrenoExtras.pwrLevelFreqHz.size.coerceAtLeast(
                 maxOf(
@@ -1312,703 +849,229 @@ private fun GpuAdvancedSection(
                 return if (hz != null) "$idx (${"%.0f".format(hz / 1_000_000f)} MHz)" else "$idx"
             }
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text("Power Levels", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(Spacing.group))
 
-            // Min power level
-            val minId = KernelTunables.adrenoMinPowerLevel(gpu.rootPath)
-            val minMeta = TunableMetadata.forId(minId)
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(minMeta.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                    RiskBadge(minMeta.risk)
-                }
-                Text(minMeta.description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Current: ${levelLabel(adrenoExtras.currentMinPwrLevel)}", style = MaterialTheme.typography.labelSmall)
-                if (numLevels > 1) {
-                    IntRangeControl(
-                        current = adrenoExtras.currentMinPwrLevel ?: 0,
-                        min = 0,
-                        max = numLevels - 1,
-                        step = 1,
-                        unit = "(lower=faster)",
-                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(minId, report) == null,
-                        onCommit = { onWrite(minId, it.toString(), "GPU min power level") },
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-
-            // Max power level
-            val maxId = KernelTunables.adrenoMaxPowerLevel(gpu.rootPath)
-            val maxMeta = TunableMetadata.forId(maxId)
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(maxMeta.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                    RiskBadge(maxMeta.risk)
-                }
-                Text(maxMeta.description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Current: ${levelLabel(adrenoExtras.currentMaxPwrLevel)}", style = MaterialTheme.typography.labelSmall)
-                if (numLevels > 1) {
-                    IntRangeControl(
-                        current = adrenoExtras.currentMaxPwrLevel ?: 0,
-                        min = 0,
-                        max = numLevels - 1,
-                        step = 1,
-                        unit = "(lower=faster)",
-                        enabled = scriptBuilderMode || Tunables.whyWriteDenied(maxId, report) == null,
-                        onCommit = { onWrite(maxId, it.toString(), "GPU max power level") },
-                    )
-                }
-            }
-
-            // Default power level
-            val defaultId = KernelTunables.adrenoDefaultPowerLevel(gpu.rootPath)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = defaultId,
-                currentValue = adrenoExtras.currentDefaultPwrLevel?.toString() ?: "—",
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // GPU throttling — HIGH risk, confirm-gated via TunableControl
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            val throttleId = KernelTunables.gpuThrottling(gpu.rootPath)
-            TunableControl(
-                id = throttleId,
-                currentValue = if (adrenoExtras.throttlingEnabled == true) "1" else "0",
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // Force clocks on
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            val forceClkId = KernelTunables.gpuForceClkOn(gpu.rootPath)
-            TunableControl(
-                id = forceClkId,
-                currentValue = if (adrenoExtras.forceClkOn == true) "1" else "0",
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // Idle timer
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            val idleTimerId = KernelTunables.gpuIdleTimer(gpu.rootPath)
-            TunableControl(
-                id = idleTimerId,
-                currentValue = adrenoExtras.idleTimerMs?.toString() ?: "0",
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-        }
-
-        // GPU governor picker (allow change)
-        if (gpu.availableGovernors.size > 1) {
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            val govId = Tunables.gpuGovernor(gpu.rootPath)
-            val govMeta = TunableMetadata.forId(govId)
-            val govDenyReason = Tunables.whyWriteDenied(govId, report)
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(govMeta.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                    RiskBadge(govMeta.risk)
-                }
-                Text(govMeta.description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                EnumDropdown(
-                    current = gpu.currentGovernor,
-                    options = gpu.availableGovernors,
-                    enabled = scriptBuilderMode || govDenyReason == null,
-                    onSelect = { onWrite(govId, it, "GPU governor") },
+            // Power level MetricTiles
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                MetricTile(
+                    label = "MIN PWR LEVEL",
+                    value = levelLabel(adrenoExtras.currentMinPwrLevel),
+                    unit = null,
+                    accent = AccentBar.Purple,
+                    modifier = Modifier.weight(1f),
+                )
+                MetricTile(
+                    label = "MAX PWR LEVEL",
+                    value = levelLabel(adrenoExtras.currentMaxPwrLevel),
+                    unit = null,
+                    accent = AccentBar.Purple,
+                    modifier = Modifier.weight(1f),
+                )
+                MetricTile(
+                    label = "DEFAULT",
+                    value = levelLabel(adrenoExtras.currentDefaultPwrLevel),
+                    unit = null,
+                    accent = AccentBar.Neutral,
+                    modifier = Modifier.weight(1f),
                 )
             }
+
+            if (numLevels > 1) {
+                Spacer(Modifier.height(Spacing.group))
+                HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                Spacer(Modifier.height(Spacing.group))
+
+                // Min power level slider
+                val minId = KernelTunables.adrenoMinPowerLevel(gpu.rootPath)
+                Text("MIN POWER LEVEL (min_pwrlevel)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                Spacer(Modifier.height(Spacing.dense))
+                IntRangeControl(
+                    current = adrenoExtras.currentMinPwrLevel ?: 0,
+                    min = 0, max = numLevels - 1, step = 1, unit = "(lower=faster)",
+                    enabled = scriptBuilderMode || Tunables.whyWriteDenied(minId, report) == null,
+                    onCommit = { onWrite(minId, it.toString(), "GPU min power level") },
+                )
+
+                Spacer(Modifier.height(Spacing.group))
+
+                // Max power level slider
+                val maxId = KernelTunables.adrenoMaxPowerLevel(gpu.rootPath)
+                Text("MAX POWER LEVEL (max_pwrlevel)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                Spacer(Modifier.height(Spacing.dense))
+                IntRangeControl(
+                    current = adrenoExtras.currentMaxPwrLevel ?: 0,
+                    min = 0, max = numLevels - 1, step = 1, unit = "(lower=faster)",
+                    enabled = scriptBuilderMode || Tunables.whyWriteDenied(maxId, report) == null,
+                    onCommit = { onWrite(maxId, it.toString(), "GPU max power level") },
+                )
+            }
+
+            // GPU throttling toggle
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+            val throttleId = KernelTunables.gpuThrottling(gpu.rootPath)
+            TunableControl(id = throttleId, currentValue = if (adrenoExtras.throttlingEnabled == true) "1" else "0",
+                report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+
+            // Force clocks on
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            val forceClkId = KernelTunables.gpuForceClkOn(gpu.rootPath)
+            TunableControl(id = forceClkId, currentValue = if (adrenoExtras.forceClkOn == true) "1" else "0",
+                report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+
+            // Idle timer
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            val idleTimerId = KernelTunables.gpuIdleTimer(gpu.rootPath)
+            TunableControl(id = idleTimerId, currentValue = adrenoExtras.idleTimerMs?.toString() ?: "0",
+                report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+        }
+
+        // GPU governor
+        if (gpu.availableGovernors.size > 1) {
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+            val govId = Tunables.gpuGovernor(gpu.rootPath)
+            Text("GPU GOVERNOR", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+            Spacer(Modifier.height(Spacing.dense))
+            GovernorDropdown(
+                current = gpu.currentGovernor,
+                options = gpu.availableGovernors,
+                enabled = scriptBuilderMode || Tunables.whyWriteDenied(govId, report) == null,
+                onSelect = { onWrite(govId, it, "GPU governor") },
+            )
         }
 
         // GPU devfreq governor tunables
         if (report.gpuGovernorTunables.isNotEmpty()) {
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text(
-                "GPU Governor Tunables",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+            Text("GPU GOVERNOR TUNABLES", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
             report.gpuGovernorTunables.forEach { probe ->
+                HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
                 val id = KernelTunables.gpuDevfreqGovernorTunable(gpu.rootPath, probe.governor, probe.name)
-                HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                TunableControl(
-                    id = id,
-                    currentValue = probe.currentValue,
-                    report = report,
-                    onWrite = onWrite,
-                    pending = pending,
-                    scriptBuilderMode = scriptBuilderMode,
-                )
+                TunableControl(id = id, currentValue = probe.currentValue, report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
             }
         }
     }
 }
 
 // =============================================================================
-// Section: Scheduler Boost
-// Root-only: /dev/stune and /dev/cpuctl are cgroup paths — not scriptable.
-// On stock, show current values with honest "Root only" label.
+// Section content helpers (unchanged logic, Arsenal styled container)
 // =============================================================================
 
 @Composable
-private fun SchedBoostSection(
-    report: CapabilityReport,
-    scriptBuilderMode: Boolean,
-    onWrite: (TunableId, String, String) -> String?,
-) {
+private fun SchedBoostContent(report: CapabilityReport, scriptBuilderMode: Boolean, onWrite: (TunableId, String, String) -> String?) {
     val iface = report.schedBoostInterface
-    val ifaceLabel = when (iface) {
-        SchedBoostInterface.STUNE -> "SchedTune (/dev/stune)"
-        SchedBoostInterface.UCLAMP -> "uclamp (/dev/cpuctl)"
-        SchedBoostInterface.NONE -> "None"
+    if (scriptBuilderMode) {
+        AlertCard(type = AlertType.WARNING, title = "Root only — not scriptable",
+            message = "Scheduler boost controls cgroup hierarchies. SELinux blocks writes from app UID on stock. Shown read-only.")
     }
-
-    ExpandableSectionCard("Scheduler Boost ($ifaceLabel)", Icons.Outlined.Tune) {
-        // On stock: cgroup paths can't be written from app UID (SELinux blocks it)
-        // and can't be included in a generated script (cgroup writes unverified).
-        // Show current values as read-only info with an honest label.
+    report.schedBoostValues.filter { it.slice in listOf("top-app", "foreground") }.forEach { probe ->
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+        Text("Slice: ${probe.slice}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = AccentBar.Blue, letterSpacing = 0.06.sp)
         if (scriptBuilderMode) {
-            AlertCard(
-                type = AlertType.WARNING,
-                title = "Root only — can't be applied via script on this device",
-                message = "Scheduler boost (schedtune/uclamp) controls cgroup hierarchies. " +
-                    "Writing cgroup files from app UID is blocked by SELinux on stock firmware. " +
-                    "These values are shown read-only. To change them, root the device (Magisk/KernelSU).",
-            )
-        }
-
-        Text(
             when (iface) {
-                SchedBoostInterface.STUNE ->
-                    "schedtune.boost (0–100) biases tasks in this cgroup toward faster CPUs. " +
-                        "prefer_idle (0/1) prefers idle CPUs. Older kernels."
-                SchedBoostInterface.UCLAMP ->
-                    "cpu.uclamp.min (0–1024) raises the scheduler's minimum utilisation estimate. " +
-                        "cpu.uclamp.max (0–1024) caps it. Newer kernels (5.x+)."
-                SchedBoostInterface.NONE -> "No cgroup boost interface detected."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        report.schedBoostValues.filter { it.slice in listOf("top-app", "foreground") }
-            .forEachIndexed { i, probe ->
-                if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-                Text(
-                    "Slice: ${probe.slice}",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = Spacing.group),
-                )
-
-                when (iface) {
-                    SchedBoostInterface.STUNE -> {
-                        // On stock: show as read-only current values only
-                        if (scriptBuilderMode) {
-                            Text(
-                                "Current boost: ${probe.boostOrUclampMin ?: 0} | prefer_idle: ${probe.preferIdleOrUclampMax ?: 0}",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                        } else {
-                            val boostId = KernelTunables.schedtuneBoost(probe.slice)
-                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                            TunableControl(id = boostId, currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
-                            val idleId = KernelTunables.schedtunePreferIdle(probe.slice)
-                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                            TunableControl(id = idleId, currentValue = probe.preferIdleOrUclampMax?.toString() ?: "0", report = report, onWrite = onWrite)
-                        }
-                    }
-                    SchedBoostInterface.UCLAMP -> {
-                        if (scriptBuilderMode) {
-                            Text(
-                                "Current uclamp.min: ${probe.boostOrUclampMin ?: 0} | uclamp.max: ${probe.preferIdleOrUclampMax ?: 1024}",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                        } else {
-                            val minId = KernelTunables.uclampMin(probe.slice)
-                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                            TunableControl(id = minId, currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
-                            val maxId = KernelTunables.uclampMax(probe.slice)
-                            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                            TunableControl(id = maxId, currentValue = probe.preferIdleOrUclampMax?.toString() ?: "1024", report = report, onWrite = onWrite)
-                        }
-                    }
-                    SchedBoostInterface.NONE -> Unit
+                SchedBoostInterface.STUNE -> KvRow(label = "boost", value = "${probe.boostOrUclampMin ?: 0}", explainer = "prefer_idle: ${probe.preferIdleOrUclampMax ?: 0}")
+                SchedBoostInterface.UCLAMP -> KvRow(label = "uclamp.min", value = "${probe.boostOrUclampMin ?: 0}", explainer = "uclamp.max: ${probe.preferIdleOrUclampMax ?: 1024}")
+                SchedBoostInterface.NONE -> Unit
+            }
+        } else {
+            when (iface) {
+                SchedBoostInterface.STUNE -> {
+                    TunableControl(id = KernelTunables.schedtuneBoost(probe.slice), currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
+                    TunableControl(id = KernelTunables.schedtunePreferIdle(probe.slice), currentValue = probe.preferIdleOrUclampMax?.toString() ?: "0", report = report, onWrite = onWrite)
                 }
+                SchedBoostInterface.UCLAMP -> {
+                    TunableControl(id = KernelTunables.uclampMin(probe.slice), currentValue = probe.boostOrUclampMin?.toString() ?: "0", report = report, onWrite = onWrite)
+                    TunableControl(id = KernelTunables.uclampMax(probe.slice), currentValue = probe.preferIdleOrUclampMax?.toString() ?: "1024", report = report, onWrite = onWrite)
+                }
+                SchedBoostInterface.NONE -> Unit
             }
-    }
-}
-
-// =============================================================================
-// Section: Input Boost
-// =============================================================================
-
-@Composable
-private fun InputBoostSection(
-    report: CapabilityReport,
-    pending: Map<String, String>,
-    onWrite: (TunableId, String, String) -> String?,
-    scriptBuilderMode: Boolean,
-) {
-    ExpandableSectionCard("Input Boost", Icons.Outlined.TouchApp) {
-        Text(
-            "CPU frequency boost triggered on touch/key input events to reduce input latency. " +
-                "Values revert on reboot.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        val boost = report.inputBoost
-
-        val freqId = KernelTunables.inputBoostFreq()
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-        TunableControl(
-            id = freqId,
-            currentValue = boost?.inputBoostFreqRaw ?: "0",
-            report = report,
-            onWrite = onWrite,
-            pending = pending,
-            scriptBuilderMode = scriptBuilderMode,
-        )
-
-        val msId = KernelTunables.inputBoostMs()
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-        TunableControl(
-            id = msId,
-            currentValue = boost?.inputBoostMs?.toString() ?: "0",
-            report = report,
-            onWrite = onWrite,
-            pending = pending,
-            scriptBuilderMode = scriptBuilderMode,
-        )
-    }
-}
-
-// =============================================================================
-// Section: Memory / Bus
-// =============================================================================
-
-@Composable
-private fun MemoryBusSection(
-    report: CapabilityReport,
-    devices: List<DevfreqDeviceProbe>,
-    pending: Map<String, String>,
-    onWrite: (TunableId, String, String) -> String?,
-    scriptBuilderMode: Boolean,
-) {
-    ExpandableSectionCard("Memory / Bus (devfreq)", Icons.Outlined.Memory) {
-        Text(
-            "DDR and bus frequency scaling governors and frequency floors/ceilings per devfreq device.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        devices.forEachIndexed { i, dev ->
-            if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text(
-                dev.deviceName,
-                style = MaterialTheme.typography.titleSmall,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = Spacing.group),
-            )
-            Text(
-                "Current: ${"%.0f".format(dev.curFreqHz / 1_000_000f)} MHz",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            // Governor
-            if (dev.availableGovernors.size > 1) {
-                val govId = KernelTunables.devfreqGovernor(dev.deviceName)
-                HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                TunableControl(
-                    id = govId,
-                    currentValue = dev.currentGovernor,
-                    report = report,
-                    onWrite = onWrite,
-                    enumOptions = dev.availableGovernors,
-                    pending = pending,
-                    scriptBuilderMode = scriptBuilderMode,
-                )
-            }
-
-            // Min freq
-            val minId = KernelTunables.devfreqMinFreq(dev.deviceName)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = minId,
-                currentValue = dev.minFreqHz.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // Max freq
-            val maxId = KernelTunables.devfreqMaxFreq(dev.deviceName)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = maxId,
-                currentValue = dev.maxFreqHz.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
         }
     }
 }
 
-// =============================================================================
-// Section: I/O
-// =============================================================================
+@Composable
+private fun InputBoostContent(report: CapabilityReport, pending: Map<String, String>, onWrite: (TunableId, String, String) -> String?, scriptBuilderMode: Boolean) {
+    val boost = report.inputBoost
+    TunableControl(id = KernelTunables.inputBoostFreq(), currentValue = boost?.inputBoostFreqRaw ?: "0", report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+    HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+    TunableControl(id = KernelTunables.inputBoostMs(), currentValue = boost?.inputBoostMs?.toString() ?: "0", report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+}
 
 @Composable
-private fun IoSection(
-    report: CapabilityReport,
-    devices: List<BlockDeviceProbe>,
-    pending: Map<String, String>,
-    onWrite: (TunableId, String, String) -> String?,
-    scriptBuilderMode: Boolean,
-) {
-    ExpandableSectionCard("I/O", Icons.Outlined.Storage) {
-        Text(
-            "Block device I/O scheduler, read-ahead buffer, and queue depth per block device.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        devices.forEachIndexed { i, dev ->
-            if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text(
-                "/dev/block/${dev.deviceName}",
-                style = MaterialTheme.typography.titleSmall,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = Spacing.group),
-            )
-
-            // Scheduler
-            val schedId = KernelTunables.ioScheduler(dev.deviceName)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = schedId,
-                currentValue = dev.currentScheduler,
-                report = report,
-                onWrite = onWrite,
-                enumOptions = dev.availableSchedulers.ifEmpty { null },
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // Read ahead
-            val readAheadId = KernelTunables.ioReadAheadKb(dev.deviceName)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = readAheadId,
-                currentValue = dev.readAheadKb.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-
-            // NR requests
-            val nrReqId = KernelTunables.ioNrRequests(dev.deviceName)
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = nrReqId,
-                currentValue = dev.nrRequests.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
+private fun MemoryBusContent(report: CapabilityReport, devices: List<DevfreqDeviceProbe>, pending: Map<String, String>, onWrite: (TunableId, String, String) -> String?, scriptBuilderMode: Boolean) {
+    devices.forEachIndexed { i, dev ->
+        if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+        Text(dev.deviceName, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = AccentBar.Blue)
+        Spacer(Modifier.height(2.dp))
+        Text("Current: ${"%.0f".format(dev.curFreqHz / 1_000_000f)} MHz", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+        if (dev.availableGovernors.size > 1) {
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            TunableControl(id = KernelTunables.devfreqGovernor(dev.deviceName), currentValue = dev.currentGovernor, report = report, onWrite = onWrite, enumOptions = dev.availableGovernors, pending = pending, scriptBuilderMode = scriptBuilderMode)
         }
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+        TunableControl(id = KernelTunables.devfreqMinFreq(dev.deviceName), currentValue = dev.minFreqHz.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+        TunableControl(id = KernelTunables.devfreqMaxFreq(dev.deviceName), currentValue = dev.maxFreqHz.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
     }
 }
 
-// =============================================================================
-// Section: VM / Kernel
-// =============================================================================
-
 @Composable
-private fun VmKernelSection(
-    report: CapabilityReport,
-    vm: VmSysctlsProbe,
-    pending: Map<String, String>,
-    onWrite: (TunableId, String, String) -> String?,
-    scriptBuilderMode: Boolean,
-) {
-    ExpandableSectionCard("VM / Kernel Sysctls", Icons.Outlined.Settings) {
-        Text(
-            "Virtual memory and kernel scheduler tuning via /proc/sys. Changes revert on reboot.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        // On stock: /proc/sys writes fail under SELinux from app UID, but are
-        // included in the generated script (run as root via device Settings).
-        if (scriptBuilderMode) {
-            Text(
-                "Script-builder: these procfs knobs go into the generated script and apply when you run it as Root.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        // Swappiness
-        vm.swappiness?.let { current ->
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            TunableControl(
-                id = KernelTunables.vmSwappiness(),
-                currentValue = current.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-        }
-
-        // VFS cache pressure
-        vm.vfsCachePressure?.let { current ->
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = KernelTunables.vmVfsCachePressure(),
-                currentValue = current.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-        }
-
-        // Dirty ratio
-        vm.dirtyRatio?.let { current ->
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = KernelTunables.vmDirtyRatio(),
-                currentValue = current.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-        }
-
-        // Dirty background ratio
-        vm.dirtyBackgroundRatio?.let { current ->
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-            TunableControl(
-                id = KernelTunables.vmDirtyBackgroundRatio(),
-                currentValue = current.toString(),
-                report = report,
-                onWrite = onWrite,
-                pending = pending,
-                scriptBuilderMode = scriptBuilderMode,
-            )
-        }
-
-        // Kernel sched sysctls (lower priority)
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-        Text(
-            "Kernel Scheduler",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-        TunableControl(
-            id = KernelTunables.schedMigrationCostNs(),
-            currentValue = "",
-            report = report,
-            onWrite = onWrite,
-            pending = pending,
-            scriptBuilderMode = scriptBuilderMode,
-        )
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-        TunableControl(
-            id = KernelTunables.schedMinGranularityNs(),
-            currentValue = "",
-            report = report,
-            onWrite = onWrite,
-            pending = pending,
-            scriptBuilderMode = scriptBuilderMode,
-        )
-        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-        TunableControl(
-            id = KernelTunables.schedWakeupGranularityNs(),
-            currentValue = "",
-            report = report,
-            onWrite = onWrite,
-            pending = pending,
-            scriptBuilderMode = scriptBuilderMode,
-        )
+private fun IoContent(report: CapabilityReport, devices: List<BlockDeviceProbe>, pending: Map<String, String>, onWrite: (TunableId, String, String) -> String?, scriptBuilderMode: Boolean) {
+    devices.forEachIndexed { i, dev ->
+        if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+        Text("/dev/block/${dev.deviceName}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = AccentBar.Neutral)
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+        TunableControl(id = KernelTunables.ioScheduler(dev.deviceName), currentValue = dev.currentScheduler, report = report, onWrite = onWrite, enumOptions = dev.availableSchedulers.ifEmpty { null }, pending = pending, scriptBuilderMode = scriptBuilderMode)
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+        TunableControl(id = KernelTunables.ioReadAheadKb(dev.deviceName), currentValue = dev.readAheadKb.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+        TunableControl(id = KernelTunables.ioNrRequests(dev.deviceName), currentValue = dev.nrRequests.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
     }
 }
 
-// =============================================================================
-// Section: Custom Sysfs Rule
-// =============================================================================
+@Composable
+private fun VmKernelContent(report: CapabilityReport, vm: VmSysctlsProbe, pending: Map<String, String>, onWrite: (TunableId, String, String) -> String?, scriptBuilderMode: Boolean) {
+    if (scriptBuilderMode) Text("Script-builder: these procfs knobs go into the generated script.", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+    vm.swappiness?.let { TunableControl(id = KernelTunables.vmSwappiness(), currentValue = it.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode) }
+    vm.vfsCachePressure?.let { HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense)); TunableControl(id = KernelTunables.vmVfsCachePressure(), currentValue = it.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode) }
+    vm.dirtyRatio?.let { HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense)); TunableControl(id = KernelTunables.vmDirtyRatio(), currentValue = it.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode) }
+    vm.dirtyBackgroundRatio?.let { HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense)); TunableControl(id = KernelTunables.vmDirtyBackgroundRatio(), currentValue = it.toString(), report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode) }
+}
 
 @Composable
-private fun CustomSysfsSection(
-    report: CapabilityReport,
-    history: List<AdvancedTuningViewModel.CustomSysfsRule>,
-    pending: Map<String, String>,
-    scriptBuilderMode: Boolean,
-    onWrite: (String, String) -> String?,
-) {
+private fun CustomSysfsContent(report: CapabilityReport, history: List<AdvancedTuningViewModel.CustomSysfsRule>, pending: Map<String, String>, scriptBuilderMode: Boolean, onWrite: (String, String) -> String?) {
     var path by rememberSaveable { mutableStateOf("") }
     var value by rememberSaveable { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
 
-    ExpandableSectionCard("Custom Sysfs Rule", Icons.Outlined.Code) {
-        AlertCard(
-            type = AlertType.WARNING,
-            title = if (scriptBuilderMode) "Power user — staged into script" else "Power user — your risk",
-            message = if (scriptBuilderMode) {
-                "Write ANY /sys or /proc path with any value. On this device the rule is STAGED " +
-                    "into the generated script rather than written live. No validation beyond path safety."
-            } else {
-                "Write ANY /sys or /proc path with any value. No validation beyond path safety. " +
-                    "Wrong values can destabilise or crash the device. Everything reverts on reboot."
-            },
-        )
-
+    AlertCard(type = AlertType.WARNING, title = if (scriptBuilderMode) "Power user — staged into script" else "Power user — your risk",
+        message = if (scriptBuilderMode) "Write ANY /sys or /proc path. Staged into script rather than live."
+        else "Write ANY /sys or /proc path. Wrong values can destabilise or crash. Reverts on reboot.")
+    Spacer(Modifier.height(Spacing.group))
+    OutlinedTextField(value = path, onValueChange = { path = it; error = null }, label = { Text("/sys/… or /proc/…") }, singleLine = true, modifier = Modifier.fillMaxWidth(), textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+    OutlinedTextField(value = value, onValueChange = { value = it; error = null }, label = { Text("Value") }, singleLine = true, modifier = Modifier.fillMaxWidth(), textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+    error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = AccentBar.Red) }
+    Spacer(Modifier.height(Spacing.group))
+    ArsenalButton(
+        label = if (scriptBuilderMode) "Stage rule" else "Apply custom rule",
+        onClick = { error = null; val err = onWrite(path.trim(), value.trim()); if (err != null) error = err },
+        accent = AccentBar.Amber,
+        enabled = path.isNotBlank() && value.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    if (history.isNotEmpty()) {
         Spacer(Modifier.height(Spacing.group))
-
-        OutlinedTextField(
-            value = path,
-            onValueChange = { path = it; error = null },
-            label = { Text("/sys/… or /proc/…") },
-            placeholder = { Text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", fontFamily = FontFamily.Monospace) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            isError = error != null,
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-
-        OutlinedTextField(
-            value = value,
-            onValueChange = { value = it; error = null },
-            label = { Text("Value") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-
-        error?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-
-        // In script-builder mode the Apply button is ALWAYS enabled (writeCustomRule stages it).
-        // In live mode, show deny reason and gate the button on it.
-        val denyReason = if (!scriptBuilderMode && path.isNotBlank()) {
-            val id = try {
-                KernelTunables.customSysfsRule(path)
-            } catch (_: IllegalArgumentException) {
-                null
-            }
-            id?.let { Tunables.whyWriteDenied(it, report) }
-        } else null
-
-        if (denyReason != null) {
-            Text(
-                "Write blocked: $denyReason",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-
-        // Show staged indicator for the current path
-        val isStagedHere = pending.containsKey(path.trim())
-        if (scriptBuilderMode && isStagedHere) {
-            Text(
-                "Staged — will be included in Generate Script",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-
-        Button(
-            onClick = {
-                error = null
-                val err = onWrite(path.trim(), value.trim())
-                if (err != null) error = err
-            },
-            enabled = path.isNotBlank() && value.isNotBlank() && (scriptBuilderMode || denyReason == null),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(if (scriptBuilderMode) "Stage rule" else "Apply custom rule")
-        }
-
-        // History — re-apply or re-stage previously used rules
-        if (history.isNotEmpty()) {
-            HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-            Text(
-                if (scriptBuilderMode) "Previously staged this session:" else "Previously applied this session:",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            history.forEach { rule ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = Spacing.dense),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(rule.path, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                        Text("= ${rule.value}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    TextButton(
-                        onClick = {
-                            path = rule.path
-                            value = rule.value
-                        },
-                    ) { Text("Load") }
-                    TextButton(
-                        onClick = {
-                            error = null
-                            val err = onWrite(rule.path, rule.value)
-                            if (err != null) error = err
-                        },
-                        enabled = scriptBuilderMode || denyReason == null,
-                    ) { Text(if (scriptBuilderMode) "Re-stage" else "Re-apply") }
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.dense))
+        Text(if (scriptBuilderMode) "Previously staged:" else "Previously applied:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+        history.forEach { rule ->
+            Row(modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.dense), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(rule.path, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = Color.White)
+                    Text("= ${rule.value}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+                }
+                TextButton(onClick = { path = rule.path; value = rule.value }) { Text("Load") }
+                TextButton(onClick = { error = null; val err = onWrite(rule.path, rule.value); if (err != null) error = err }) {
+                    Text(if (scriptBuilderMode) "Re-stage" else "Re-apply")
                 }
             }
         }
@@ -2016,28 +1079,22 @@ private fun CustomSysfsSection(
 }
 
 // =============================================================================
-// Voltage Honesty Card
+// Voltage honesty panel
 // =============================================================================
 
 @Composable
-private fun VoltageHonestyCard() {
-    SectionCard("Voltage / Undervolt", icon = Icons.Outlined.BatteryAlert) {
-        AlertCard(
-            type = AlertType.INFO,
-            title = "Not available on this device",
-            message = VoltageControl.unavailableSummary,
-        )
+private fun ArsenalVoltageHonestyPanel() {
+    ArsenalPanel(accent = AccentBar.Neutral, title = "Voltage / Undervolt") {
+        AlertCard(type = AlertType.INFO, title = "Not available on this device", message = VoltageControl.unavailableSummary)
+        Spacer(Modifier.height(Spacing.dense))
+        Text("CPU: ${VoltageControl.cpuVoltageUnavailableExplanation}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+        Spacer(Modifier.height(Spacing.dense))
+        Text("GPU: ${VoltageControl.gpuVoltageUnavailableExplanation}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
         Spacer(Modifier.height(Spacing.dense))
         Text(
-            "CPU: ${VoltageControl.cpuVoltageUnavailableExplanation}",
+            "Use the EfficiencyAdvisor (AutoTDP screen) for knee-equivalent efficiency — caps clusters at the measured perf-per-watt knee, achieving most undervolt benefit without touching voltage registers.",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(Spacing.dense))
-        Text(
-            "GPU: ${VoltageControl.gpuVoltageUnavailableExplanation}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AccentBar.Emerald.copy(alpha = 0.85f),
         )
     }
 }
@@ -2047,154 +1104,60 @@ private fun VoltageHonestyCard() {
 // =============================================================================
 
 @Composable
-private fun DangerousExpander(expanded: Boolean, onToggle: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.08f),
-        ),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(Spacing.card),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
-            ) {
-                Icon(
-                    Icons.Outlined.WarningAmber,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp),
-                )
-                Column {
-                    Text(
-                        "Thermal / Dangerous controls",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    Text(
-                        "Trip points, zone modes, cooling states — can damage hardware",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+private fun ArsenalDangerousExpander(expanded: Boolean, onToggle: () -> Unit) {
+    ArsenalPanel(accent = AccentBar.Red) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                StatusPill(text = "THERMAL / DANGEROUS CONTROLS", accent = AccentBar.Red)
+                Spacer(Modifier.height(Spacing.dense))
+                Text("Trip points, zone modes, cooling states — real damage risk", style = MaterialTheme.typography.labelSmall, color = Color(0xFF999999))
             }
             IconButton(onClick = onToggle) {
-                Icon(
-                    if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                    contentDescription = if (expanded) "Collapse" else "Expand dangerous section",
-                )
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = AccentBar.Red)
             }
         }
     }
 }
 
-// =============================================================================
-// Section: Thermal (DANGEROUS — behind expander)
-// =============================================================================
-
 @Composable
-private fun ThermalDangerousSection(
+private fun ArsenalThermalDangerousSection(
     report: CapabilityReport,
     thermalExtras: List<ThermalZoneExtras>,
     coolingDevices: List<CoolingDeviceProbe>,
     onWrite: (TunableId, String, String) -> String?,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.item)) {
-        AlertCard(
-            type = AlertType.ERROR,
-            title = "Thermal controls — real damage risk",
-            message = "Disabling thermal protection on a fanless device usually makes performance WORSE " +
-                "from heat buildup, and risks thermal shutdown or permanent SoC damage. " +
-                "Every change requires confirmation. Everything reverts on reboot, but heat damage before then is permanent.",
-        )
+        AlertCard(type = AlertType.ERROR, title = "Thermal controls — real damage risk",
+            message = "Disabling thermal protection on a fanless device usually makes performance WORSE and risks thermal shutdown or permanent SoC damage. Reverts on reboot, but heat damage before then is permanent.")
 
-        // Thermal zone modes + trip points
         if (thermalExtras.isNotEmpty()) {
-            ExpandableSectionCard(
-                "Thermal Zones",
-                Icons.Outlined.DeviceThermostat,
-                initiallyExpanded = false,
-            ) {
+            ArsenalExpandableSection("THERMAL ZONES", Icons.Outlined.DeviceThermostat, AccentBar.Red, initiallyExpanded = false) {
                 thermalExtras.forEachIndexed { i, zone ->
-                    if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-                    Text(
-                        "thermal_zone${zone.zoneId}",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(top = Spacing.group),
-                    )
-
-                    // Zone mode
+                    if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+                    Text("thermal_zone${zone.zoneId}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = AccentBar.Red)
                     zone.mode?.let { mode ->
-                        val modeId = KernelTunables.thermalZoneMode(zone.zoneId)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        TunableControl(
-                            id = modeId,
-                            currentValue = mode,
-                            report = report,
-                            onWrite = onWrite,
-                        )
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                        TunableControl(id = KernelTunables.thermalZoneMode(zone.zoneId), currentValue = mode, report = report, onWrite = onWrite)
                     }
-
-                    // Trip points
-                    zone.tripPoints.forEachIndexed { ti, trip ->
-                        val tripId = KernelTunables.thermalTripPointTemp(zone.zoneId, trip.index)
-                        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                        Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                            Text(
-                                "Trip ${trip.index} — ${trip.type} (${trip.tempMilliC / 1000}°C)",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            TunableControl(
-                                id = tripId,
-                                currentValue = trip.tempMilliC.toString(),
-                                report = report,
-                                onWrite = onWrite,
-                            )
-                        }
+                    zone.tripPoints.forEach { trip ->
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                        Text("Trip ${trip.index} — ${trip.type} (${trip.tempMilliC / 1000}°C)", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        TunableControl(id = KernelTunables.thermalTripPointTemp(zone.zoneId, trip.index), currentValue = trip.tempMilliC.toString(), report = report, onWrite = onWrite)
                     }
                 }
             }
         }
 
-        // Cooling devices
         if (coolingDevices.isNotEmpty()) {
-            ExpandableSectionCard(
-                "Cooling Devices",
-                Icons.Outlined.DeviceThermostat,
-                initiallyExpanded = false,
-            ) {
+            ArsenalExpandableSection("COOLING DEVICES", Icons.Outlined.DeviceThermostat, AccentBar.Red, initiallyExpanded = false) {
                 coolingDevices.forEachIndexed { i, dev ->
-                    if (i > 0) HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.group))
-                    Text(
-                        "cooling_device${dev.id} — ${dev.type}",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(top = Spacing.group),
-                    )
-                    Text(
-                        "Max state: ${dev.maxState} | Current: ${dev.currentState}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    val stateId = KernelTunables.coolingDeviceCurState(dev.id)
-                    HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.dense))
-                    TunableControl(
-                        id = stateId,
-                        currentValue = dev.currentState.toString(),
-                        report = report,
-                        onWrite = onWrite,
-                    )
+                    if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
+                    Text("cooling_device${dev.id} — ${dev.type}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = AccentBar.Red)
+                    Text("Max state: ${dev.maxState} | Current: ${dev.currentState}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                    TunableControl(id = KernelTunables.coolingDeviceCurState(dev.id), currentValue = dev.currentState.toString(), report = report, onWrite = onWrite)
                 }
             }
         }
@@ -2206,30 +1169,262 @@ private fun ThermalDangerousSection(
 // =============================================================================
 
 @Composable
-private fun RevertFooter(scriptBuilderMode: Boolean = false) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = Spacing.group),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(Spacing.dense),
-    ) {
-        Icon(
-            Icons.Outlined.Info,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+private fun ArsenalRevertFooter(scriptBuilderMode: Boolean) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.group), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Outlined.Info, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color(0xFF555555))
+        Spacer(Modifier.height(Spacing.dense))
         Text(
-            if (scriptBuilderMode) {
-                "Staged knobs are bundled into a shell script. Run it via your device's Settings → Run script as Root. " +
-                    "All kernel writes revert on reboot — nothing persists permanently without a boot script."
-            } else {
-                "All writes above are snapshotted before application and revert automatically on the next reboot. " +
-                    "Nothing here persists permanently unless you install a boot script via the Tune screen."
-            },
+            if (scriptBuilderMode) "Staged knobs → shell script. Run via Settings → Run script as Root. Reverts on reboot."
+            else "All writes snapshotted. Reverts automatically on next reboot. Nothing persists permanently without a boot script.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF555555),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
+    }
+}
+
+// =============================================================================
+// Arsenal expandable section — replaces Material ExpandableSectionCard
+// =============================================================================
+
+@Composable
+private fun ArsenalExpandableSection(
+    title: String,
+    icon: ImageVector,
+    accent: Color,
+    initiallyExpanded: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+
+    ArsenalPanel(accent = accent) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = accent)
+                Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color.White, letterSpacing = 0.07.sp)
+            }
+            IconButton(onClick = { expanded = !expanded }) {
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand", tint = Color(0xFF999999))
+            }
+        }
+        if (expanded) {
+            Spacer(Modifier.height(Spacing.group))
+            content()
+        }
+    }
+}
+
+// =============================================================================
+// Governor dropdown (Arsenal styled)
+// =============================================================================
+
+@Composable
+private fun GovernorDropdown(current: String, options: List<String>, enabled: Boolean, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(
+        modifier = Modifier
+            .background(Color(0xFF0C0C10), RoundedCornerShape(4.dp))
+            .border(1.dp, if (enabled) Color.White.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.06f), RoundedCornerShape(4.dp))
+            .let { if (enabled) it.clickable { expanded = true } else it }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .fillMaxWidth(),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(current, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = if (enabled) Color.White else Color(0xFF555555))
+            Icon(Icons.Outlined.ExpandMore, contentDescription = null, tint = Color(0xFF999999), modifier = Modifier.size(16.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(text = { Text(option, fontFamily = FontFamily.Monospace) }, onClick = { expanded = false; onSelect(option) })
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Risk badge (Arsenal styled)
+// =============================================================================
+
+@Composable
+private fun ArsenalRiskBadge(risk: Risk) {
+    val (label, accent) = when (risk) {
+        Risk.SAFE -> "SAFE" to AccentBar.Neutral
+        Risk.LOW -> "LOW" to AccentBar.Neutral
+        Risk.MEDIUM -> "MEDIUM" to AccentBar.Amber
+        Risk.HIGH -> "HIGH" to AccentBar.Red
+        Risk.DANGEROUS -> "DANGEROUS" to AccentBar.Red
+    }
+    StatusPill(text = label, accent = accent)
+}
+
+// =============================================================================
+// Tunable control — same logic, Arsenal styled risk badge
+// =============================================================================
+
+@Composable
+private fun TunableControl(
+    id: TunableId,
+    currentValue: String,
+    report: CapabilityReport,
+    onWrite: (TunableId, String, String) -> String?,
+    pending: Map<String, String> = emptyMap(),
+    scriptBuilderMode: Boolean = false,
+    enumOptions: List<String>? = null,
+    modifier: Modifier = Modifier,
+) {
+    val meta = TunableMetadata.forId(id)
+    val denyReason = Tunables.whyWriteDenied(id, report)
+    val isDisabled = if (scriptBuilderMode) false else denyReason != null
+    val isStaged = id.target in pending
+
+    var pendingConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var inlineError by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(meta.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = Color.White, modifier = Modifier.weight(1f))
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense), verticalAlignment = Alignment.CenterVertically) {
+                if (isStaged) StatusPill(text = "staged", accent = AccentBar.Blue)
+                ArsenalRiskBadge(meta.risk)
+            }
+        }
+        Text(meta.description, style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+        when {
+            scriptBuilderMode && denyReason != null && !isStaged ->
+                Text("Will be included in generated script when staged", style = MaterialTheme.typography.labelSmall, color = AccentBar.Blue)
+            scriptBuilderMode && denyReason != null && isStaged ->
+                Text("Staged — will be written when you run the script", style = MaterialTheme.typography.labelSmall, color = AccentBar.Emerald)
+            denyReason != null ->
+                Text("Write blocked: $denyReason", style = MaterialTheme.typography.labelSmall, color = AccentBar.Red)
+        }
+        inlineError?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = AccentBar.Red) }
+
+        val effectiveOptions = enumOptions ?: (meta.valueKind as? ValueKind.ENUM)?.options ?: emptyList()
+        val doWrite: (String) -> Unit = { value ->
+            inlineError = null
+            val writeAction = { val err = onWrite(id, value, "Advanced Tuning: ${meta.name}"); if (err != null) inlineError = err }
+            if (meta.risk == Risk.HIGH || meta.risk == Risk.DANGEROUS) pendingConfirm = writeAction else writeAction()
+        }
+
+        when (val kind = meta.valueKind) {
+            is ValueKind.BOOL -> {
+                val on = currentValue.trim() == "1"
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (on) "Enabled" else "Disabled", style = MaterialTheme.typography.bodySmall, color = if (isDisabled) Color(0xFF555555) else Color(0xFFCCCCCC))
+                    Box(
+                        modifier = Modifier
+                            .background(if (on) AccentBar.Emerald.copy(alpha = 0.15f) else Color(0xFF0C0C10), RoundedCornerShape(4.dp))
+                            .border(1.dp, if (on) AccentBar.Emerald.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                            .let { if (!isDisabled) it.clickable { doWrite(if (!on) "1" else "0") } else it }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                    ) {
+                        Text(if (on) "ON" else "OFF", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold,
+                            color = if (on) AccentBar.Emerald else Color(0xFF888888), letterSpacing = 0.06.sp)
+                    }
+                }
+            }
+            is ValueKind.ENUM -> {
+                if (effectiveOptions.isNotEmpty()) {
+                    GovernorDropdown(current = currentValue.trim(), options = effectiveOptions, enabled = !isDisabled, onSelect = { doWrite(it) })
+                } else {
+                    RawStringControl(current = currentValue, enabled = !isDisabled, onCommit = { doWrite(it) },
+                        actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply")
+                }
+            }
+            is ValueKind.INT_RANGE -> IntRangeControl(current = currentValue.trim().toIntOrNull() ?: kind.min, min = kind.min, max = kind.max, step = kind.step, unit = kind.unit, enabled = !isDisabled, onCommit = { doWrite(it.toString()) })
+            is ValueKind.FREQ_KHZ -> FreqKhzControl(currentKhz = currentValue.trim().toIntOrNull() ?: kind.minKhz, minKhz = kind.minKhz, maxKhz = kind.maxKhz, enabled = !isDisabled, onCommit = { doWrite(it.toString()) })
+            is ValueKind.RAW_STRING -> RawStringControl(current = currentValue, enabled = !isDisabled, onCommit = { doWrite(it) },
+                actionLabel = if (scriptBuilderMode && denyReason != null) "Stage" else "Apply")
+        }
+    }
+
+    pendingConfirm?.let { action ->
+        DangerousConfirmDialog(meta = meta, scriptBuilderMode = scriptBuilderMode && denyReason != null,
+            onConfirm = { action(); pendingConfirm = null }, onDismiss = { pendingConfirm = null })
+    }
+}
+
+// =============================================================================
+// Widget primitives
+// =============================================================================
+
+@Composable
+private fun IntRangeControl(current: Int, min: Int, max: Int, step: Int, unit: String, enabled: Boolean, onCommit: (Int) -> Unit) {
+    val steps = if (step > 1 && max > min) (max - min) / step else 0
+    var position by remember(current) { mutableFloatStateOf(current.toFloat()) }
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("${position.toInt()} $unit".trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = Color.White)
+            Text("$min … $max $unit".trim(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+        }
+        Slider(value = position, onValueChange = { position = it }, onValueChangeFinished = { onCommit(position.toInt()) }, valueRange = min.toFloat()..max.toFloat(), steps = steps, enabled = enabled, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun FreqKhzControl(currentKhz: Int, minKhz: Int, maxKhz: Int, enabled: Boolean, onCommit: (Int) -> Unit) {
+    var position by remember(currentKhz) { mutableFloatStateOf(currentKhz.toFloat()) }
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("${"%.1f".format(position / 1000f)} MHz", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = Color.White)
+            Text("${"%.0f".format(minKhz / 1000f)} … ${"%.0f".format(maxKhz / 1000f)} MHz", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888))
+        }
+        Slider(value = position, onValueChange = { position = it }, onValueChangeFinished = { onCommit(position.toInt()) }, valueRange = minKhz.toFloat()..maxKhz.toFloat(), enabled = enabled, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun RawStringControl(current: String, enabled: Boolean, onCommit: (String) -> Unit, actionLabel: String = "Apply") {
+    var text by remember(current) { mutableStateOf(current) }
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.group), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(value = text, onValueChange = { text = it }, enabled = enabled, singleLine = true,
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.weight(1f))
+        ArsenalButton(label = actionLabel, onClick = { onCommit(text) },
+            accent = AccentBar.Amber, style = ArsenalButtonStyle.Secondary, enabled = enabled && text.isNotBlank() && text != current)
+    }
+}
+
+// =============================================================================
+// Dangerous confirm dialog
+// =============================================================================
+
+@Composable
+private fun DangerousConfirmDialog(meta: TunableMetadata.TunableInfo, onConfirm: () -> Unit, onDismiss: () -> Unit, scriptBuilderMode: Boolean = false) {
+    val warningText = when {
+        meta.name.contains("Throttling", ignoreCase = true) ->
+            "Disabling thermal protection on a fanless device usually makes performance WORSE from heat buildup and risks thermal shutdown or hardware damage. Reverts on reboot."
+        meta.name.contains("Thermal Zone", ignoreCase = true) ->
+            "Disabling a thermal zone removes that temperature limit entirely. Device may overheat silently. Reverts on reboot — but heat damage before then is permanent."
+        meta.name.contains("Trip Point", ignoreCase = true) ->
+            "Raising a thermal trip point delays throttling. Hardware damage risk on repeated exposure. Reverts on reboot."
+        meta.name.contains("Cooling Device", ignoreCase = true) ->
+            "Setting cur_state to 0 removes the thermal cap on this cooling device. Reverts on reboot, but heat damage before then is permanent."
+        meta.name.contains("CPU0", ignoreCase = true) ->
+            "CPU0 is the boot processor. Taking it offline will crash the device immediately."
+        else -> "This is a ${meta.risk.name} risk change: ${meta.description} Reverts on reboot."
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = AccentBar.Red, modifier = Modifier.size(32.dp)) },
+        title = { Text("${meta.risk.name} RISK — ${meta.name}", style = MaterialTheme.typography.titleMedium, color = AccentBar.Red) },
+        text = { Text(warningText, style = MaterialTheme.typography.bodySmall) },
+        confirmButton = {
+            Button(onClick = onConfirm, colors = ButtonDefaults.buttonColors(containerColor = AccentBar.Red, contentColor = Color.White)) {
+                Text(if (scriptBuilderMode) "I understand — add to script" else "I understand — apply anyway")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// Used by ClusterTierLabelTest — exported from TuneScreen package, referenced here for type correctness
+// (actual clusterTierLabel is in TuneScreen.kt in the tune package)
+private fun clusterTierLabel(thisPolicyMaxKhz: Int, allPolicyMaxKhz: List<Int>): String {
+    if (allPolicyMaxKhz.size <= 1) return "efficiency"
+    return when (thisPolicyMaxKhz) {
+        allPolicyMaxKhz.first() -> "efficiency"
+        allPolicyMaxKhz.last() -> if (allPolicyMaxKhz.size >= 3) "prime" else "big"
+        else -> "big"
     }
 }

@@ -2,6 +2,8 @@ package io.github.mayusi.calibratesoc.data.benchmark.db
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import io.github.mayusi.calibratesoc.data.insights.db.SessionReportDao
+import io.github.mayusi.calibratesoc.data.insights.db.SessionReportEntity
 import io.github.mayusi.calibratesoc.data.scorelog.ExternalScoreDao
 import io.github.mayusi.calibratesoc.data.scorelog.ExternalScoreEntity
 import io.github.mayusi.calibratesoc.data.session.SessionDao
@@ -30,14 +32,17 @@ import io.github.mayusi.calibratesoc.data.session.SessionEntity
 // v8 added the external_scores table (ExternalScoreEntity) for the Benchmark
 // Hub manual score log. Destructive fallback — all history is convenience
 // data, not load-bearing. Pre-alpha.
+// v9 added the session_reports table (SessionReportEntity) for the performance
+// insights engine. Destructive fallback — all history is convenience data.
 @Database(
     entities = [
         BenchRunEntity::class,
         StabilityRunEntity::class,
         SessionEntity::class,
         ExternalScoreEntity::class,
+        SessionReportEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class BenchDatabase : RoomDatabase() {
@@ -45,4 +50,5 @@ abstract class BenchDatabase : RoomDatabase() {
     abstract fun stabilityRunDao(): StabilityRunDao
     abstract fun sessionDao(): SessionDao
     abstract fun externalScoreDao(): ExternalScoreDao
+    abstract fun sessionReportDao(): SessionReportDao
 }

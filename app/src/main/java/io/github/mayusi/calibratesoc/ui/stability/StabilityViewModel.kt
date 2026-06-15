@@ -60,10 +60,14 @@ class StabilityViewModel @Inject constructor(
      * and the loop itself all check [kotlinx.coroutines.isActive]). The
      * runner's finally block resets state to Idle and closes the CPU
      * dispatcher. No partial result is shown or persisted.
+     *
+     * BUG 9: also clear _result so a stale previous run is not shown after
+     * the user cancels a new run.
      */
     fun cancelStability() {
         runJob?.cancel()
         runJob = null
+        _result.value = null   // clear stale result on cancel
     }
 
     fun clear() {

@@ -26,19 +26,28 @@ class StabilityResultTest {
     }
 
     @Test
-    fun `empty list is zero`() {
-        assertThat(StabilityResult.compute(emptyList())).isEqualTo(0)
+    fun `empty list returns null`() {
+        // BUG 5: empty = no loops = N/A, not 0.
+        assertThat(StabilityResult.compute(emptyList())).isNull()
     }
 
     @Test
-    fun `non-positive max is zero`() {
-        assertThat(StabilityResult.compute(listOf(0.0, 0.0))).isEqualTo(0)
+    fun `single loop returns null`() {
+        // BUG 5: 1 loop gives no sustained-vs-peak signal — must return null, not 100%.
+        assertThat(StabilityResult.compute(listOf(60.0))).isNull()
+    }
+
+    @Test
+    fun `non-positive max returns null`() {
+        // Can't compute ratio when peak is 0.
+        assertThat(StabilityResult.compute(listOf(0.0, 0.0))).isNull()
     }
 
     @Test
     fun `result is clamped to 0 to 100`() {
         val pct = StabilityResult.compute(listOf(120.0, 30.0))
-        assertThat(pct).isIn(0..100)
+        assertThat(pct).isNotNull()
+        assertThat(pct!!).isIn(0..100)
         assertThat(pct).isEqualTo(25)
     }
 }

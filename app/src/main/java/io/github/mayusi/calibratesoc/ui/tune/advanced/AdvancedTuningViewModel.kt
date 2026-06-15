@@ -7,11 +7,15 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.presets.VerificationTier
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.script.AynScriptGenerator
 import io.github.mayusi.calibratesoc.data.script.ScriptGenerateResult
+import io.github.mayusi.calibratesoc.data.thermal.FanCurveModel
+import io.github.mayusi.calibratesoc.data.thermal.PredictiveThrottleGuard
+import io.github.mayusi.calibratesoc.data.thermal.ThrottleForecast
 import io.github.mayusi.calibratesoc.data.tunables.KernelTunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
@@ -21,6 +25,8 @@ import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -59,6 +65,7 @@ class AdvancedTuningViewModel @Inject constructor(
     private val scriptGenerator: AynScriptGenerator,
     private val scriptDeployer: AynScriptDeployer,
     private val deviceAdapterRegistry: DeviceAdapterRegistry,
+    private val monitorService: MonitorService,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
@@ -101,6 +108,71 @@ class AdvancedTuningViewModel @Inject constructor(
         val value: String,
         val appliedAtMs: Long,
     )
+
+    // ── thermal guard toggle ──────────────────────────────────────────────────
+
+    /**
+     * Whether the predictive thermal guard is enabled by the user.
+     * When true, the UI shows the guard's last forecast prominently.
+     * The guard is ADVISORY in this surface — it does not write tunables
+     * itself (that happens in the daemon layer); here it surfaces information.
+     */
+    private val _thermalGuardEnabled = MutableStateFlow(false)
+    val thermalGuardEnabled: StateFlow<Boolean> = _thermalGuardEnabled.asStateFlow()
+
+    /**
+     * Latest [PredictiveThrottleGuard.ThrottleForecast] — updated once per
+     * telemetry tick when the guard is enabled. Null when disabled or when
+     * the window is too small.
+     */
+    private val _throttleForecast = MutableStateFlow<ThrottleForecast?>(null)
+    val throttleForecast: StateFlow<ThrottleForecast?> = _throttleForecast.asStateFlow()
+
+    /**
+     * Whether the device has a fan that our model can control.
+     * Derived from [CapabilityReport.fan] on first report arrival.
+     */
+    private val _fanCurveModel = MutableStateFlow<FanCurveModel?>(null)
+    val fanCurveModel: StateFlow<FanCurveModel?> = _fanCurveModel.asStateFlow()
+
+    // Telemetry window for thermal guard (kept in-VM for simplicity, MAX_WINDOW entries)
+    private val thermalWindow = ArrayDeque<PredictiveThrottleGuard.TelemetryPoint>()
+
+    init {
+        // Build the FanCurveModel from the first capability report.
+        capabilityProbe.report
+            .onEach { report ->
+                if (report != null) {
+                    _fanCurveModel.value = FanCurveModel.fromReport(report)
+                }
+            }
+            .launchIn(viewModelScope)
+
+        // Feed telemetry into the thermal guard window when guard is enabled.
+        viewModelScope.launch {
+            monitorService.telemetry().collect { t ->
+                if (_thermalGuardEnabled.value) {
+                    val pt = PredictiveThrottleGuard.TelemetryPoint.from(t)
+                    thermalWindow.addLast(pt)
+                    while (thermalWindow.size > MAX_THERMAL_WINDOW) thermalWindow.removeFirst()
+                    val forecast = PredictiveThrottleGuard.predict(thermalWindow.toList())
+                    _throttleForecast.value = forecast
+                }
+            }
+        }
+    }
+
+    fun setThermalGuardEnabled(enabled: Boolean) {
+        _thermalGuardEnabled.value = enabled
+        if (!enabled) {
+            thermalWindow.clear()
+            _throttleForecast.value = null
+        }
+    }
+
+    companion object {
+        private const val MAX_THERMAL_WINDOW = 30
+    }
 
     // ── mode helpers ──────────────────────────────────────────────────────────
 

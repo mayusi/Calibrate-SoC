@@ -42,6 +42,7 @@ class GpuTriangleStorm @Inject constructor() {
      * them honest, not pipelined) so the runner can compute percentiles,
      * 1% low, and frame-pacing consistency. The bare [run] above delegates
      * here and just keeps the avgFps.
+     * Returns null if EGL setup fails OR shader compilation/link fails.
      */
     suspend fun runDetailed(durationMs: Long = 8_000L): GpuFrameResult? =
         withEglContext { renderLoopFrames(durationMs) }
@@ -140,6 +141,10 @@ class GpuTriangleStorm @Inject constructor() {
         GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
         GLES20.glScissor(0, 0, 1, 1)
         val program = buildProgram()
+        if (program == 0) {
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+            return 0.0
+        }
         GLES20.glUseProgram(program)
 
         val vertexData = floatArrayOf(-1f, -1f, 3f, -1f, -1f, 3f)
@@ -173,9 +178,10 @@ class GpuTriangleStorm @Inject constructor() {
         return if (elapsedSec > 0) calls / elapsedSec else 0.0
     }
 
-    private fun renderLoopFrames(durationMs: Long): GpuFrameResult {
+    private fun renderLoopFrames(durationMs: Long): GpuFrameResult? {
         GLES20.glViewport(0, 0, WIDTH, HEIGHT)
         val program = buildProgram()
+        if (program == 0) return null
         GLES20.glUseProgram(program)
 
         // Full-screen triangle (3 verts cover the whole NDC area without
@@ -227,7 +233,7 @@ class GpuTriangleStorm @Inject constructor() {
         durationMs: Long,
         surfacePx: Int,
         shaderIterations: Int,
-    ): GpuFrameResult {
+    ): GpuFrameResult? {
         // Stress variant: EGL pbuffer surface is already created at surfacePx×surfacePx
         // by withEglContext. Set the viewport to match so the fragment shader actually
         // operates on the higher-resolution buffer. Combined with increased shader
@@ -236,6 +242,7 @@ class GpuTriangleStorm @Inject constructor() {
         val surfaceDim = surfacePx.coerceIn(800, 2048)
         GLES20.glViewport(0, 0, surfaceDim, surfaceDim)
         val program = buildProgramStress(shaderIterations)
+        if (program == 0) return null
         GLES20.glUseProgram(program)
 
         val vertexData = floatArrayOf(
@@ -307,17 +314,39 @@ class GpuTriangleStorm @Inject constructor() {
         """.trimIndent()
         val vs = compileShader(GLES20.GL_VERTEX_SHADER, vsh)
         val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fsh)
+        if (vs == 0 || fs == 0) {
+            if (vs != 0) GLES20.glDeleteShader(vs)
+            if (fs != 0) GLES20.glDeleteShader(fs)
+            return 0
+        }
         val prog = GLES20.glCreateProgram()
         GLES20.glAttachShader(prog, vs)
         GLES20.glAttachShader(prog, fs)
         GLES20.glLinkProgram(prog)
+        val linkStatus = IntArray(1)
+        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        GLES20.glDeleteShader(vs)
+        GLES20.glDeleteShader(fs)
+        if (linkStatus[0] == GLES20.GL_FALSE) {
+            android.util.Log.e("GpuTriangleStorm", "Program link error: ${GLES20.glGetProgramInfoLog(prog)}")
+            GLES20.glDeleteProgram(prog)
+            return 0
+        }
         return prog
     }
 
     private fun compileShader(type: Int, source: String): Int {
         val s = GLES20.glCreateShader(type)
+        if (s == 0) return 0
         GLES20.glShaderSource(s, source)
         GLES20.glCompileShader(s)
+        val status = IntArray(1)
+        GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, status, 0)
+        if (status[0] == GLES20.GL_FALSE) {
+            android.util.Log.e("GpuTriangleStorm", "Shader compile error: ${GLES20.glGetShaderInfoLog(s)}")
+            GLES20.glDeleteShader(s)
+            return 0
+        }
         return s
     }
 

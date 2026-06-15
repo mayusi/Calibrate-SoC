@@ -19,6 +19,7 @@ import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
+import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -130,7 +131,13 @@ class AutoTdpService : Service() {
      */
     private suspend fun runDaemon(config: AutoTdpProfileConfig) {
         // ── Step 1: resolve capabilities ──────────────────────────────────────
-        val report: CapabilityReport = capabilityProbe.report.value ?: capabilityProbe.refresh()
+        // Always refresh rather than using the cached value so that
+        // pserverSysfsLive / sysfsDirectlyWritable reflect the CURRENT
+        // device state at daemon-start time. A stale report could have
+        // pserverSysfsLive=false (probed before the whitelist step was
+        // run) and cause the availability gate to reject a device that
+        // is actually writable.
+        val report: CapabilityReport = capabilityProbe.refresh()
 
         // ── Step 2: LIVE availability gate ────────────────────────────────────
         val liveReason = liveUnavailableReason(report)
@@ -208,11 +215,33 @@ class AutoTdpService : Service() {
                             report = report,
                             reason = "AutoTDP: ${op.description}",
                         )
-                        if (result !is io.github.mayusi.calibratesoc.data.tunables.WriteResult.Success) {
-                            val failure = "Write denied: ${op.description} → $result"
-                            Log.e(TAG, failure)
-                            stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
-                            return@collect
+                        when (result) {
+                            is WriteResult.Success -> {
+                                // Good — continue to next op.
+                            }
+                            is WriteResult.CapabilityDenied -> {
+                                // CapabilityDenied means WriterRegistry resolved to NoopWriter —
+                                // no tier can write this node. This is genuinely unrecoverable
+                                // for the current capability state: stop the daemon so the user
+                                // isn't left with a "Running" notification that does nothing.
+                                val failure = "No write tier available for ${op.description}: ${result.reason}"
+                                Log.e(TAG, failure)
+                                stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
+                                return@collect
+                            }
+                            is WriteResult.Rejected,
+                            is WriteResult.Failed -> {
+                                // Rejected / Failed: the tier was tried (PServer or libsu) but
+                                // the write didn't land. This could be transient (binder hiccup,
+                                // EBUSY from a governor protecting an OPP). Log it and stop —
+                                // we don't retry here because re-trying a Rejected write in a
+                                // tight loop would spam logcat and potentially corrupt the clock
+                                // state. Stopping cleanly and letting the user restart is safer.
+                                val failure = "Write failed for ${op.description}: $result"
+                                Log.e(TAG, failure)
+                                stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
+                                return@collect
+                            }
                         }
                     }
                     currentState = decision.target

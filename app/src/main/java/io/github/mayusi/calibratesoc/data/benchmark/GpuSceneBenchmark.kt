@@ -432,6 +432,11 @@ class GpuSceneBenchmark @Inject constructor(
                 var prev = loopStart
                 var frames = 0
                 var warmupDone = false
+                // loopMeasuredStart is captured after warmup completes so the FPS
+                // denominator only covers the measured (non-warmup) portion of the loop.
+                // This prevents the warmup frames from inflating the elapsed time and
+                // causing a systematic ~WARMUP_FRAMES/total underestimate in loop FPS.
+                var loopMeasuredStart = loopStart
 
                 while (System.nanoTime() < loopDeadline) {
                     if (!isActiveCheck()) break
@@ -488,7 +493,9 @@ class GpuSceneBenchmark @Inject constructor(
 
                     if (!warmupDone && frames > WARMUP_FRAMES) {
                         warmupDone = true
-                        // Reset prev so first measured frame doesn't include warmup.
+                        // Capture loopMeasuredStart NOW (after warmup) so the FPS
+                        // denominator excludes the warmup time (BUG 4 fix).
+                        loopMeasuredStart = now
                         prev = now
                         frames = 0
                         continue
@@ -499,7 +506,8 @@ class GpuSceneBenchmark @Inject constructor(
                     }
                 }
 
-                val loopElapsedSec = (System.nanoTime() - loopStart) / 1_000_000_000.0
+                // BUG 4: use loopMeasuredStart (post-warmup) as denominator, not loopStart.
+                val loopElapsedSec = (System.nanoTime() - loopMeasuredStart) / 1_000_000_000.0
                 val loopFps = if (loopElapsedSec > 0 && loopFrameTimes.isNotEmpty())
                     loopFrameTimes.size / loopElapsedSec else 0.0
                 loopFpsList.add(loopFps)

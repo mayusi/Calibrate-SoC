@@ -71,6 +71,8 @@ import io.github.mayusi.calibratesoc.data.benchmark.BenchScores
 import io.github.mayusi.calibratesoc.data.benchmark.BenchmarkRunner
 import io.github.mayusi.calibratesoc.data.benchmark.GpuSceneResult
 import io.github.mayusi.calibratesoc.data.benchmark.SceneLoopResult
+import io.github.mayusi.calibratesoc.data.benchmark.BenchConfig
+import io.github.mayusi.calibratesoc.data.benchmark.SUSTAINED_WINDOW_RATIO
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleAnalysis
 import io.github.mayusi.calibratesoc.data.benchmark.ThrottleSample
 import io.github.mayusi.calibratesoc.data.hardware.StorageClassNames
@@ -977,7 +979,11 @@ private fun GpuDetailCard(run: BenchRun) {
 private fun PowerThermalCard(run: BenchRun) {
     val samples = run.throttleSamples
     if (samples.isEmpty()) return
-    val a = remember(run) { ThrottleAnalysis.from(samples, killTempC = 85f) } ?: return
+    // BUG 8: use the same killTempC for both ThrottleAnalysis and the bar denominator.
+    // BenchConfig.killTempC is the run default (85°C); the run doesn't store it separately,
+    // so we derive from BenchConfig() rather than hardcoding 85f in two places.
+    val killTempC = BenchConfig().killTempC
+    val a = remember(run) { ThrottleAnalysis.from(samples, killTempC = killTempC) } ?: return
 
     val throttleAnnotation = if (a.dropPct < 5.0) {
         "Held ${a.sustainedMhz} MHz — no throttling detected."
@@ -1023,8 +1029,10 @@ private fun PowerThermalCard(run: BenchRun) {
             MetricBarRow(
                 label = "Thermal headroom",
                 value = "%.1f°C".format(headroom),
-                explainer = "Margin below the 85°C kill threshold. More = more sustained clock available.",
-                fraction = (headroom / 85f).coerceIn(0f, 1f),
+                // BUG 8: use killTempC as denominator (not hardcoded 85f) so the bar
+                // fraction matches the analysis boundary used to compute headroom.
+                explainer = "Margin below the %.0f°C kill threshold. More = more sustained clock available.".format(killTempC),
+                fraction = (headroom / killTempC).coerceIn(0f, 1f),
             )
         }
         a.avgPowerMw?.let {
@@ -1068,7 +1076,9 @@ fun PerLoopFpsBarChart(
     if (loopResults.size < 2) return
     val sorted = loopResults.sortedBy { it.loopIndex }
     val peakFps = sorted.maxOf { it.avgFps }
-    val tailFrom = (sorted.size * 0.25).toInt().coerceAtMost(sorted.size - 1)
+    // BUG 7: use SUSTAINED_WINDOW_RATIO (0.75 → last 25%) so the chart's
+    // sustain line matches the headline stability% computed by StabilityResult.
+    val tailFrom = (sorted.size * SUSTAINED_WINDOW_RATIO).toInt().coerceAtMost(sorted.size - 1)
     val sustainedFps = sorted.drop(tailFrom).map { it.avgFps }.average()
     val stabilityThreshold = peakFps * 0.90 // 90% of peak = dashed line
 

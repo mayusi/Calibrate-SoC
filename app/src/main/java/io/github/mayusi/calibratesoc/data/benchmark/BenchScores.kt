@@ -36,8 +36,10 @@ data class BenchScores(
                 (((avg * 100.0) * 0.6 + (low * 100.0) * 0.4) * consMul).toLong()
             }
 
-            // Memory: bandwidth scaled x10 (matches composite weighting).
-            val memory = k.memoryBandwidthMBps?.let { (it * 10.0).toLong() }
+            // Memory: bandwidth scaled ×0.1 so 30 000–80 000 MB/s lands in the
+            // same 3 000–8 000 range as CPU and GPU sub-scores. Matches the
+            // composite weighting in BenchRun.overallScore (also ×0.1).
+            val memory = k.memoryBandwidthMBps?.let { (it * 0.1).toLong() }
 
             return BenchScores(cpu = cpu, gpu = gpu, memory = memory, overall = run.overallScore)
         }

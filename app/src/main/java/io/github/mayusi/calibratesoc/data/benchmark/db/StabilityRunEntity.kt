@@ -38,7 +38,8 @@ data class StabilityRunEntity(
         startedAtMs = startedAtMs,
         loopCount = loopCount,
         loopMs = loopMs,
-        stabilityPct = stabilityPct,
+        // -1 is the DB sentinel for "N/A (fewer than 2 loops ran)".
+        stabilityPct = if (stabilityPct < 0) null else stabilityPct,
         minFps = minFps,
         maxFps = maxFps,
         peakTempC = peakTempC,
@@ -55,7 +56,8 @@ data class StabilityRunEntity(
                 startedAtMs = result.startedAtMs,
                 loopCount = result.loopCount,
                 loopMs = loopMs,
-                stabilityPct = result.stabilityPct,
+                // -1 is the DB sentinel for null (no schema change needed).
+                stabilityPct = result.stabilityPct ?: -1,
                 minFps = result.minFps,
                 maxFps = result.maxFps,
                 peakTempC = result.peakTempC,
@@ -71,7 +73,7 @@ data class StabilityRunEntity(
                 startedAtMs = run.startedAtMs,
                 loopCount = run.loopCount,
                 loopMs = run.loopMs,
-                stabilityPct = run.stabilityPct,
+                stabilityPct = run.stabilityPct ?: -1,
                 minFps = run.minFps,
                 maxFps = run.maxFps,
                 peakTempC = run.peakTempC,

@@ -1,5 +1,7 @@
 package io.github.mayusi.calibratesoc.data.autotdp
 
+import kotlinx.serialization.Serializable
+
 /**
  * Active control profile for the AutoTDP engine.
  *
@@ -14,6 +16,7 @@ package io.github.mayusi.calibratesoc.data.autotdp
  *                  derives a big-cluster cap that keeps measured draw near
  *                  that budget. Requires [targetWatts] to be non-null.
  */
+@Serializable
 enum class AutoTdpProfile {
     EFFICIENCY,
     BALANCED,

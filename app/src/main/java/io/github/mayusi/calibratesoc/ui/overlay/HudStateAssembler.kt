@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.ui.overlay
 
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.TempAlertMonitor
@@ -256,5 +257,25 @@ class HudStateAssembler @Inject constructor(
 
     fun updateEnabledPolicies(set: Set<Int>) {
         _state.value = _state.value.copy(enabledPolicies = set)
+    }
+
+    fun feedAutoTdpActiveProfile(profile: AutoTdpProfile) {
+        _state.value = _state.value.copy(autoTdpActiveProfile = profile)
+    }
+
+    fun feedRefreshRateOptions(hzOptions: List<Float>) {
+        _state.value = _state.value.copy(availableHzOptions = hzOptions)
+    }
+
+    fun feedPinnedHz(hz: Float?) {
+        _state.value = _state.value.copy(pinnedHz = hz)
+    }
+
+    fun feedHudSizeIndex(index: Int) {
+        _state.value = _state.value.copy(hudSizeIndex = index.coerceIn(0, 2))
+    }
+
+    fun feedHudOpacity(opacity: Float) {
+        _state.value = _state.value.copy(hudOpacity = opacity.coerceIn(0.1f, 1f))
     }
 }

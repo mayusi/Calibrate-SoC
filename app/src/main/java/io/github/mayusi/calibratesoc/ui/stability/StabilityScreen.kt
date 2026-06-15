@@ -144,7 +144,7 @@ private fun PastRunRow(run: StabilityRun, onDelete: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            "${run.stabilityPct}%",
+            if (run.stabilityPct != null) "${run.stabilityPct}%" else "N/A",
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             color = color,
@@ -287,7 +287,7 @@ private fun StabilityResultCard(result: StabilityResult) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "${result.stabilityPct}%",
+                if (result.stabilityPct != null) "${result.stabilityPct}%" else "N/A (aborted)",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 40.sp,
                 fontWeight = FontWeight.Bold,
@@ -462,7 +462,8 @@ private fun StabilityResultCard(result: StabilityResult) {
 }
 
 @Composable
-private fun stabilityVerdictColor(pct: Int): Color = when {
+private fun stabilityVerdictColor(pct: Int?): Color = when {
+    pct == null -> MaterialTheme.colorScheme.onSurfaceVariant
     pct >= 95 -> MaterialTheme.colorScheme.tertiary
     pct in 85..94 -> MaterialTheme.colorScheme.primary
     pct in 75..84 -> MaterialTheme.colorScheme.secondary
@@ -482,7 +483,7 @@ internal fun stabilityShareText(
 ): String = buildString {
     appendLine("Calibrate SoC — Stability Result")
     appendLine()
-    appendLine("Stability: ${result.stabilityPct}%  •  ${verdict.word}")
+    appendLine("Stability: ${if (result.stabilityPct != null) "${result.stabilityPct}%" else "N/A"}  •  ${verdict.word}")
     appendLine(verdict.explanation)
     appendLine()
     appendLine("Sustained FPS:  %.1f".format(result.avgSustainedFps))
@@ -519,7 +520,7 @@ internal fun stabilityRunShareText(run: StabilityRun): String {
         appendLine("Calibrate SoC — Stability Result")
         appendLine("Date: ${dateFmt.format(Date(run.startedAtMs))}")
         appendLine()
-        appendLine("Stability: ${run.stabilityPct}%  •  ${verdict.word}")
+        appendLine("Stability: ${if (run.stabilityPct != null) "${run.stabilityPct}%" else "N/A"}  •  ${verdict.word}")
         appendLine(verdict.explanation)
         appendLine()
         appendLine("Min FPS: %.1f   Max FPS: %.1f".format(run.minFps, run.maxFps))

@@ -252,9 +252,11 @@ class BenchTrendTest {
         )
         val result = BenchTrend.compute(runs, BenchFlavor.STANDARD)
         assertThat(result.memorySeries).hasSize(2)
-        // BenchScores.from scales memory x10
-        assertThat(result.memorySeries.first().score).isEqualTo(1000L)
-        assertThat(result.memorySeries.last().score).isEqualTo(1100L)
+        // BUG 3 fix: BenchScores.from scales memory ×0.1 (was ×10) so typical
+        // bandwidth (30k–80k MB/s) lands in the same range as CPU/GPU sub-scores.
+        // 100.0 * 0.1 = 10; 110.0 * 0.1 = 11.
+        assertThat(result.memorySeries.first().score).isEqualTo(10L)
+        assertThat(result.memorySeries.last().score).isEqualTo(11L)
     }
 
     // ─── defaultFlavor ────────────────────────────────────────────────────

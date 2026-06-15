@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.ui.overlay
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -19,6 +20,10 @@ private val Context.hudDataStore by preferencesDataStore(name = "hud_overlay")
  * window comes back where the user left it after a reboot or QS tile
  * toggle. Position survives process death — the HUD is supposed to feel
  * like a permanent sticky note, not something that resets every time.
+ *
+ * Added in Direction-C rework:
+ *  - [hudSizeIndex]  — 0=small, 1=medium, 2=large width preset
+ *  - [hudOpacity]    — 0.0..1.0 float, default 0.94
  */
 @Singleton
 class HudPrefs @Inject constructor(
@@ -36,6 +41,12 @@ class HudPrefs @Inject constructor(
     val enabledPolicies: Flow<Set<Int>> = context.hudDataStore.data.map {
         it[KEY_ENABLED_POLICIES]?.mapNotNull(String::toIntOrNull)?.toSet() ?: emptySet()
     }
+
+    /** 0 = small (~220dp), 1 = medium (~270dp), 2 = large (~330dp). Default 1. */
+    val hudSizeIndex: Flow<Int> = context.hudDataStore.data.map { (it[KEY_HUD_SIZE_INDEX] ?: 1).coerceIn(0, 2) }
+
+    /** Overlay alpha, 0.0..1.0. Default 0.94. */
+    val hudOpacity: Flow<Float> = context.hudDataStore.data.map { (it[KEY_HUD_OPACITY] ?: 94).coerceIn(10, 100) / 100f }
 
     suspend fun setStepMhz(step: Int) {
         context.hudDataStore.edit { it[KEY_STEP_MHZ] = step }
@@ -62,6 +73,16 @@ class HudPrefs @Inject constructor(
         context.hudDataStore.edit { it[KEY_RUNNING] = r }
     }
 
+    /** [index] must be 0, 1, or 2. */
+    suspend fun setHudSizeIndex(index: Int) {
+        context.hudDataStore.edit { it[KEY_HUD_SIZE_INDEX] = index.coerceIn(0, 2) }
+    }
+
+    /** [opacity] in 0.0..1.0; clamped and stored as 0..100 int to avoid float drift. */
+    suspend fun setHudOpacity(opacity: Float) {
+        context.hudDataStore.edit { it[KEY_HUD_OPACITY] = (opacity * 100).toInt().coerceIn(10, 100) }
+    }
+
     private companion object {
         val KEY_PROFILE = stringPreferencesKey("profile")
         val KEY_X_DP = intPreferencesKey("x_dp")
@@ -70,5 +91,7 @@ class HudPrefs @Inject constructor(
         val KEY_STEP_MHZ = intPreferencesKey("step_mhz")
         val KEY_ENABLED_POLICIES = androidx.datastore.preferences.core
             .stringSetPreferencesKey("enabled_policies")
+        val KEY_HUD_SIZE_INDEX = intPreferencesKey("hud_size_index")
+        val KEY_HUD_OPACITY = intPreferencesKey("hud_opacity_pct")
     }
 }

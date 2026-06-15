@@ -10,6 +10,7 @@ import dagger.hilt.components.SingletonComponent
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchDatabase
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchRunDao
 import io.github.mayusi.calibratesoc.data.benchmark.db.StabilityRunDao
+import io.github.mayusi.calibratesoc.data.insights.db.SessionReportDao
 import io.github.mayusi.calibratesoc.data.scorelog.ExternalScoreDao
 import io.github.mayusi.calibratesoc.data.session.SessionDao
 import io.github.mayusi.calibratesoc.data.share.AndroidBase64Encoder
@@ -67,6 +68,9 @@ object AppModule {
 
     @Provides
     fun provideExternalScoreDao(db: BenchDatabase): ExternalScoreDao = db.externalScoreDao()
+
+    @Provides
+    fun provideSessionReportDao(db: BenchDatabase): SessionReportDao = db.sessionReportDao()
 
     /** Production Base64 encoder backed by android.util.Base64. */
     @Provides

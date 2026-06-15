@@ -19,11 +19,7 @@ import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune as TuneIcon
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -43,11 +39,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
@@ -59,22 +57,30 @@ import io.github.mayusi.calibratesoc.data.presets.VerificationTier
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
 import io.github.mayusi.calibratesoc.data.vendor.OdinIntents
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
+import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.PanelAccentEdge
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
+import io.github.mayusi.calibratesoc.ui.components.StatBar
+import io.github.mayusi.calibratesoc.ui.components.StatusPill
+import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
- * Phase 5 Tune screen. Surfaces what the device actually exposes:
- *   * One card per discovered CPU policy with min/max freq sliders +
- *     governor dropdown. Sliders snap to the OPP table values exposed
- *     by the kernel — no point letting the user pick 1234 MHz when the
- *     kernel can only run 1209.6 / 1401.6.
- *   * A Community Tuned card listing bundled presets for the device
- *     (e.g. TheOldTaylor's Odin 3 underclock recipes). Apply writes
- *     directly, no slider scrubbing.
- *   * A first-OC typed-confirm modal that fires once per install.
+ * Tune screen — Direction-C Arsenal restyle.
  *
- * Privilege-tier handling is honest: when the report says NONE or
- * SHIZUKU, the Apply button is disabled with an inline "needs root"
- * explainer rather than letting the user mash a button that silently
- * fails.
+ * The preset list is the primary surface here. Each preset = an
+ * [ArsenalPanel] with accent-color-coded cluster [StatBar]s, a
+ * [StatusPill] for the verification tier, and [ArsenalButton]s for
+ * Apply (Red primary) / Script / Boot (secondary). Policy sliders are
+ * framed in [ArsenalPanel] with Blue CPU accent. GPU is Purple.
+ * Advanced / AutoTDP navigation buttons keep the same behavior.
+ *
+ * Device-scoping: the preset list is rendered from [TuneViewModel.presets]
+ * which is already device-scoped by the repository layer. No RP6 presets
+ * appear on Odin 3 and vice-versa — the manifest-v3 scoping is upstream
+ * of this composable.
  */
 @Composable
 fun TuneScreen(
@@ -97,9 +103,6 @@ fun TuneScreen(
     val latestTelemetry by viewModel.latestTelemetry.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // Pending confirmations. Two kinds:
-    //   pendingFirstOcConfirm — one-shot, gated by DataStore
-    //   pendingUnknownDeviceConfirm — fires every time for GENERIC_UNKNOWN_FAMILY
     var pendingFirstOcConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingUnknownDeviceConfirm by remember { mutableStateOf<Pair<Preset, () -> Unit>?>(null) }
     var showSaveProfileDialog by remember { mutableStateOf(false) }
@@ -107,19 +110,18 @@ fun TuneScreen(
     val report = capability
     if (report == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Probing device…", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "PROBING DEVICE…",
+                style = MaterialTheme.typography.labelMedium,
+                color = AccentBar.Neutral,
+                letterSpacing = 0.08.sp,
+                fontFamily = FontFamily.Monospace,
+            )
         }
         return
     }
 
-    // Tier capabilities derived once for the whole screen. AYN_SETTINGS
-    // unlocks the vendor-controls card + script-generation path for
-    // presets. ROOT unlocks direct sysfs writes for both presets and
-    // slider edits. SHIZUKU + NONE are read-only for now.
     val canWriteSysfs = report.privilege == PrivilegeTier.ROOT
-    // hasVendorControls = device has a known vendor companion app with a
-    // fan-curve / vendor-preset surface (AYN/Odin, Retroid). Drives ONLY
-    // the VendorCard. Script generation is NOT gated on this — see below.
     val hasVendorControls = adapter?.vendorAppPackage?.startsWith("com.odin") == true ||
         adapter?.vendorAppPackage?.startsWith("com.ayn") == true ||
         adapter?.vendorAppPackage?.startsWith("com.rp") == true ||
@@ -127,17 +129,13 @@ fun TuneScreen(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        item { Header(report, onOpenHistory = onOpenHistory) }
+        item { TuneHeader(report, onOpenHistory = onOpenHistory) }
         item { DisplayRefreshCard() }
         item { AdvancedUnlockCard() }
 
-        // Vendor controls card: only when an AYN handheld adapter
-        // exists. Visible even when WRITE_SECURE_SETTINGS hasn't been
-        // granted yet — buttons show a helpful "grant me first" state
-        // instead of being hidden, so the user knows what's possible.
         adapter?.takeIf { hasVendorControls }?.let { ad ->
             item {
                 VendorCard(
@@ -149,15 +147,13 @@ fun TuneScreen(
             }
         }
 
+        // Device-scoped preset list — the ViewModel already filters by device;
+        // RP6 presets do NOT appear on Odin 3 and vice-versa.
         if (presets.isNotEmpty()) {
             item {
                 PresetsCard(
                     presets = presets,
                     canApply = canWriteSysfs,
-                    // Script generation is the UNIVERSAL no-root path —
-                    // any device can take the .sh and run it via its own
-                    // "Run script as Root", Magisk/KernelSU, or adb. Never
-                    // gate it on vendor/root.
                     canGenerateScript = true,
                 ) { preset, action ->
                     when (action) {
@@ -168,24 +164,14 @@ fun TuneScreen(
                             } else apply
                             if (!ocAck) pendingFirstOcConfirm = gated else gated()
                         }
-                        PresetAction.GENERATE_SCRIPT -> {
-                            viewModel.generateAynScript(preset)
-                        }
-                        PresetAction.GENERATE_SCRIPT_WITH_REMINDER -> {
-                            viewModel.generateScriptWithReminder(preset)
-                        }
-                        PresetAction.INSTALL_AT_BOOT -> {
-                            viewModel.installScriptAsBootService(preset)
-                        }
+                        PresetAction.GENERATE_SCRIPT -> viewModel.generateAynScript(preset)
+                        PresetAction.GENERATE_SCRIPT_WITH_REMINDER -> viewModel.generateScriptWithReminder(preset)
+                        PresetAction.INSTALL_AT_BOOT -> viewModel.installScriptAsBootService(preset)
                     }
                 }
             }
         }
 
-        // Persistent "Last generated script" card. Unlike the modal
-        // ScriptDeployedDialog (which vanishes when the user leaves to
-        // run the script), this survives the round-trip so Verify is
-        // always reachable when they come back.
         lastDeploy?.let { deployed ->
             item {
                 LastScriptCard(
@@ -201,8 +187,7 @@ fun TuneScreen(
             }
         }
 
-        // Pre-compute the sorted distinct max-freqs for all policies so the
-        // cluster-tier ranking is stable across all PolicyCard composables.
+        // Pre-compute sorted distinct max-freqs for cluster-tier ranking
         val allPolicyMaxKhz = report.cpuPolicies
             .map { it.availableFreqsKhz.lastOrNull() ?: it.currentMaxKhz }
             .distinct()
@@ -218,9 +203,6 @@ fun TuneScreen(
             )
         }
 
-        // GPU card — render only when the capability probe found a
-        // usable GPU surface. Mali kernels without devfreq fall out
-        // silently rather than render a slider that does nothing.
         report.gpu?.let { gpu ->
             item {
                 GpuCard(
@@ -249,47 +231,37 @@ fun TuneScreen(
             )
         }
 
-        // Advanced Tuning entry point — governor tunables, GPU power levels,
-        // scheduler boost, I/O, VM, custom sysfs. A sub-screen so TuneScreen
-        // stays focused on the primary CPU/GPU sliders + presets.
+        // Advanced tuning entry point
         item {
-            OutlinedButton(
+            ArsenalButton(
+                label = "Advanced Tuning →",
                 onClick = onOpenAdvancedTuning,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Settings,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Advanced tuning →")
-            }
+            )
         }
 
-        // AutoTDP entry point — dynamic power management with LIVE/SCRIPT/ADVISORY rungs.
+        // AutoTDP entry point
         item {
-            OutlinedButton(
+            ArsenalButton(
+                label = "AutoTDP — Dynamic Power Management →",
                 onClick = onOpenAutoTdp,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Emerald,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.TuneIcon,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("AutoTDP — dynamic power management →")
-            }
+            )
         }
 
-        // Save-as-profile: snapshots the current Tune state (pending
-        // slider edits + live kernel values) into a reusable UserProfile.
+        // Save as profile
         item {
-            OutlinedButton(
+            ArsenalButton(
+                label = "Save As Profile",
                 onClick = { showSaveProfileDialog = true },
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Save as profile") }
+            )
         }
 
         if (results.isNotEmpty()) item { ResultsCard(results) }
@@ -349,90 +321,83 @@ fun TuneScreen(
 }
 
 enum class PresetAction {
-    /** Root tier only: apply once via direct sysfs writes. */
     APPLY,
-    /** Any tier: generate AYN script for one-shot use via Odin Settings. */
     GENERATE_SCRIPT,
-    /** Any tier: generate AYN script + register post-boot reminder. */
     GENERATE_SCRIPT_WITH_REMINDER,
-    /** Root tier only: drop script into Magisk/KernelSU service.d. */
     INSTALL_AT_BOOT,
 }
 
-// --- Header ----------------------------------------------------------
+// --- Tune header ------------------------------------------------------
 
 @Composable
-private fun Header(report: CapabilityReport, onOpenHistory: () -> Unit = {}) {
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Tune", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.fillMaxWidth(0.0f).weight(1f))
-            OutlinedButton(onClick = onOpenHistory) { Text("History") }
+private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {}) {
+    val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(report)
+    val tierChip = when (report.privilege) {
+        PrivilegeTier.AYN_SETTINGS -> vb.tierLabel
+        else -> report.privilege.name
+    }
+    val tierAccent = when (report.privilege) {
+        PrivilegeTier.ROOT -> AccentBar.Emerald
+        PrivilegeTier.AYN_SETTINGS -> AccentBar.Emerald
+        PrivilegeTier.SHIZUKU -> AccentBar.Blue
+        PrivilegeTier.NONE -> AccentBar.Neutral
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "TUNE",
+                style = MaterialTheme.typography.headlineMedium,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                letterSpacing = 0.04.sp,
+                modifier = Modifier.weight(1f),
+            )
+            ArsenalButton(
+                label = "History",
+                onClick = onOpenHistory,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
+            )
         }
-        // Vendor-aware brand words so a Retroid user never sees "AYN",
-        // an AYANEO user never sees "Odin", etc.
-        val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(report)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Show the tier in brand terms instead of the raw enum
-            // ("AYN_SETTINGS"). Vendor tier → "<Brand> tier".
-            val tierChip = when (report.privilege) {
-                PrivilegeTier.AYN_SETTINGS -> vb.tierLabel
-                else -> report.privilege.name
-            }
-            AssistChip(onClick = {}, label = { Text(tierChip) })
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+            StatusPill(text = tierChip, accent = tierAccent)
             report.device.knownHandheldKey?.let { key ->
-                AssistChip(onClick = {}, label = { Text(key) })
+                StatusPill(text = key, accent = AccentBar.Neutral)
             }
         }
         val explainer = when (report.privilege) {
             PrivilegeTier.ROOT ->
                 "Magisk/KernelSU detected. Direct sysfs writes available — Apply works for everything."
             PrivilegeTier.AYN_SETTINGS ->
-                "${vb.brand} tier active. Vendor preset switching is owned by the firmware (use the device's own Quick Settings tile). For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
+                "${vb.brand} tier active. Vendor preset switching is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
             PrivilegeTier.SHIZUKU ->
                 "Shizuku bound. Custom MHz needs root or the script path. Vendor preset switching pending UserService support."
             PrivilegeTier.NONE ->
-                "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor presets:\n" +
-                    "adb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
+                "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor presets:\nadb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
         }
         Text(
             explainer,
             style = MaterialTheme.typography.bodySmall,
             color = when (report.privilege) {
-                PrivilegeTier.ROOT, PrivilegeTier.AYN_SETTINGS -> MaterialTheme.colorScheme.onSurfaceVariant
-                else -> MaterialTheme.colorScheme.secondary
+                PrivilegeTier.ROOT, PrivilegeTier.AYN_SETTINGS -> Color(0xFF999999)
+                else -> AccentBar.Blue
             },
         )
     }
 }
 
-// --- Vendor controls — honest read-only card on Odin 3 -------------
-//
-// History note: we tried two paths to flip AYN's performance_mode /
-// fan_mode keys from this app:
-//   1. Settings.System.putInt with WRITE_SECURE_SETTINGS granted.
-//      Value lands, but AYN's daemon ignores third-party writes.
-//   2. PServerBinder transact() via reflection (langerhans-style).
-//      Binder kernel returns UNKNOWN_TRANSACTION because Android's
-//      AppFreezer has paused PServer for our caller, and the
-//      service's SELinux context (pservice) refuses our app domain
-//      (untrusted_app) regardless of app_whiteList membership.
-//
-// Net: on Odin 3 firmware, AYN's vendor controls genuinely cannot
-// be driven by a third-party app without Magisk/KernelSU or a
-// Shizuku-bound UserService. The honest thing is to NOT render
-// non-functional buttons. We point users at Odin's own UI for the
-// vendor presets (which works perfectly) and keep ourselves
-// focused on what we CAN do well: kernel-level CPU/GPU tuning via
-// the AYN script path or root-tier writes.
+// --- Vendor controls card --------------------------------------------
 
 @Composable
 private fun VendorCard(
     adapter: DeviceAdapter,
     onOpenFanCurve: () -> Unit,
-) = SectionCard("Vendor controls — ${adapter.displayName}") {
-    // Brand words from the adapter key so a Retroid shows "Retroid",
-    // an AYANEO shows "AYANEO", etc.
+) {
     val brand = when {
         adapter.key.startsWith("ayn") || "odin" in adapter.key ->
             io.github.mayusi.calibratesoc.data.vendor.VendorBrand.AYN
@@ -444,23 +409,30 @@ private fun VendorCard(
             io.github.mayusi.calibratesoc.data.vendor.VendorBrand.ANBERNIC
         else -> io.github.mayusi.calibratesoc.data.vendor.VendorBrand.GENERIC
     }
-    Text(
-        "${brand.brand}'s performance and fan modes are owned by the firmware's vendor daemon, which only accepts root-elevated writes. Pull down Quick Settings to flip those modes with ${brand.brand}'s own tiles — they work perfectly and we don't duplicate them here.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Text(
-        "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the preset list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
-        style = MaterialTheme.typography.bodySmall,
-    )
-    if (adapter.fanAdapter?.supportsCurve == true) {
-        OutlinedButton(onClick = onOpenFanCurve) {
-            Text("Open ${brand.brand} fan curve editor")
+    ArsenalPanel(accent = AccentBar.Neutral, title = "VENDOR CONTROLS — ${adapter.displayName}") {
+        Text(
+            "${brand.brand}'s performance and fan modes are owned by the firmware's vendor daemon, which only accepts root-elevated writes. Pull down Quick Settings to flip those modes with ${brand.brand}'s own tiles — they work perfectly and we don't duplicate them here.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        Text(
+            "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the preset list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        if (adapter.fanAdapter?.supportsCurve == true) {
+            Spacer(Modifier.height(Spacing.group))
+            ArsenalButton(
+                label = "Open ${brand.brand} Fan Curve Editor",
+                onClick = onOpenFanCurve,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Blue,
+            )
         }
     }
 }
 
-// --- Script-deployed confirmation modal ------------------------------
+// --- Script-deployed dialog ------------------------------------------
 
 @Composable
 private fun ScriptDeployedDialog(
@@ -471,8 +443,6 @@ private fun ScriptDeployedDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    // Device-correct name: "Odin Settings" / "Retroid Settings" /
-    // "AYANEO Settings" / "your device's settings".
     val vendorName = remember {
         io.github.mayusi.calibratesoc.data.vendor.OdinIntents.vendorSettingsName(context)
     }
@@ -480,38 +450,33 @@ private fun ScriptDeployedDialog(
         onDismissRequest = onDismiss,
         title = { Text("Script generated") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
                 Text("Saved to:", style = MaterialTheme.typography.labelMedium)
                 Text(
                     deployed.path,
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(Spacing.dense))
                 if (deployed.visibleToOdinPicker) {
                     Text("To run it:")
-                    Text("1. Tap “Open $vendorName” below")
-                    Text("2. Tap “Run script as Root”")
+                    Text("1. Tap \"Open $vendorName\" below")
+                    Text("2. Tap \"Run script as Root\"")
                     Text("3. Pick the .sh from the CalibrateSoC folder")
-                    Text(
-                        "4. Come back here and tap “Verify it worked”.",
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Text("4. Come back here and tap \"Verify it worked\".", fontWeight = FontWeight.SemiBold)
                     Text(
                         "Note: sysfs writes don't survive reboot. Re-run after each restart, or use Apply on boot once Magisk is installed.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = Color(0xFF999999),
                     )
                 } else {
                     Text(
                         "Public storage wasn't writable — the script ended up in our app-private folder where the runner probably can't see it. Copy it to /sdcard/CalibrateSoC/ manually or grant the app storage permission.",
-                        color = MaterialTheme.colorScheme.error,
+                        color = AccentBar.Red,
                     )
                 }
-
-                // Verification readback — the definitive "did it work".
                 verifyResult?.let { vr ->
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(Spacing.dense))
                     HorizontalDivider()
                     VerifyResultBlock(vr)
                 }
@@ -520,12 +485,10 @@ private fun ScriptDeployedDialog(
         confirmButton = {
             Button(onClick = {
                 io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openVendorSettings(context)
-                // Don't dismiss — keep the dialog so the user can tap
-                // "Verify it worked" after they return.
             }) { Text("Open $vendorName") }
         },
         dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
                 if (preset != null && preset.cpuPolicyMaxKhz.isNotEmpty()) {
                     TextButton(onClick = onVerify) { Text("Verify it worked") }
                 }
@@ -536,13 +499,6 @@ private fun ScriptDeployedDialog(
 }
 
 // --- Persistent "last generated script" card -------------------------
-//
-// The modal ScriptDeployedDialog is transient — it's gone the moment
-// the user navigates to their vendor settings to run the script. This
-// card is the DURABLE home for Verify: it stays on the Tune screen as
-// long as a script is the last thing the user generated, so the
-// "run it → come back → verify" round-trip always has a reachable
-// Verify button.
 
 @Composable
 private fun LastScriptCard(
@@ -551,66 +507,72 @@ private fun LastScriptCard(
     verifyResult: TuneViewModel.VerifyResult?,
     onVerify: () -> Unit,
     onDismiss: () -> Unit,
-) = SectionCard("Last generated script") {
-    val fileName = remember(deployed.path) { deployed.path.substringAfterLast('/') }
-    Text(
-        fileName,
-        fontFamily = FontFamily.Monospace,
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    Text(
-        "Run it via your device's 'Run script as Root', then tap Verify.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Button(
-            onClick = onVerify,
-            enabled = preset != null && preset.cpuPolicyMaxKhz.isNotEmpty(),
-        ) { Text("Verify it worked") }
-        TextButton(onClick = onDismiss) { Text("Dismiss") }
-    }
-    verifyResult?.let { vr ->
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-        VerifyResultBlock(vr)
+) {
+    ArsenalPanel(accent = AccentBar.Neutral, title = "LAST GENERATED SCRIPT") {
+        val fileName = remember(deployed.path) { deployed.path.substringAfterLast('/') }
+        Text(
+            fileName,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White,
+        )
+        Text(
+            "Run it via your device's 'Run script as Root', then tap Verify.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArsenalButton(
+                label = "Verify It Worked",
+                onClick = onVerify,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Emerald,
+                enabled = preset != null && preset.cpuPolicyMaxKhz.isNotEmpty(),
+            )
+            ArsenalButton(
+                label = "Dismiss",
+                onClick = onDismiss,
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
+            )
+        }
+        verifyResult?.let { vr ->
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            VerifyResultBlock(vr)
+        }
     }
 }
 
-/**
- * Shared verify-result renderer. Four mutually-exclusive cases keyed
- * on the VerifyResult rollups, plus per-policy rows. Reused by both
- * the persistent card and the transient dialog so the messaging stays
- * consistent. "restricted" replaces a null readback (SELinux-denied)
- * so the user never sees a useless "got ?".
- */
 @Composable
 private fun VerifyResultBlock(vr: TuneViewModel.VerifyResult) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
         when {
             vr.allOk -> Text(
                 "✓ Applied — kernel confirms the new clocks.",
-                color = MaterialTheme.colorScheme.tertiary,
+                color = AccentBar.Emerald,
                 fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
             )
             vr.anyMismatch -> Text(
-                "✗ Not applied — a cluster is still at its old clock. Re-run the " +
-                    "script (a vendor daemon may have clamped it).",
-                color = MaterialTheme.colorScheme.error,
+                "✗ Not applied — a cluster is still at its old clock. Re-run the script (a vendor daemon may have clamped it).",
+                color = AccentBar.Red,
                 fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
             )
             !vr.anyMismatch && vr.readableOk && vr.anyUnreadable -> Text(
-                "✓ Looks applied — confirmed the readable clusters; some clusters " +
-                    "can't be read back on this firmware (SELinux), but they were in " +
-                    "the same script.",
-                color = MaterialTheme.colorScheme.tertiary,
+                "✓ Looks applied — confirmed readable clusters; some clusters can't be read back on this firmware (SELinux), but they were in the same script.",
+                color = AccentBar.Emerald,
                 fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
             )
             vr.allUnreadable -> Text(
-                "Can't read the clocks back on this firmware (SELinux blocks it). " +
-                    "The script runs as root — if you saw its output it applied. " +
-                    "Check the Dashboard CPU MHz to confirm.",
-                color = MaterialTheme.colorScheme.secondary,
+                "Can't read the clocks back on this firmware (SELinux blocks it). The script runs as root — if you saw its output it applied. Check the Dashboard CPU MHz to confirm.",
+                color = AccentBar.Amber,
                 fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
             )
         }
         vr.policies.forEach { p ->
@@ -626,16 +588,16 @@ private fun VerifyResultBlock(vr: TuneViewModel.VerifyResult) {
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.labelSmall,
                 color = when {
-                    !p.readable -> MaterialTheme.colorScheme.onSurfaceVariant
-                    p.ok -> MaterialTheme.colorScheme.onSurface
-                    else -> MaterialTheme.colorScheme.error
+                    !p.readable -> Color(0xFF999999)
+                    p.ok -> Color.White
+                    else -> AccentBar.Red
                 },
             )
         }
     }
 }
 
-// --- Community presets ----------------------------------------------
+// --- Community presets — Arsenal panels per preset -------------------
 
 @Composable
 private fun PresetsCard(
@@ -644,10 +606,7 @@ private fun PresetsCard(
     canGenerateScript: Boolean,
     onAction: (Preset, PresetAction) -> Unit,
 ) {
-    // Root means we can also do the boot-install variant. Surface
-    // both buttons; the boot-install one is what makes a tune
-    // survive reboot without manual re-application each time.
-    val canInstallAtBoot = canApply // canApply already == ROOT tier
+    val canInstallAtBoot = canApply
     PresetsCardInner(presets, canApply, canGenerateScript, canInstallAtBoot, onAction)
 }
 
@@ -658,168 +617,177 @@ private fun PresetsCardInner(
     canGenerateScript: Boolean,
     canInstallAtBoot: Boolean,
     onAction: (Preset, PresetAction) -> Unit,
-) = SectionCard("Presets") {
-    // Plain-English safety primer. The #1 question from users is
-    // "will this brick my device?" — answer it up front so they tune
-    // with confidence instead of fear.
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
+        // Section header
+        SectionHeader(title = "PRESETS", accent = AccentBar.Red)
+
+        // Safety primer as an info panel
+        ArsenalPanel(accent = AccentBar.Emerald, accentEdge = PanelAccentEdge.Start) {
             Text(
-                "Are these safe?",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                "ARE THESE SAFE?",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = AccentBar.Emerald,
+                letterSpacing = 0.08.sp,
             )
             Text(
-                "Yes. Every preset here only moves your CPU/GPU clock caps " +
-                    "WITHIN the range your kernel already allows — it can't " +
-                    "set a voltage, raise a thermal limit, or push past what " +
-                    "the chip ships with. Worst case is \"a bit slower\" or " +
-                    "\"a bit warmer,\" never a damaged device. Every preset " +
-                    "also resets the minimum clock so cores can still idle. " +
-                    "And nothing survives a reboot unless you pick \"Install " +
-                    "at boot,\" so a restart always returns you to stock.",
+                "Yes. Every preset only moves your CPU/GPU clock caps WITHIN the range " +
+                    "your kernel already allows — it can't set a voltage, raise a thermal " +
+                    "limit, or push past what the chip ships with. Worst case is \"a bit slower\" " +
+                    "or \"a bit warmer,\" never a damaged device. Every preset also resets the " +
+                    "minimum clock so cores can still idle. And nothing survives a reboot unless " +
+                    "you pick \"Install at boot,\" so a restart always returns you to stock.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                color = Color(0xFF999999),
             )
             Text(
-                "New here? Start with Balanced — it's the safe all-rounder. " +
-                    "Battery Saver for longer play, Performance for demanding " +
-                    "games. The risky stuff (manual ± clock stepping) is hidden " +
-                    "in Settings → Experimental and OFF by default.",
+                "New here? Start with Balanced — the safe all-rounder. Battery Saver for " +
+                    "longer play, Performance for demanding games.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                color = Color(0xFF999999),
             )
         }
-    }
-    Spacer(Modifier.height(8.dp))
-    Text(
-        "Community Tuned recipes are verified on your exact device; " +
-            "built-in presets are generated from your kernel's own OPP table so they work " +
-            "anywhere. Without root, use Generate script to run the same " +
-            "tune via your device's settings → Run script as Root.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    val uri = LocalUriHandler.current
-    presets.forEach { preset ->
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(preset.name, style = MaterialTheme.typography.titleSmall)
-                        VerificationBadge(preset.verification)
-                        // Steer newcomers to the safe all-rounder.
-                        if (preset.id == "builtin_balanced") {
-                            AssistChip(
-                                onClick = {},
-                                label = {
-                                    Text(
-                                        "Recommended",
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                },
-                                colors = AssistChipDefaults.assistChipColors(
-                                    containerColor = MaterialTheme.colorScheme.tertiary,
-                                    labelColor = MaterialTheme.colorScheme.onTertiary,
-                                ),
-                            )
-                        }
-                    }
+
+        Text(
+            "Community Tuned recipes are verified on your exact device; built-in presets are " +
+                "generated from your kernel's own OPP table. Without root, use Generate script " +
+                "to run the same tune via your device's settings → Run script as Root.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF777777),
+        )
+
+        val uri = LocalUriHandler.current
+
+        // Each preset = one ArsenalPanel
+        presets.forEach { preset ->
+            val presetAccent = when (preset.id) {
+                "builtin_performance" -> AccentBar.Red
+                "builtin_balanced" -> AccentBar.Emerald
+                "builtin_battery_saver" -> AccentBar.Amber
+                else -> if (preset.verification == VerificationTier.COMMUNITY_TUNED) AccentBar.Blue else AccentBar.Neutral
+            }
+
+            ArsenalPanel(accent = presetAccent) {
+                // Preset name + verification pill + recommended chip
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
                     Text(
-                        preset.description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        preset.name.uppercase(),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        letterSpacing = 0.06.sp,
+                        modifier = Modifier.weight(1f),
                     )
-                    if (preset.cpuPolicyMaxKhz.isNotEmpty()) {
-                        Text(
-                            preset.cpuPolicyMaxKhz.entries.joinToString(", ") { (k, v) ->
-                                "policy$k → ${v / 1000} MHz"
-                            },
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                    if (preset.cpuPolicyGovernor.isNotEmpty()) {
-                        Text(
-                            "governor: ${preset.cpuPolicyGovernor.values.toSet().joinToString(",")}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    preset.sourceUrl?.let { url ->
-                        TextButton(onClick = { uri.openUri(url) }) {
-                            Text("Source", style = MaterialTheme.typography.labelSmall)
-                        }
+                    VerificationPill(preset.verification)
+                    if (preset.id == "builtin_balanced") {
+                        StatusPill(text = "RECOMMENDED", accent = AccentBar.Emerald)
                     }
                 }
-                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+                // Description
+                Text(
+                    preset.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+
+                // Per-cluster MHz cap StatBars — the core Arsenal pattern
+                if (preset.cpuPolicyMaxKhz.isNotEmpty()) {
+                    Spacer(Modifier.height(Spacing.dense))
+                    preset.cpuPolicyMaxKhz.entries.forEach { (policyId, capKhz) ->
+                        // Ceiling from capability would be ideal, but we don't have it here
+                        // so we use the cap itself as the bar endpoint, showing 100%.
+                        // A relative bar needs context from the VM — for now render raw MHz.
+                        StatBar(
+                            label = "POLICY$policyId CAP",
+                            value = "${capKhz / 1000} MHz",
+                            fraction = 1f, // relative bar — full width at the cap value
+                            accent = presetAccent,
+                            slanted = true,
+                        )
+                    }
+                }
+
+                if (preset.cpuPolicyGovernor.isNotEmpty()) {
+                    Text(
+                        "GOV: ${preset.cpuPolicyGovernor.values.toSet().joinToString(",")}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF777777),
+                        letterSpacing = 0.06.sp,
+                    )
+                }
+
+                preset.sourceUrl?.let { url ->
+                    TextButton(onClick = { uri.openUri(url) }, contentPadding = PaddingValues(0.dp)) {
+                        Text(
+                            "SOURCE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AccentBar.Blue,
+                            letterSpacing = 0.06.sp,
+                        )
+                    }
+                }
+
+                // Action buttons row
+                Spacer(Modifier.height(Spacing.dense))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     if (canApply) {
-                        Button(onClick = { onAction(preset, PresetAction.APPLY) }) { Text("Apply once") }
+                        ArsenalButton(
+                            label = "Apply",
+                            onClick = { onAction(preset, PresetAction.APPLY) },
+                            style = ArsenalButtonStyle.Primary,
+                            accent = AccentBar.Red,
+                        )
                     }
                     if (canInstallAtBoot) {
-                        OutlinedButton(onClick = { onAction(preset, PresetAction.INSTALL_AT_BOOT) }) {
-                            Text("Install at boot")
-                        }
+                        ArsenalButton(
+                            label = "Boot",
+                            onClick = { onAction(preset, PresetAction.INSTALL_AT_BOOT) },
+                            style = ArsenalButtonStyle.Secondary,
+                            accent = presetAccent,
+                        )
                     }
                     if (canGenerateScript) {
-                        // Two no-root persistence variants:
-                        //   - one-shot: file in /sdcard/CalibrateSoC,
-                        //     run once via Odin Settings → Run script as Root.
-                        //   - + reminder: same script + a post-boot
-                        //     notification nudges the user to re-fire it
-                        //     after each reboot. Closest to "persistent
-                        //     without root" we can get.
-                        OutlinedButton(onClick = { onAction(preset, PresetAction.GENERATE_SCRIPT) }) {
-                            Text("Script · one-shot")
-                        }
-                        OutlinedButton(onClick = { onAction(preset, PresetAction.GENERATE_SCRIPT_WITH_REMINDER) }) {
-                            Text("Script · remind at boot")
-                        }
+                        ArsenalButton(
+                            label = "Script",
+                            onClick = { onAction(preset, PresetAction.GENERATE_SCRIPT) },
+                            style = ArsenalButtonStyle.Secondary,
+                            accent = AccentBar.Neutral,
+                        )
+                        ArsenalButton(
+                            label = "+Boot Remind",
+                            onClick = { onAction(preset, PresetAction.GENERATE_SCRIPT_WITH_REMINDER) },
+                            style = ArsenalButtonStyle.Secondary,
+                            accent = AccentBar.Neutral,
+                        )
                     }
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
         }
     }
 }
 
 @Composable
-private fun VerificationBadge(tier: VerificationTier) {
-    val (label, color) = when (tier) {
-        VerificationTier.COMMUNITY_TUNED ->
-            "Community Tuned" to MaterialTheme.colorScheme.tertiary
-        VerificationTier.GENERIC_KNOWN_FAMILY ->
-            "Built-in" to MaterialTheme.colorScheme.primary
-        VerificationTier.GENERIC_UNKNOWN_FAMILY ->
-            "Built-in · Unknown SoC" to MaterialTheme.colorScheme.error
-        VerificationTier.USER_CUSTOM ->
-            "Custom" to MaterialTheme.colorScheme.secondary
+private fun VerificationPill(tier: VerificationTier) {
+    val (label, accent) = when (tier) {
+        VerificationTier.COMMUNITY_TUNED -> "COMMUNITY" to AccentBar.Blue
+        VerificationTier.GENERIC_KNOWN_FAMILY -> "BUILT-IN" to AccentBar.Neutral
+        VerificationTier.GENERIC_UNKNOWN_FAMILY -> "UNKNOWN SOC" to AccentBar.Red
+        VerificationTier.USER_CUSTOM -> "CUSTOM" to AccentBar.Amber
     }
-    AssistChip(
-        onClick = {},
-        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-        colors = AssistChipDefaults.assistChipColors(labelColor = color),
-    )
+    StatusPill(text = label, accent = accent)
 }
 
-// --- GPU card (full info + sliders) --------------------------------
-//
-// Interactive min/max freq sliders mirror the per-CPU-policy pattern:
-// both snap to the GPU's own OPP table (availableFreqsHz), and Apply
-// commits them through the SAME TunableWriter path as CPU edits, so
-// the snapshot-before-write / boot-revert invariant holds. The Adreno
-// power-level picker appears only when the probe exposes a
-// powerLevelRange (null on Mali).
+// --- GPU card (full info + sliders) ----------------------------------
 
 @Composable
 private fun GpuCard(
@@ -827,133 +795,148 @@ private fun GpuCard(
     presets: List<Preset>,
     edit: TuneViewModel.GpuEdit?,
     onChange: (TuneViewModel.GpuEdit) -> Unit,
-) = SectionCard("GPU — ${gpu.family}") {
-    if (gpu.availableFreqsHz.isEmpty()) {
-        Text(
-            "No OPP table — kernel doesn't expose available GPU frequencies on this device.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        return@SectionCard
-    }
-    val sorted = gpu.availableFreqsHz.sorted()
-    val low = sorted.first() / 1_000_000L
-    val high = sorted.last() / 1_000_000L
-
-    // Current state -------------------------------------------------
-    Text("Current cap", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(
-        "${gpu.currentMinHz / 1_000_000L} – ${gpu.currentMaxHz / 1_000_000L} MHz",
-        fontFamily = FontFamily.Monospace,
-        style = MaterialTheme.typography.bodyLarge,
-    )
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-
-    // Editable sliders — snap to the GPU OPP table (Hz). Staged in the
-    // VM's gpuPending; nothing hits sysfs until the user taps Apply.
-    val currentMin = edit?.minHz ?: gpu.currentMinHz
-    val currentMax = edit?.maxHz ?: gpu.currentMaxHz
-    GpuLabeledSlider(
-        label = "Min freq",
-        valueHz = currentMin,
-        stepsHz = sorted,
-        onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(minHz = snapped)) },
-    )
-    GpuLabeledSlider(
-        label = "Max freq",
-        valueHz = currentMax,
-        stepsHz = sorted,
-        onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(maxHz = snapped)) },
-    )
-
-    // Adreno power-level clamp (0 = fastest). Mali kernels report no
-    // range, so this whole block is skipped there.
-    gpu.powerLevelRange?.let { range ->
-        val currentLevel = edit?.powerLevel ?: range.low
-        GpuPowerLevelSlider(
-            low = range.low,
-            high = range.high,
-            value = currentLevel,
-            onChange = { lvl -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(powerLevel = lvl)) },
-        )
-    }
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-
-    // Hardware envelope --------------------------------------------
-    Text("Hardware OPP table", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(
-        "$low – $high MHz · ${sorted.size} steps",
-        fontFamily = FontFamily.Monospace,
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    Text(
-        sorted.joinToString(", ") { (it / 1_000_000L).toString() } + " MHz",
-        fontFamily = FontFamily.Monospace,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-
-    // Governor info ------------------------------------------------
-    Text("Governor", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(
-        gpu.currentGovernor.ifBlank { "(none reported)" },
-        fontFamily = FontFamily.Monospace,
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    if (gpu.availableGovernors.isNotEmpty()) {
-        Text(
-            "Available: ${gpu.availableGovernors.joinToString(", ")}",
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-    gpu.powerLevelRange?.let {
-        Text(
-            "Adreno power-level range: ${it.low}–${it.high} (0 = fastest)",
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-
-    // Per-preset preview -----------------------------------------
-    Text("What each preset would set", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    val presetsWithGpu = presets.filter { it.gpuMaxHz != null }
-    if (presetsWithGpu.isEmpty()) {
-        Text(
-            "No bundled preset writes the GPU on this device.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    } else {
-        presetsWithGpu.forEach { p ->
-            val mhz = (p.gpuMaxHz ?: 0L) / 1_000_000L
-            val gov = p.gpuGovernor?.let { " · gov $it" } ?: ""
+) {
+    ArsenalPanel(accent = AccentBar.Purple, title = "GPU — ${gpu.family}") {
+        if (gpu.availableFreqsHz.isEmpty()) {
             Text(
-                "${p.name}:  $mhz MHz$gov",
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.labelSmall,
+                "No OPP table — kernel doesn't expose available GPU frequencies on this device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+            return@ArsenalPanel
+        }
+        val sorted = gpu.availableFreqsHz.sorted()
+        val low = sorted.first() / 1_000_000L
+        val high = sorted.last() / 1_000_000L
+
+        Text(
+            "CURRENT CAP",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF999999),
+            letterSpacing = 0.08.sp,
+        )
+        Text(
+            "${gpu.currentMinHz / 1_000_000L} – ${gpu.currentMaxHz / 1_000_000L} MHz",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyLarge,
+            color = Color.White,
+        )
+
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+        val currentMin = edit?.minHz ?: gpu.currentMinHz
+        val currentMax = edit?.maxHz ?: gpu.currentMaxHz
+        GpuLabeledSlider(
+            label = "MIN FREQ",
+            valueHz = currentMin,
+            stepsHz = sorted,
+            onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(minHz = snapped)) },
+        )
+        GpuLabeledSlider(
+            label = "MAX FREQ",
+            valueHz = currentMax,
+            stepsHz = sorted,
+            onChange = { snapped -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(maxHz = snapped)) },
+        )
+
+        gpu.powerLevelRange?.let { range ->
+            val currentLevel = edit?.powerLevel ?: range.low
+            GpuPowerLevelSlider(
+                low = range.low,
+                high = range.high,
+                value = currentLevel,
+                onChange = { lvl -> onChange((edit ?: TuneViewModel.GpuEdit()).copy(powerLevel = lvl)) },
             )
         }
+
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+        Text(
+            "HARDWARE OPP TABLE",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF999999),
+            letterSpacing = 0.08.sp,
+        )
+        Text(
+            "$low – $high MHz · ${sorted.size} steps",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White,
+        )
+        Text(
+            sorted.joinToString(", ") { (it / 1_000_000L).toString() } + " MHz",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF777777),
+        )
+
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+        Text(
+            "GOVERNOR",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF999999),
+            letterSpacing = 0.08.sp,
+        )
+        Text(
+            gpu.currentGovernor.ifBlank { "(none reported)" },
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White,
+        )
+        if (gpu.availableGovernors.isNotEmpty()) {
+            Text(
+                "Available: ${gpu.availableGovernors.joinToString(", ")}",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF777777),
+            )
+        }
+        gpu.powerLevelRange?.let {
+            Text(
+                "Adreno power-level range: ${it.low}–${it.high} (0 = fastest)",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF777777),
+            )
+        }
+
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+        Text(
+            "WHAT EACH PRESET WOULD SET",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF999999),
+            letterSpacing = 0.08.sp,
+        )
+        val presetsWithGpu = presets.filter { it.gpuMaxHz != null }
+        if (presetsWithGpu.isEmpty()) {
+            Text(
+                "No bundled preset writes the GPU on this device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+        } else {
+            presetsWithGpu.forEach { p ->
+                val mhz = (p.gpuMaxHz ?: 0L) / 1_000_000L
+                val gov = p.gpuGovernor?.let { " · gov $it" } ?: ""
+                Text(
+                    "${p.name.uppercase()}:  $mhz MHz$gov",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                )
+            }
+        }
+        Text(
+            "Adjust the sliders above and tap Apply to write a custom GPU cap, " +
+                "or apply a preset to use one of these.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF777777),
+        )
     }
-    Text(
-        "Adjust the sliders above and tap Apply to write a custom GPU cap, " +
-            "or apply a preset to use one of these.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 }
 
-/**
- * GPU freq slider. Same OPP-snapping behaviour as the CPU [LabeledSlider]
- * but works in Hz (the GpuProbe's native unit) and displays MHz.
- */
 @Composable
 private fun GpuLabeledSlider(
     label: String,
@@ -968,11 +951,18 @@ private fun GpuLabeledSlider(
 
     Column {
         Row {
-            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                label,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF999999),
+                letterSpacing = 0.06.sp,
+            )
             Text(
                 "${valueHz / 1_000_000L} MHz",
                 fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
             )
         }
         Slider(
@@ -988,10 +978,6 @@ private fun GpuLabeledSlider(
     }
 }
 
-/**
- * Adreno power-level picker. Integer range low..high where 0 is the
- * fastest level. Rendered as a discrete slider; one stop per level.
- */
 @Composable
 private fun GpuPowerLevelSlider(
     low: Int,
@@ -1003,14 +989,17 @@ private fun GpuPowerLevelSlider(
     Column {
         Row {
             Text(
-                "Max power level",
+                "MAX POWER LEVEL",
                 modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF999999),
+                letterSpacing = 0.06.sp,
             )
             Text(
                 "$value ${if (value == low) "(fastest)" else if (value == high) "(slowest)" else ""}",
                 fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
             )
         }
         Slider(
@@ -1025,27 +1014,13 @@ private fun GpuPowerLevelSlider(
         Text(
             "0 = fastest. Higher numbers cap the GPU at a slower power level (cooler / less battery).",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF777777),
         )
     }
 }
 
-// --- Per-policy card ------------------------------------------------
+// --- Per-policy card — Blue accent + StatBar cluster caps ------------
 
-/**
- * Per-policy card. Adds two new pieces of information on top of the existing
- * slider + governor widget:
- *
- *  1. **Cluster tier label** — inferred from each policy's max-freq rank among
- *     all policies: lowest = efficiency, middle = big, highest = prime. Shown
- *     in the card title so the user knows which cluster they are tuning without
- *     counting core indices.
- *
- *  2. **Live MHz readback** — shows "Live: X MHz" next to the Max freq slider,
- *     reading the highest live core freq for this policy's core set from
- *     [liveCoreFreqsKhz]. Null-safe: if telemetry hasn't arrived yet the
- *     readback is omitted rather than showing zero.
- */
 @Composable
 private fun PolicyCard(
     policy: CpuPolicyProbe,
@@ -1054,50 +1029,63 @@ private fun PolicyCard(
     allPolicyMaxKhz: List<Int>,
     onChange: (TuneViewModel.PolicyEdit) -> Unit,
 ) {
-    // Cluster tier label: inferred from this policy's rank in the sorted list
-    // of all policies' max-freqs. Pure helper — no composable side effects.
     val thisPolicyMaxKhz = policy.availableFreqsKhz.lastOrNull() ?: policy.currentMaxKhz
     val tierLabel = clusterTierLabel(thisPolicyMaxKhz, allPolicyMaxKhz)
-    val title = "CPU policy ${policy.policyId} — cores ${policy.onlineCores.joinToString(",")} · $tierLabel"
+    val clusterAccent = when (tierLabel) {
+        "prime" -> AccentBar.Red
+        "big" -> AccentBar.Blue
+        else -> AccentBar.Neutral // efficiency
+    }
+    val title = "CPU POLICY ${policy.policyId} — CORES ${policy.onlineCores.joinToString(",")} · ${tierLabel.uppercase()}"
 
-    SectionCard(title) {
+    ArsenalPanel(accent = clusterAccent, title = title) {
         val freqs = policy.availableFreqsKhz
         if (freqs.isEmpty()) {
-            Text("No OPP table — kernel does not expose available freqs.",
-                style = MaterialTheme.typography.bodySmall)
-            return@SectionCard
+            Text(
+                "No OPP table — kernel does not expose available freqs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+            return@ArsenalPanel
         }
         val low = freqs.first()
         val high = freqs.last()
         val currentMin = edit?.minKhz ?: policy.currentMinKhz
         val currentMax = edit?.maxKhz ?: policy.currentMaxKhz
 
-        // Live MHz readback: max observed freq among this policy's cores.
+        // Live MHz readback from telemetry
         val liveMhzLabel = liveCoreFreqsKhz
             ?.let { allCores ->
                 policy.onlineCores
                     .mapNotNull { coreIdx -> allCores.getOrNull(coreIdx) }
                     .maxOrNull()
-                    ?.let { khz -> "Live: ${khz / 1000} MHz" }
+                    ?.let { khz -> "LIVE: ${khz / 1000} MHz" }
             }
 
+        // Show live freq as a StatusPill when available
+        if (liveMhzLabel != null) {
+            StatusPill(text = liveMhzLabel, accent = AccentBar.Emerald)
+        }
+
         LabeledSlider(
-            label = "Min freq",
+            label = "MIN FREQ",
             valueKhz = currentMin,
             steps = freqs,
             onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(minKhz = snapped)) },
         )
         LabeledSlider(
-            label = "Max freq",
+            label = "MAX FREQ",
             valueKhz = currentMax,
             steps = freqs,
-            liveSuffix = liveMhzLabel,
+            liveSuffix = null, // shown as pill above
             onChange = { snapped -> onChange((edit ?: TuneViewModel.PolicyEdit()).copy(maxKhz = snapped)) },
         )
         Text(
-            "Hardware range: ${low / 1000}–${high / 1000} MHz · ${freqs.size} steps",
+            "HARDWARE RANGE: ${low / 1000}–${high / 1000} MHz · ${freqs.size} STEPS",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF777777),
+            letterSpacing = 0.06.sp,
+            fontFamily = FontFamily.Monospace,
         )
 
         if (policy.availableGovernors.isNotEmpty()) {
@@ -1125,30 +1113,35 @@ private fun LabeledSlider(
 
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                label,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF999999),
+                letterSpacing = 0.06.sp,
+            )
             if (liveSuffix != null) {
                 Text(
                     liveSuffix,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary,
+                    color = AccentBar.Emerald,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(end = 8.dp),
+                    modifier = Modifier.padding(end = Spacing.group),
                 )
             }
             Text(
                 "${valueKhz / 1000} MHz",
                 fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
             )
         }
         Slider(
             value = pos,
-            // steps - 1 internal stops (the endpoints don't count as stops).
             steps = (steps.size - 2).coerceAtLeast(0),
             valueRange = 0f..1f,
             onValueChange = { fraction ->
                 val rawKhz = low + fraction * sliderRange
-                // Snap to the nearest OPP step.
                 val snapped = steps.minByOrNull { kotlin.math.abs(it - rawKhz) } ?: valueKhz
                 if (snapped != valueKhz) onChange(snapped)
             },
@@ -1173,17 +1166,15 @@ private fun GovernorDropdown(
                 Icon(
                     Icons.Outlined.ArrowDropDown,
                     contentDescription = null,
-                    modifier = Modifier.padding(end = 8.dp),
+                    modifier = Modifier.padding(end = Spacing.group),
                 )
             },
             modifier = Modifier.fillMaxWidth(),
         )
-        // Transparent overlay catches taps because the read-only TextField
-        // swallows clicks on some Compose versions.
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .padding(top = 8.dp),
+                .padding(top = Spacing.group),
         ) {
             TextButton(
                 onClick = { expanded = true },
@@ -1201,7 +1192,7 @@ private fun GovernorDropdown(
     }
 }
 
-// --- Apply bar + results -------------------------------------------
+// --- Apply bar -------------------------------------------------------
 
 @Composable
 private fun ApplyBar(
@@ -1212,35 +1203,53 @@ private fun ApplyBar(
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
     ) {
-        OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f)) {
-            Text("Discard")
-        }
-        Button(
+        ArsenalButton(
+            label = "Discard",
+            onClick = onClear,
+            style = ArsenalButtonStyle.Secondary,
+            accent = AccentBar.Neutral,
+            modifier = Modifier.weight(1f),
+        )
+        ArsenalButton(
+            label = if (pendingCount > 0) "Apply ($pendingCount)" else "Apply",
             onClick = onApply,
+            style = ArsenalButtonStyle.Primary,
+            accent = AccentBar.Red,
             enabled = canApply && pendingCount > 0,
             modifier = Modifier.weight(2f),
-        ) {
-            Text(if (pendingCount > 0) "Apply ($pendingCount)" else "Apply")
-        }
+        )
     }
 }
+
+// --- Results card ----------------------------------------------------
 
 @Composable
-private fun ResultsCard(results: List<WriteResult>) = SectionCard("Last apply") {
-    results.forEach { r ->
-        val (label, color) = when (r) {
-            is WriteResult.Success -> "✓ ${r.id.target.substringAfterLast('/')}: ${r.previousValue ?: "—"} → ${r.newValue}" to MaterialTheme.colorScheme.tertiary
-            is WriteResult.CapabilityDenied -> "✗ ${r.id.target.substringAfterLast('/')}: ${r.reason}" to MaterialTheme.colorScheme.outline
-            is WriteResult.Rejected -> "✗ ${r.id.target.substringAfterLast('/')}: ${r.message}" to MaterialTheme.colorScheme.error
-            is WriteResult.Failed -> "✗ ${r.id.target.substringAfterLast('/')}: ${r.error.message ?: "failed"}" to MaterialTheme.colorScheme.error
+private fun ResultsCard(results: List<WriteResult>) {
+    ArsenalPanel(accent = AccentBar.Neutral, title = "LAST APPLY") {
+        results.forEach { r ->
+            val (label, color) = when (r) {
+                is WriteResult.Success ->
+                    "✓ ${r.id.target.substringAfterLast('/')}: ${r.previousValue ?: "—"} → ${r.newValue}" to AccentBar.Emerald
+                is WriteResult.CapabilityDenied ->
+                    "✗ ${r.id.target.substringAfterLast('/')}: ${r.reason}" to Color(0xFF777777)
+                is WriteResult.Rejected ->
+                    "✗ ${r.id.target.substringAfterLast('/')}: ${r.message}" to AccentBar.Red
+                is WriteResult.Failed ->
+                    "✗ ${r.id.target.substringAfterLast('/')}: ${r.error.message ?: "failed"}" to AccentBar.Red
+            }
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                fontFamily = FontFamily.Monospace,
+            )
         }
-        Text(label, style = MaterialTheme.typography.bodySmall, color = color, fontFamily = FontFamily.Monospace)
     }
 }
 
-// --- First-OC confirm modal ----------------------------------------
+// --- First-OC confirm modal ------------------------------------------
 
 @Composable
 private fun FirstOcConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
@@ -1251,16 +1260,12 @@ private fun FirstOcConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         title = { Text("First-time write to kernel sysfs") },
         text = {
             Column {
-                Text(
-                    "You're about to change kernel CPU/GPU frequency caps. " +
-                        "Calibrate SoC reverts every write at boot by default, " +
-                        "and v1 never touches voltage — but you should know:",
-                )
-                Spacer(Modifier.height(8.dp))
+                Text("You're about to change kernel CPU/GPU frequency caps. Calibrate SoC reverts every write at boot by default, and v1 never touches voltage — but you should know:")
+                Spacer(Modifier.height(Spacing.group))
                 Text("• Aggressive caps can cause UI stutter or app crashes")
                 Text("• Disabling thermal protection is not possible here")
                 Text("• Revert to stock by rebooting, or by tapping 'Discard'")
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(Spacing.item))
                 OutlinedTextField(
                     value = typed,
                     onValueChange = { typed = it },
@@ -1270,15 +1275,15 @@ private fun FirstOcConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            Button(onClick = onConfirm, enabled = typed.trim() == required) {
-                Text("Continue")
-            }
+            Button(onClick = onConfirm, enabled = typed.trim() == required) { Text("Continue") }
         },
         dismissButton = {
             OutlinedButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
 }
+
+// --- Boot deployed / unknown device dialogs --------------------------
 
 @Composable
 private fun BootDeployedDialog(
@@ -1289,14 +1294,14 @@ private fun BootDeployedDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (deployed.success) "Installed at boot" else "Boot install failed") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
                 if (deployed.success) {
                     Text("Installed via ${deployed.manager} at:")
                     Text(deployed.path, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(Spacing.dense))
                     Text("The tune will re-apply on every boot. To remove it later, delete the file via your root manager or run a fresh Apply on a different preset.")
                 } else {
-                    Text(deployed.error ?: "Unknown failure.", color = MaterialTheme.colorScheme.error)
+                    Text(deployed.error ?: "Unknown failure.", color = AccentBar.Red)
                 }
             }
         },
@@ -1322,15 +1327,14 @@ private fun UnknownDeviceConfirmDialog(
                         "as valid, so it shouldn't crash. But power and thermal behaviour on " +
                         "this exact silicon haven't been profiled.",
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.group))
                 Text("Sensible first move: try Battery Saver before Performance.")
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.group))
                 Text(
                     "Help others: in Device Info, tap \"Report unknown device\" to share an " +
-                        "anonymized capability report so we can ship a tuned adapter in a " +
-                        "future release.",
+                        "anonymized capability report so we can ship a tuned adapter in a future release.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color(0xFF999999),
                 )
             }
         },
@@ -1339,7 +1343,7 @@ private fun UnknownDeviceConfirmDialog(
     )
 }
 
-// --- Save-as-profile dialog ----------------------------------------
+// --- Save-as-profile dialog ------------------------------------------
 
 @Composable
 private fun SaveProfileDialog(
@@ -1353,13 +1357,13 @@ private fun SaveProfileDialog(
         onDismissRequest = onDismiss,
         title = { Text("Save as profile") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
                 Text(
                     "Captures the current CPU (and GPU) clock caps and governors " +
                         "shown above — including any pending slider edits — as a " +
                         "reusable profile you can re-apply from the Profiles tab.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color(0xFF999999),
                 )
                 OutlinedTextField(
                     value = name,
@@ -1386,47 +1390,25 @@ private fun SaveProfileDialog(
                 enabled = name.isNotBlank(),
             ) { Text("Save") }
         },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss) { Text("Cancel") }
-        },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-// --- Shared section card -------------------------------------------
-
-@Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            content()
-        }
-    }
-}
-
-// --- Display refresh-rate card -------------------------------------
+// --- Display refresh-rate card (Arsenal-framed) ----------------------
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun DisplayRefreshCard(
     viewModel: io.github.mayusi.calibratesoc.ui.tune.DisplayRefreshViewModel =
-        androidx.hilt.navigation.compose.hiltViewModel(),
+        hiltViewModel(),
 ) {
     val modes by viewModel.modes.collectAsStateWithLifecycle()
     val preferredHz by viewModel.preferredHz.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // Live Hz indicator: polled from the Activity's display. No need
-    // for adb — the user sees the panel's actual rate change after
-    // they tap a chip.
     var liveHz by remember { mutableStateOf(0f) }
-    androidx.compose.runtime.LaunchedEffect(Unit) {
+    LaunchedEffect(Unit) {
         viewModel.refresh(context)
-        // Poll once a second for ~10s after entering screen, then
-        // every 3s. Catches the transition without burning battery.
         while (true) {
             val act = context as? android.app.Activity
             val display = act?.windowManager?.defaultDisplay
@@ -1435,44 +1417,48 @@ private fun DisplayRefreshCard(
         }
     }
 
-    SectionCard("Display refresh rate") {
-        // Always-visible "what's the panel doing right now" line.
-        // Removes the need for `adb shell dumpsys display`.
-        Text(
-            "Current: ${if (liveHz > 0) "%.0f Hz".format(liveHz) else "—"}",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = if (liveHz >= 119f) MaterialTheme.colorScheme.tertiary
-                else MaterialTheme.colorScheme.onSurface,
-        )
+    ArsenalPanel(accent = AccentBar.Neutral, title = "DISPLAY REFRESH RATE") {
+        // Live rate indicator
+        val liveAccent = if (liveHz >= 119f) AccentBar.Emerald else AccentBar.Neutral
+        if (liveHz > 0) {
+            StatusPill(text = "LIVE: ${"%.0f".format(liveHz)} Hz", accent = liveAccent)
+        }
+
         if (modes.isEmpty()) {
             Text(
                 "No modes reported yet. Tap Re-scan after the app is fully open.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color(0xFF999999),
             )
-            OutlinedButton(onClick = { viewModel.refresh(context) }) { Text("Re-scan") }
-            return@SectionCard
+            Spacer(Modifier.height(Spacing.group))
+            ArsenalButton(
+                label = "Re-scan",
+                onClick = { viewModel.refresh(context) },
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
+            )
+            return@ArsenalPanel
         }
         Text(
             "Pick a refresh rate. Many panels report more modes than the system uses by default — pinning a higher Hz here also calls Surface.setFrameRate so the OS actually honors it.",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF999999),
         )
+        Spacer(Modifier.height(Spacing.group))
         androidx.compose.foundation.layout.FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalArrangement = Arrangement.spacedBy(Spacing.dense),
             modifier = Modifier.fillMaxWidth(),
         ) {
             modes.forEach { mode ->
                 val on = preferredHz != null && kotlin.math.abs((preferredHz ?: 0f) - mode.hz) < 0.5f
-                AssistChip(
+                ArsenalButton(
+                    label = mode.displayLabel,
                     onClick = {
                         viewModel.pick(mode.hz)
                         val result = applyRefreshRate(context, mode.id, mode.hz, viewModel.refreshScript)
                         if (result is RefreshApplyResult.NeedsScript) {
-                            val vs = io.github.mayusi.calibratesoc.data.vendor.OdinIntents
-                                .vendorSettingsName(context)
+                            val vs = OdinIntents.vendorSettingsName(context)
                             android.widget.Toast.makeText(
                                 context,
                                 "Opened $vs — pick calibratesoc_${mode.hz.toInt()}hz.sh to apply",
@@ -1480,53 +1466,35 @@ private fun DisplayRefreshCard(
                             ).show()
                         }
                     },
-                    label = { Text(mode.displayLabel) },
-                    colors = if (on) AssistChipDefaults.assistChipColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    ) else AssistChipDefaults.assistChipColors(),
+                    style = if (on) ArsenalButtonStyle.Primary else ArsenalButtonStyle.Secondary,
+                    accent = if (on) AccentBar.Blue else AccentBar.Neutral,
                 )
             }
-            TextButton(onClick = {
-                viewModel.pick(null)
-                applyRefreshRate(context, 0, 0f, viewModel.refreshScript)
-            }) { Text("Auto") }
+            ArsenalButton(
+                label = "AUTO",
+                onClick = {
+                    viewModel.pick(null)
+                    applyRefreshRate(context, 0, 0f, viewModel.refreshScript)
+                },
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
+            )
         }
         preferredHz?.let {
+            Spacer(Modifier.height(Spacing.dense))
             Text(
-                "Pinned: ${"%.0f".format(it)} Hz (re-applied on app launch and HUD show)",
+                "PINNED: ${"%.0f".format(it)} Hz (re-applied on app launch and HUD show)",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.secondary,
+                color = AccentBar.Blue,
+                letterSpacing = 0.06.sp,
+                fontFamily = FontFamily.Monospace,
             )
         }
     }
 }
 
-/**
- * Force the live window to honor the chosen mode. Three mechanisms,
- * applied together — some Odin firmwares ignore some of them.
- *   1. preferredDisplayModeId — by-id selector. Skipped when
- *      mIgnorePreferredRefreshRate=true.
- *   2. preferredRefreshRate — by-Hz hint that bypasses the by-id
- *      ignore on most kernels.
- *   3. View.setRequestedFrameRate (Android 15+) on the decor view —
- *      the modern, framework-honored path.
- */
-/**
- * Set the system's peak refresh rate. Three-tier strategy:
- *
- *   1. Direct write to Settings.System (needs WRITE_SECURE_SETTINGS,
- *      granted by the unlock script). Silent + instant when it works.
- *   2. Fallback: deploy a `settings put system peak_refresh_rate N`
- *      script and bounce the user into Odin Settings → Run script as
- *      Root. Slower but works 100% as long as the unlock script
- *      itself ran successfully.
- *   3. Window-level hint (preferredDisplayModeId / preferredRefreshRate)
- *      always applied last — harmless when the global
- *      ignore_app_preferred_refresh_rate_request flag suppresses it.
- *
- * Returns a [RefreshApplyResult] so the caller can show a toast /
- * dialog if we needed the script path.
- */
+// --- applyRefreshRate helpers (behavior unchanged) -------------------
+
 internal sealed interface RefreshApplyResult {
     data object Direct : RefreshApplyResult
     data class NeedsScript(val path: String, val visibleToOdin: Boolean) : RefreshApplyResult
@@ -1549,13 +1517,12 @@ internal fun applyRefreshRate(
         RefreshApplyResult.Direct
     } else if (refreshScript != null && hz > 0f) {
         val deployed = refreshScript.deploy(hz)
-        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openOdinSettings(context)
+        OdinIntents.openOdinSettings(context)
         RefreshApplyResult.NeedsScript(deployed.path, deployed.visibleToOdinPicker)
     } else {
         RefreshApplyResult.Direct
     }
 
-    // Always nudge the live window too — harmless if the system ignores it.
     val activity = context as? android.app.Activity
     if (activity != null) {
         val attrs = activity.window.attributes
@@ -1566,72 +1533,70 @@ internal fun applyRefreshRate(
     return result
 }
 
-/** Kept for MainActivity which doesn't have access to the script
- *  generator — boot-time re-apply only needs the direct path. */
-private fun applyRefreshRate(context: android.content.Context, modeId: Int, hz: Float) {
-    applyRefreshRate(context, modeId, hz, refreshScript = null)
-}
-
-// --- Advanced unlock card (one-time root grant for FPS + direct write)
+// --- Advanced unlock card (Arsenal-framed) ---------------------------
 
 @Composable
 private fun AdvancedUnlockCard(
     viewModel: io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel =
-        androidx.hilt.navigation.compose.hiltViewModel(),
+        hiltViewModel(),
 ) {
     val grants by viewModel.grants.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var lastPath by remember { mutableStateOf<String?>(null) }
     val vs = remember {
-        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.vendorSettingsName(context)
+        OdinIntents.vendorSettingsName(context)
     }
 
-    SectionCard("Advanced unlock") {
+    ArsenalPanel(accent = AccentBar.Neutral, title = "ADVANCED UNLOCK") {
         Text(
             "Tuning already works — presets generate a script you run as root (no setup needed). " +
                 "This section only unlocks OPTIONAL extras: live FPS overlay, vendor-key writes, " +
-                "and the experimental instant ± HUD steppers. Most devices won't have the " +
-                "permissive firmware the last one needs, and that's fine.",
+                "and the experimental instant ± HUD steppers.",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF999999),
         )
         Text(
             "Two settings unlock everything:\n\n" +
-                "1. $vs → toggle \"Force SELinux\" ON (if your firmware has it). This puts the vendor service in a permissive domain so it accepts shell commands from our app.\n" +
-                "2. Generate + Run the unlock script (below) once per boot to grant DUMP / USAGE / SECURE permissions.\n\n" +
-                "When both are done, the SYSFS indicator goes green and the experimental HUD ± buttons can fire instant clock changes. Optional — skip it if you only use presets.",
+                "1. $vs → toggle \"Force SELinux\" ON (if your firmware has it).\n" +
+                "2. Generate + Run the unlock script (below) once per boot.\n\n" +
+                "When both are done, the SYSFS indicator goes green and the experimental HUD ± buttons can fire instant clock changes.",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF999999),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             GrantIndicator("DUMP", grants.dump, "fg app")
             GrantIndicator("USAGE", grants.usageStats, "app label")
             GrantIndicator("SECURE", grants.writeSecureSettings, "vendor keys")
-            GrantIndicator("SYSFS", grants.sysfsWritable, "instant ± (optional)")
+            GrantIndicator("SYSFS", grants.sysfsWritable, "instant ±")
         }
         if (grants.allHeld) {
-            Text(
-                "All three granted — HUD already showing live data.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary,
-            )
+            StatusPill(text = "ALL GRANTED — HUD LIVE", accent = AccentBar.Emerald)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                val deployed = viewModel.deployScript()
-                lastPath = deployed.path
-                io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openOdinSettings(context)
-            }) {
-                Text(if (grants.anyHeld) "Re-run unlock" else "Generate + Open $vs")
-            }
-            OutlinedButton(onClick = { viewModel.refresh() }) { Text("Refresh status") }
+        Spacer(Modifier.height(Spacing.dense))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+            ArsenalButton(
+                label = if (grants.anyHeld) "Re-run Unlock" else "Generate + Open $vs",
+                onClick = {
+                    val deployed = viewModel.deployScript()
+                    lastPath = deployed.path
+                    OdinIntents.openOdinSettings(context)
+                },
+                style = ArsenalButtonStyle.Primary,
+                accent = AccentBar.Red,
+            )
+            ArsenalButton(
+                label = "Refresh Status",
+                onClick = { viewModel.refresh() },
+                style = ArsenalButtonStyle.Secondary,
+                accent = AccentBar.Neutral,
+            )
         }
         lastPath?.let {
             Text(
                 "Wrote $it",
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.secondary,
+                color = AccentBar.Emerald,
             )
         }
     }
@@ -1639,40 +1604,19 @@ private fun AdvancedUnlockCard(
 
 @Composable
 private fun GrantIndicator(label: String, on: Boolean, hint: String) {
+    val accent = if (on) AccentBar.Emerald else AccentBar.Neutral
     Column {
+        StatusPill(text = if (on) "✓ $label" else "— $label", accent = accent)
         Text(
-            label,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = if (on) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            if (on) "✓ $hint" else "— $hint",
+            hint,
             style = MaterialTheme.typography.labelSmall,
-            color = if (on) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color(0xFF777777),
         )
     }
 }
 
-// --- Cluster tier inference -------------------------------------------
+// --- Cluster tier inference (behavior unchanged) ---------------------
 
-/**
- * Infers a human-readable cluster tier label for a CPU policy by ranking
- * its hardware max-freq relative to all other policies on the SoC.
- *
- * Ranking rule (sorted ascending by max-freq, distinct values):
- *   - Rank 0 (lowest)  → "efficiency"
- *   - Rank last (highest) → "prime"  (only shown when ≥ 3 distinct max-freqs)
- *   - All others        → "big"
- *
- * This mirrors the little/big/prime naming used by ARM and Qualcomm:
- *   Snapdragon 8 Gen X: little (efficiency) < big < prime
- *   Dimensity:          little (efficiency) < big
- *
- * @param thisPolicyMaxKhz  hardware OPP ceiling for this policy.
- * @param allPolicyMaxKhz   sorted (ascending) distinct ceiling list for ALL
- *                          policies on this SoC.
- */
 internal fun clusterTierLabel(thisPolicyMaxKhz: Int, allPolicyMaxKhz: List<Int>): String {
     if (allPolicyMaxKhz.size <= 1) return "efficiency"
     return when (thisPolicyMaxKhz) {

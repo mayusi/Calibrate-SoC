@@ -72,9 +72,12 @@ import io.github.mayusi.calibratesoc.data.prefs.ClockUnit
 import io.github.mayusi.calibratesoc.data.prefs.TempUnit
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.update.UpdateInfo
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
+import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 import kotlin.math.roundToInt
@@ -286,140 +289,114 @@ fun SettingsScreen(
 
         // ── Privilege tier ─────────────────────────────────────────────────
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            ) {
-                Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                    Text("Privilege tier", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    val tier = capability?.privilege ?: PrivilegeTier.NONE
-                    val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(capability)
-                    val tierColor = when (tier) {
-                        PrivilegeTier.ROOT -> MaterialTheme.colorScheme.tertiary
-                        PrivilegeTier.AYN_SETTINGS -> MaterialTheme.colorScheme.tertiary
-                        PrivilegeTier.SHIZUKU -> MaterialTheme.colorScheme.secondary
-                        PrivilegeTier.NONE -> MaterialTheme.colorScheme.outline
-                    }
-                    val tierChip = if (tier == PrivilegeTier.AYN_SETTINGS) vb.tierLabel else tier.name
-                    AssistChip(
-                        onClick = {},
-                        label = { Text(tierChip) },
-                        colors = AssistChipDefaults.assistChipColors(labelColor = tierColor),
-                    )
-                    val tierExplainer = when (tier) {
-                        PrivilegeTier.ROOT ->
-                            "Full kernel-level CPU/GPU clocking + fan control + custom presets. Magisk / KernelSU detected and root mode enabled."
-                        PrivilegeTier.AYN_SETTINGS ->
-                            "${vb.brand} tier active. Vendor performance + fan modes apply instantly via the same Settings.System keys ${vb.brand}'s own Quick Settings tile uses. Custom MHz caps via Generate script."
-                        PrivilegeTier.SHIZUKU ->
-                            "Monitoring + vendor preset switching. Full sysfs writes pending a Shizuku UserService update."
-                        PrivilegeTier.NONE ->
-                            "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor preset switching. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
-                    }
-                    Text(tierExplainer, style = MaterialTheme.typography.bodySmall)
-                }
+            val tier = capability?.privilege ?: PrivilegeTier.NONE
+            val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(capability)
+            val tierAccent = when (tier) {
+                PrivilegeTier.ROOT       -> AccentBar.Emerald
+                PrivilegeTier.AYN_SETTINGS -> AccentBar.Emerald
+                PrivilegeTier.SHIZUKU   -> AccentBar.Blue
+                PrivilegeTier.NONE      -> AccentBar.Neutral
+            }
+            val tierChip = if (tier == PrivilegeTier.AYN_SETTINGS) vb.tierLabel else tier.name
+            val tierExplainer = when (tier) {
+                PrivilegeTier.ROOT ->
+                    "Full kernel-level CPU/GPU clocking + fan control + custom presets. Magisk / KernelSU detected and root mode enabled."
+                PrivilegeTier.AYN_SETTINGS ->
+                    "${vb.brand} tier active. Vendor performance + fan modes apply instantly via the same Settings.System keys ${vb.brand}'s own Quick Settings tile uses. Custom MHz caps via Generate script."
+                PrivilegeTier.SHIZUKU ->
+                    "Monitoring + vendor preset switching. Full sysfs writes pending a Shizuku UserService update."
+                PrivilegeTier.NONE ->
+                    "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor preset switching. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
+            }
+            ArsenalPanel(accent = tierAccent, title = "PRIVILEGE TIER") {
+                StatusPill(text = tierChip, accent = tierAccent)
+                Spacer(Modifier.height(Spacing.dense))
+                Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = androidx.compose.ui.graphics.Color(0xFF999999))
             }
         }
 
         // ── Root mode toggle ───────────────────────────────────────────────
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            ) {
-                Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Root mode (advanced)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                if (rootDetected) {
-                                    "Magisk / KernelSU detected. Enable to let Calibrate SoC use it for direct kernel writes (custom MHz caps without the script step)."
-                                } else {
-                                    "No su binary found. Install Magisk or KernelSU first if you want this tier."
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Switch(
-                            checked = rootModeEnabled,
-                            enabled = rootDetected,
-                            onCheckedChange = { viewModel.setRootModeEnabled(it) },
-                        )
-                    }
+            ArsenalPanel(accent = if (rootModeEnabled) AccentBar.Emerald else AccentBar.Neutral, title = "ROOT MODE (ADVANCED)") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (rootDetected) {
+                            "Magisk / KernelSU detected. Enable to let Calibrate SoC use it for direct kernel writes (custom MHz caps without the script step)."
+                        } else {
+                            "No su binary found. Install Magisk or KernelSU first if you want this tier."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = rootModeEnabled,
+                        enabled = rootDetected,
+                        onCheckedChange = { viewModel.setRootModeEnabled(it) },
+                    )
                 }
             }
         }
 
         // ── Per-app auto-switch ────────────────────────────────────────────
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            ArsenalPanel(
+                accent = if (accessibilityGranted) AccentBar.Emerald else AccentBar.Amber,
+                title = "PER-APP AUTO-SWITCH",
             ) {
-                Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                    Text("Per-app auto-switch", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    AssistChip(
-                        onClick = {},
-                        label = { Text(if (accessibilityGranted) "ENABLED" else "DISABLED") },
-                        colors = AssistChipDefaults.assistChipColors(
-                            labelColor = if (accessibilityGranted) {
-                                MaterialTheme.colorScheme.tertiary
-                            } else {
-                                MaterialTheme.colorScheme.error
-                            },
-                        ),
-                    )
-                    Text(
-                        if (accessibilityGranted) {
-                            "Per-app overrides will fire on app switch. Configure them on the Profiles tab."
-                        } else {
-                            "Grant Accessibility access so Calibrate SoC can detect app switches and auto-apply your per-app profiles."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    OutlinedButton(onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                            )
-                        }
-                    }) { Text(if (accessibilityGranted) "Manage in Settings" else "Open Accessibility settings") }
-                }
+                StatusPill(
+                    text = if (accessibilityGranted) "ENABLED" else "DISABLED",
+                    accent = if (accessibilityGranted) AccentBar.Emerald else AccentBar.Amber,
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                Text(
+                    if (accessibilityGranted) {
+                        "Per-app overrides will fire on app switch. Configure them on the Profiles tab."
+                    } else {
+                        "Grant Accessibility access so Calibrate SoC can detect app switches and auto-apply your per-app profiles."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                OutlinedButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    }
+                }) { Text(if (accessibilityGranted) "Manage in Settings" else "Open Accessibility settings") }
             }
         }
 
         // ── Factory restore ────────────────────────────────────────────────
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            ) {
-                Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                    Text("Restore to factory state", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    val b = baseline
-                    if (b == null) {
-                        Text(
-                            "Capturing baseline... if this persists, restart the app once.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    } else {
-                        val date = java.text.SimpleDateFormat("MMM d yyyy, HH:mm", java.util.Locale.getDefault())
-                            .format(java.util.Date(b.capturedAtMs))
-                        Text(
-                            "Captured $date • ${b.tunables.size} tunables recorded.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            "Replays every CPU/GPU cap, governor, and vendor key that was set when the app first launched. The actual surfaces restored depend on your current privilege tier — read-only tier will skip kernel writes.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        OutlinedButton(onClick = { pendingFactoryConfirm = true }) {
-                            Text("Restore to first-launch state")
-                        }
+            ArsenalPanel(accent = AccentBar.Amber, title = "RESTORE TO FACTORY STATE") {
+                val b = baseline
+                if (b == null) {
+                    Text(
+                        "Capturing baseline... if this persists, restart the app once.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    val date = java.text.SimpleDateFormat("MMM d yyyy, HH:mm", java.util.Locale.getDefault())
+                        .format(java.util.Date(b.capturedAtMs))
+                    Text(
+                        "Captured $date • ${b.tunables.size} tunables recorded.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    )
+                    Spacer(Modifier.height(Spacing.dense))
+                    Text(
+                        "Replays every CPU/GPU cap, governor, and vendor key that was set when the app first launched. The actual surfaces restored depend on your current privilege tier — read-only tier will skip kernel writes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    )
+                    Spacer(Modifier.height(Spacing.dense))
+                    OutlinedButton(onClick = { pendingFactoryConfirm = true }) {
+                        Text("Restore to first-launch state")
                     }
                 }
             }
@@ -427,18 +404,14 @@ fun SettingsScreen(
 
         // ── Device Info ────────────────────────────────────────────────────
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            ) {
-                Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                    Text("Device", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Open the full capability report — what the probe found on this device. Includes the Report unknown device share button.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    OutlinedButton(onClick = onOpenDeviceInfo) { Text("Open Device Info") }
-                }
+            ArsenalPanel(accent = AccentBar.Blue, title = "DEVICE") {
+                Text(
+                    "Open the full capability report — what the probe found on this device. Includes the Report unknown device share button.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                OutlinedButton(onClick = onOpenDeviceInfo) { Text("Open Device Info") }
             }
         }
 
@@ -1175,42 +1148,37 @@ private fun RestoreSummaryDialog(
 private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
     var pendingConfirm by remember { mutableStateOf(false) }
     var confirmText by remember { mutableStateOf("") }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ArsenalPanel(
+        accent = if (enabled) AccentBar.Red else AccentBar.Neutral,
+        title = "EXPERIMENTAL FEATURES",
     ) {
-        Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Experimental features", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        if (enabled) "ON — risky features unlocked"
-                        else "OFF — safe defaults only",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (enabled) MaterialTheme.colorScheme.tertiary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = { checked ->
-                        if (checked) {
-                            confirmText = ""
-                            pendingConfirm = true
-                        } else {
-                            onToggle(false)
-                        }
-                    },
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (enabled) "ON — risky features unlocked" else "OFF — safe defaults only",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (enabled) AccentBar.Red else androidx.compose.ui.graphics.Color(0xFF999999),
                 )
             }
-            Text(
-                "Unlocks the HUD ± clock steppers and other features that " +
-                        "can put the device in a bad state if used without root. " +
-                        "Anything that happens with experimental features ON is on you, not the app.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Switch(
+                checked = enabled,
+                onCheckedChange = { checked ->
+                    if (checked) {
+                        confirmText = ""
+                        pendingConfirm = true
+                    } else {
+                        onToggle(false)
+                    }
+                },
             )
         }
+        Text(
+            "Unlocks the HUD ± clock steppers and other features that " +
+                "can put the device in a bad state if used without root. " +
+                "Anything that happens with experimental features ON is on you, not the app.",
+            style = MaterialTheme.typography.bodySmall,
+            color = androidx.compose.ui.graphics.Color(0xFF999999),
+        )
     }
     if (pendingConfirm) {
         AlertDialog(
@@ -1283,65 +1251,58 @@ private fun SetupChecklistCard() {
             items.associate { it.id to it.isDone(context) }
         }
     }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-    ) {
-        Column(Modifier.padding(Spacing.card), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Setup checklist", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(
-                "These are the perms + toggles the app needs. Tap any row " +
-                        "to open the matching system page.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            items.forEach { item ->
-                val applicable = item.isApplicable(context)
-                val done = statuses[item.id] ?: false
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (!applicable) {
+    ArsenalPanel(accent = AccentBar.Blue, title = "SETUP CHECKLIST") {
+        Text(
+            "These are the perms + toggles the app needs. Tap any row to open the matching system page.",
+            style = MaterialTheme.typography.bodySmall,
+            color = androidx.compose.ui.graphics.Color(0xFF999999),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+        items.forEach { item ->
+            val applicable = item.isApplicable(context)
+            val done = statuses[item.id] ?: false
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!applicable) {
+                    Text(
+                        "—",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = androidx.compose.ui.graphics.Color(0xFF6B7280),
+                        modifier = Modifier.padding(end = 12.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "—",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(end = 12.dp),
+                            item.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = androidx.compose.ui.graphics.Color(0xFF777777),
                         )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                item.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                "Not available on this device",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                    } else {
                         Text(
-                            if (done) "✓" else "○",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (done) MaterialTheme.colorScheme.tertiary
-                            else MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(end = 12.dp),
+                            "Not available on this device",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = androidx.compose.ui.graphics.Color(0xFF6B7280),
                         )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(item.title, style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                if (done) "Granted" else "Not yet",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        TextButton(onClick = { item.launch(context) }) {
-                            Text(if (done) "Re-open" else "Grant")
-                        }
+                    }
+                } else {
+                    Text(
+                        if (done) "✓" else "○",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (done) AccentBar.Emerald else androidx.compose.ui.graphics.Color(0xFF6B7280),
+                        modifier = Modifier.padding(end = 12.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(item.title, style = MaterialTheme.typography.bodyMedium, color = androidx.compose.ui.graphics.Color.White)
+                        Text(
+                            if (done) "Granted" else "Not yet",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = androidx.compose.ui.graphics.Color(0xFF999999),
+                        )
+                    }
+                    TextButton(onClick = { item.launch(context) }) {
+                        Text(if (done) "Re-open" else "Grant")
                     }
                 }
             }

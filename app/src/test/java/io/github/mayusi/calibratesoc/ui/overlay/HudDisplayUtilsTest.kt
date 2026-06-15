@@ -196,4 +196,162 @@ class HudDisplayUtilsTest {
         val (label, _) = HudDisplayUtils.fpsTileLabel(fps = 144, hudHz = 60)
         assertThat(label).isEqualTo("FPS")
     }
+
+    // ── formatClusterMhz ─────────────────────────────────────────────────────
+
+    @Test
+    fun `formatClusterMhz formats non-null value with MHz suffix`() {
+        assertThat(HudDisplayUtils.formatClusterMhz(2918)).isEqualTo("2918MHz")
+    }
+
+    @Test
+    fun `formatClusterMhz returns dash for null`() {
+        assertThat(HudDisplayUtils.formatClusterMhz(null)).isEqualTo("—")
+    }
+
+    // ── formatWatts ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatWatts formats value with one decimal`() {
+        assertThat(HudDisplayUtils.formatWatts(4.2)).isEqualTo("4.2W")
+    }
+
+    @Test
+    fun `formatWatts returns dash for null`() {
+        assertThat(HudDisplayUtils.formatWatts(null)).isEqualTo("—")
+    }
+
+    @Test
+    fun `formatWatts shows one decimal place`() {
+        // %.1f on JVM rounds half-up: 0.85 → 0.9
+        assertThat(HudDisplayUtils.formatWatts(0.85)).isEqualTo("0.9W")
+        assertThat(HudDisplayUtils.formatWatts(0.84)).isEqualTo("0.8W")
+        assertThat(HudDisplayUtils.formatWatts(10.0)).isEqualTo("10.0W")
+    }
+
+    // ── formatTemp ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatTemp formats temperature with degree-C suffix`() {
+        assertThat(HudDisplayUtils.formatTemp(72.4f)).isEqualTo("72°C")
+    }
+
+    @Test
+    fun `formatTemp returns dash for null`() {
+        assertThat(HudDisplayUtils.formatTemp(null)).isEqualTo("—")
+    }
+
+    // ── formatGhzFromMhz ─────────────────────────────────────────────────────
+
+    @Test
+    fun `formatGhzFromMhz converts 2920 to 2_92G`() {
+        assertThat(HudDisplayUtils.formatGhzFromMhz(2920)).isEqualTo("2.92G")
+    }
+
+    @Test
+    fun `formatGhzFromMhz returns dash for null`() {
+        assertThat(HudDisplayUtils.formatGhzFromMhz(null)).isEqualTo("—")
+    }
+
+    @Test
+    fun `formatGhzFromMhz handles sub-GHz value`() {
+        assertThat(HudDisplayUtils.formatGhzFromMhz(768)).isEqualTo("0.77G")
+    }
+
+    // ── hudWidthDp ────────────────────────────────────────────────────────────
+
+    @Test
+    fun `hudWidthDp returns 220 for index 0`() {
+        assertThat(HudDisplayUtils.hudWidthDp(0)).isEqualTo(220)
+    }
+
+    @Test
+    fun `hudWidthDp returns 270 for index 1`() {
+        assertThat(HudDisplayUtils.hudWidthDp(1)).isEqualTo(270)
+    }
+
+    @Test
+    fun `hudWidthDp returns 330 for index 2`() {
+        assertThat(HudDisplayUtils.hudWidthDp(2)).isEqualTo(330)
+    }
+
+    @Test
+    fun `hudWidthDp clamps out-of-range indices`() {
+        assertThat(HudDisplayUtils.hudWidthDp(-1)).isEqualTo(220)
+        assertThat(HudDisplayUtils.hudWidthDp(99)).isEqualTo(330)
+    }
+
+    // ── hudSizeLabel ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `hudSizeLabel returns correct labels`() {
+        assertThat(HudDisplayUtils.hudSizeLabel(0)).isEqualTo("SM")
+        assertThat(HudDisplayUtils.hudSizeLabel(1)).isEqualTo("MD")
+        assertThat(HudDisplayUtils.hudSizeLabel(2)).isEqualTo("LG")
+    }
+
+    // ── formatAutoTdpProfileShort ─────────────────────────────────────────────
+
+    @Test
+    fun `formatAutoTdpProfileShort maps known profiles`() {
+        assertThat(HudDisplayUtils.formatAutoTdpProfileShort("EFFICIENCY")).isEqualTo("EFF")
+        assertThat(HudDisplayUtils.formatAutoTdpProfileShort("BALANCED")).isEqualTo("BAL")
+        assertThat(HudDisplayUtils.formatAutoTdpProfileShort("BATTERY_TARGET")).isEqualTo("TGT")
+    }
+
+    @Test
+    fun `formatAutoTdpProfileShort is case insensitive`() {
+        assertThat(HudDisplayUtils.formatAutoTdpProfileShort("efficiency")).isEqualTo("EFF")
+    }
+
+    @Test
+    fun `formatAutoTdpProfileShort truncates unknown to 3 chars`() {
+        assertThat(HudDisplayUtils.formatAutoTdpProfileShort("CUSTOM_MODE")).isEqualTo("CUS")
+    }
+
+    // ── formatAutoTdpSavings ──────────────────────────────────────────────────
+
+    @Test
+    fun `formatAutoTdpSavings returns measuring when not ready`() {
+        assertThat(
+            HudDisplayUtils.formatAutoTdpSavings(null, null, savingsReady = false)
+        ).isEqualTo("measuring…")
+    }
+
+    @Test
+    fun `formatAutoTdpSavings returns measuring even when savingsMw present but not ready`() {
+        assertThat(
+            HudDisplayUtils.formatAutoTdpSavings(1500, null, savingsReady = false)
+        ).isEqualTo("measuring…")
+    }
+
+    @Test
+    fun `formatAutoTdpSavings formats watts and pct when ready`() {
+        val result = HudDisplayUtils.formatAutoTdpSavings(1800, 12.5, savingsReady = true)
+        assertThat(result).isEqualTo("−1.8W (12%)")
+    }
+
+    @Test
+    fun `formatAutoTdpSavings omits pct when null`() {
+        val result = HudDisplayUtils.formatAutoTdpSavings(1800, null, savingsReady = true)
+        assertThat(result).isEqualTo("−1.8W")
+    }
+
+    // ── formatHz ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatHz returns integer Hz with Hz suffix`() {
+        assertThat(HudDisplayUtils.formatHz(120.0f)).isEqualTo("120Hz")
+        assertThat(HudDisplayUtils.formatHz(60.0f)).isEqualTo("60Hz")
+        assertThat(HudDisplayUtils.formatHz(90.0f)).isEqualTo("90Hz")
+    }
+
+    // ── formatOpacityPct ─────────────────────────────────────────────────────
+
+    @Test
+    fun `formatOpacityPct returns integer percentage`() {
+        assertThat(HudDisplayUtils.formatOpacityPct(0.94f)).isEqualTo("94%")
+        assertThat(HudDisplayUtils.formatOpacityPct(1.0f)).isEqualTo("100%")
+        assertThat(HudDisplayUtils.formatOpacityPct(0.5f)).isEqualTo("50%")
+    }
 }

@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
@@ -60,13 +62,26 @@ class BenchmarkRunner @Inject constructor(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    // BUG 11: mutex ensures only one run() call can transition Idle→Running at a time.
+    // The check+set was previously a TOCTOU race: two coroutines could both pass the
+    // `is Idle` check before either wrote Running. The mutex makes the guard atomic.
+    private val runMutex = Mutex()
+
     suspend fun run(
         flavor: BenchFlavor,
         config: BenchConfig = BenchConfig(),
         appVersion: String,
         name: String = defaultName(flavor),
     ): BenchRun {
-        check(_state.value is State.Idle) { "Benchmark already in progress" }
+        // Atomically claim the Idle→Running slot. tryLock returns false if another
+        // coroutine holds the mutex (i.e. a run is in progress).
+        if (!runMutex.tryLock()) error("Benchmark already in progress")
+        try {
+            check(_state.value is State.Idle) { "Benchmark already in progress (state)" }
+        } catch (e: IllegalStateException) {
+            runMutex.unlock()
+            throw e
+        }
 
         val report = capabilityProbe.refresh()
         val startedAt = System.currentTimeMillis()
@@ -94,14 +109,39 @@ class BenchmarkRunner @Inject constructor(
             BenchFlavor.FULL -> 60_000L + config.stdScene3dLoopCount * config.stdScene3dLoopMs + 5_000L + config.throttleDurationMs
             BenchFlavor.SCENE_3D -> config.scene3dLoopCount * config.scene3dLoopMs
         }
+        val runStartMs = System.currentTimeMillis()
+        // BUG 10: progress helper — recompute from wall-clock so the bar moves.
+        fun updateProgress(phaseProgress: Float) {
+            val elapsed = System.currentTimeMillis() - runStartMs
+            val remaining = (etaMs - elapsed).coerceAtLeast(0L)
+            _state.value = State.Running(
+                flavor = flavor,
+                progress = phaseProgress.coerceIn(0f, 1f),
+                etaMs = remaining,
+            )
+        }
         _state.value = State.Running(flavor, progress = 0f, etaMs = etaMs)
 
         try {
+            updateProgress(0.05f)   // signal that we've started
             val kernels = try {
                 when (flavor) {
-                    BenchFlavor.QUICK -> runQuick(config)
-                    BenchFlavor.STANDARD, BenchFlavor.FULL -> runStandard(config)
-                    BenchFlavor.SCENE_3D -> runScene3D(config)
+                    BenchFlavor.QUICK -> {
+                        val r = runQuick(config)
+                        updateProgress(0.95f)
+                        r
+                    }
+                    BenchFlavor.STANDARD, BenchFlavor.FULL -> {
+                        val r = runStandard(config)
+                        // Standard kernels done; throttle (FULL only) comes next.
+                        updateProgress(if (flavor == BenchFlavor.FULL) 0.5f else 0.95f)
+                        r
+                    }
+                    BenchFlavor.SCENE_3D -> {
+                        val r = runScene3D(config)
+                        updateProgress(0.95f)
+                        r
+                    }
                 }
             } catch (t: UnsatisfiedLinkError) {
                 _state.value = State.Idle
@@ -122,9 +162,11 @@ class BenchmarkRunner @Inject constructor(
             var outcome = BenchOutcome.COMPLETED
 
             if (flavor == BenchFlavor.FULL) {
+                updateProgress(0.5f)
                 val result = runThrottleTest(config)
                 throttleSamples = result.samples
                 outcome = result.outcome
+                updateProgress(0.99f)
             }
 
             return BenchRun(
@@ -142,6 +184,7 @@ class BenchmarkRunner @Inject constructor(
             // Always reset state to Idle — covers both normal completion and
             // coroutine cancellation triggered by the user hitting Cancel.
             _state.value = State.Idle
+            runMutex.unlock()   // release the single-flight guard
         }
     }
 
@@ -156,11 +199,16 @@ class BenchmarkRunner @Inject constructor(
     /** Loop [oneShot] until [budgetMs] of wall-clock elapses, summing the
      *  returned scores. Always runs at least once. Fixed wall-clock makes
      *  benchmark duration chip-independent — a faster chip simply accumulates
-     *  more iterations (and a higher score) in the same time. */
+     *  more iterations (and a higher score) in the same time.
+     *
+     *  Each [oneShot] call is wrapped in runCatching so a native crash
+     *  (UnsatisfiedLinkError, SIGABRT recovered as a Throwable) does not
+     *  escape and abort the full run — the iteration contributes 0 instead.
+     *  Mirrors the pattern used in runThrottleTest. */
     private inline fun runForBudget(budgetMs: Long, oneShot: () -> Long): Long {
         val deadline = System.currentTimeMillis() + budgetMs
         var total = 0L
-        do { total += oneShot() } while (System.currentTimeMillis() < deadline)
+        do { total += runCatching(oneShot).getOrElse { 0L } } while (System.currentTimeMillis() < deadline)
         return total
     }
 

@@ -32,6 +32,8 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.R
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
@@ -99,6 +101,9 @@ class OverlayService :
     @Inject lateinit var refreshRateController: RefreshRateController
     @Inject lateinit var userPrefs: UserPrefs
     @Inject lateinit var sessionRecorder: SessionRecorder
+
+    /** AutoTDP controller — used for HUD in-overlay start/stop/profile switch. */
+    @Inject lateinit var autoTdpController: AutoTdpController
 
     /** State assembler: owns the single telemetry subscription + AutoTDP feed. */
     @Inject lateinit var assembler: HudStateAssembler
@@ -186,6 +191,22 @@ class OverlayService :
                 }
             }
         }
+
+        // Seed available refresh-rate options into state (once — modes don't change at runtime).
+        val modes = refreshRateController.supportedModes()
+        val hzOptions = modes.map { it.hz }.sortedBy { it }
+        assembler.feedRefreshRateOptions(hzOptions)
+
+        // Observe pinned Hz preference.
+        serviceScope.launch {
+            refreshRateController.preferredHz.collect { hz ->
+                assembler.feedPinnedHz(hz)
+            }
+        }
+
+        // Observe HUD size index + opacity preferences.
+        serviceScope.launch { hudPrefs.hudSizeIndex.collect { assembler.feedHudSizeIndex(it) } }
+        serviceScope.launch { hudPrefs.hudOpacity.collect { assembler.feedHudOpacity(it) } }
 
         hudEventLog.add(HudEventLog.Level.INFO, "HUD started")
     }
@@ -344,6 +365,44 @@ class OverlayService :
                                 }
                             }
                         },
+                        onToggleAutoTdp = {
+                            if (assembler.state.value.autoTdpRunning) {
+                                autoTdpController.stop()
+                                hudEventLog.add(HudEventLog.Level.INFO, "AutoTDP stopped from HUD")
+                            } else {
+                                val profile = assembler.state.value.autoTdpActiveProfile
+                                autoTdpController.start(profile)
+                                hudEventLog.add(HudEventLog.Level.INFO, "AutoTDP started (${profile.name}) from HUD")
+                            }
+                        },
+                        onSetAutoTdpProfile = { profile ->
+                            assembler.feedAutoTdpActiveProfile(profile)
+                            // If already running, restart with new profile.
+                            if (assembler.state.value.autoTdpRunning) {
+                                autoTdpController.stop()
+                                autoTdpController.start(profile)
+                                hudEventLog.add(HudEventLog.Level.INFO, "AutoTDP profile → ${profile.name}")
+                            }
+                        },
+                        onSetRefreshHz = { hz ->
+                            serviceScope.launch {
+                                refreshRateController.setPreferredHz(hz)
+                                hudEventLog.add(HudEventLog.Level.INFO, "Refresh rate → ${hz?.toInt() ?: "auto"} Hz")
+                            }
+                        },
+                        onCycleHudSize = {
+                            serviceScope.launch {
+                                val next = (assembler.state.value.hudSizeIndex + 1) % 3
+                                hudPrefs.setHudSizeIndex(next)
+                                assembler.feedHudSizeIndex(next)
+                            }
+                        },
+                        onSetOpacity = { opacity ->
+                            serviceScope.launch {
+                                hudPrefs.setHudOpacity(opacity)
+                                assembler.feedHudOpacity(opacity)
+                            }
+                        },
                         onClose = { stopSelf() },
                     )
                 }
@@ -400,9 +459,12 @@ class OverlayService :
             val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
             val all = report.cpuPolicies.map { it.policyId }.sorted()
             val big = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }
-            val directWritable = report.cpuPolicies.firstOrNull()?.let { p ->
-                probeSinglePolicyWritable(p.policyId)
-            } ?: false
+            // The CapabilityProbe already determined direct-writability via a real
+            // write-and-verify probe. Do NOT re-probe here: on stock AYN (cpufreq
+            // node mode 644, system-owned) a bare File.write() fires avc: denied
+            // { write } scontext=untrusted_app on every HUD start. Trust the
+            // authoritative report flag instead — zero AVC denials on launch.
+            val directWritable = report.sysfsDirectlyWritable
             val rooted = isRootAvailable()
             // pserverSysfsLive: the CapabilityProbe confirmed a real PServer
             // transact round-trip during refresh(). Use the report field rather
@@ -429,23 +491,6 @@ class OverlayService :
     }
 
     // ── Utility ───────────────────────────────────────────────────────────────
-
-    /**
-     * Non-destructive write probe: read current scaling_max_freq and write it
-     * back unchanged. Tells us if our UID can write sysfs on this device.
-     */
-    private fun probeSinglePolicyWritable(policyId: Int): Boolean {
-        val path = java.io.File(
-            "/sys/devices/system/cpu/cpufreq/policy$policyId/scaling_max_freq",
-        )
-        return runCatching {
-            if (!path.exists()) return false
-            val current = path.readText().trim()
-            if (current.isEmpty()) return false
-            path.bufferedWriter().use { it.write(current) }
-            true
-        }.getOrElse { false }
-    }
 
     private fun isRootAvailable(): Boolean =
         runCatching { com.topjohnwu.superuser.Shell.getCachedShell()?.isRoot == true }
@@ -617,4 +662,17 @@ data class HudUiState(
     val autoTdpSavingsMw: Int? = null,
     val autoTdpSavingsPct: Double? = null,
     val autoTdpSavingsReady: Boolean = false,
+    // AutoTDP active profile (used for the in-HUD profile picker)
+    val autoTdpActiveProfile: io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile =
+        io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile.BALANCED,
+    // Refresh-rate / FPS-cap controls
+    /** Available Hz options from RefreshRateController. Empty = no cap control. */
+    val availableHzOptions: List<Float> = emptyList(),
+    /** Currently pinned Hz, null = system default. */
+    val pinnedHz: Float? = null,
+    // HUD display prefs (Direction-C layout controls)
+    /** 0=small, 1=medium, 2=large — persisted via HudPrefs. */
+    val hudSizeIndex: Int = 1,
+    /** 0.0..1.0 overlay alpha — persisted via HudPrefs. */
+    val hudOpacity: Float = 0.94f,
 )

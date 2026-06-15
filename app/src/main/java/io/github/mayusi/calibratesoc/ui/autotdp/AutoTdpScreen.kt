@@ -1,6 +1,8 @@
 package io.github.mayusi.calibratesoc.ui.autotdp
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,24 +24,18 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.PowerSettingsNew
-import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TipsAndUpdates
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,38 +46,55 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
-import io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget
 import io.github.mayusi.calibratesoc.data.autotdp.SavingsResult
+import io.github.mayusi.calibratesoc.data.efficiency.EstimateSource
+import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.vendor.OdinIntents
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
+import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.MetricTile
+import io.github.mayusi.calibratesoc.ui.components.PanelAccentEdge
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
+import io.github.mayusi.calibratesoc.ui.components.StatBar
+import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.KvRow
-import io.github.mayusi.calibratesoc.ui.components.SectionCard
-import io.github.mayusi.calibratesoc.ui.components.StatTile
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
- * AutoTDP screen — the full AutoTDP + companion surface.
+ * AutoTDP screen — Direction C Arsenal rebuild.
  *
- * Top-level sections (in order):
- *  1. Rung banner (LIVE / SCRIPT / ADVISORY) — always visible, honesty-critical.
- *  2. Main On/Off card (LIVE rung) or Generate-script card (SCRIPT/ADVISORY).
- *  3. Live state card — current decision reason, parked cores, draw delta.
- *  4. Efficiency Curve Finder entry.
- *  5. Battery Target input (when BATTERY_TARGET profile is selected).
- *  6. Companion toggles: idle/charge trigger + per-app map.
+ * Layout (top-to-bottom):
+ *  1. Hero: big on/off ArsenalButton (emerald when running, red when off).
+ *     Live savings MetricTile shown prominently when data is ready.
+ *  2. Rung / mode disclosure (ArsenalPanel, honest, always visible).
+ *  3. Profile segmented control (Efficiency / Balanced / Battery-target).
+ *  4. Live "now" MetricTile mini-grid (CPU MHz, GPU MHz, hottest temp, draw W).
+ *  5. Live running state panel (parked cores, cap, GPU level, decision reason).
+ *  6. EfficiencyAdvisor panel — knee cap recommendation + expected draw reduction.
+ *     CTA to run sweep when no data; bar chart when sweep is done.
+ *  7. Undervolt capability tier disclosure (honest, never fake slider).
+ *  8. Battery target card (when BATTERY_TARGET profile selected).
+ *  9. PServer unlock CTA (AYN/Odin not yet whitelisted).
+ * 10. Script deploy result (SCRIPT rung).
+ * 11. Companion toggles: idle/charge + per-app.
  */
 @Composable
 fun AutoTdpScreen(
@@ -102,35 +115,127 @@ fun AutoTdpScreen(
     val showPServerUnlockCta by viewModel.showPServerUnlockCta.collectAsStateWithLifecycle()
     val lastUnlockDeploy by viewModel.lastUnlockDeploy.collectAsStateWithLifecycle()
     val liveSnapshot by viewModel.liveSnapshot.collectAsStateWithLifecycle()
+    val efficiencyPlan by viewModel.efficiencyPlan.collectAsStateWithLifecycle()
+    val undervoltCapability by viewModel.undervoltCapability.collectAsStateWithLifecycle()
 
     var showPerAppDialog by remember { mutableStateOf(false) }
+
+    val isRunning = runState.status == AutoTdpStatus.RUNNING
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(Spacing.screen),
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
-        // ── 1. Header ────────────────────────────────────────────────────────
+        // ── 1. Page header ──────────────────────────────────────────────────────
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "AutoTDP",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "AUTO TDP",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.05.sp,
+                        color = Color.White,
+                    )
+                    Text(
+                        "Closed-loop power governor",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF999999),
+                        letterSpacing = 0.04.sp,
+                    )
+                }
+                // Live badge when running
+                if (isRunning) {
+                    StatusPill(text = "LIVE", accent = AccentBar.Emerald)
+                }
             }
         }
 
-        // ── 2. Rung banner ────────────────────────────────────────────────────
-        item { RungBanner(rung = rung, runState = runState) }
+        // ── 2. Hero on/off ─────────────────────────────────────────────────────
+        item {
+            HeroControlBlock(
+                rung = rung,
+                isOn = manuallyOn,
+                runState = runState,
+                onToggle = { viewModel.setManualEnabled(it) },
+                onGenerateScript = { viewModel.generateEfficiencyScript() },
+            )
+        }
 
-        // ── 2a. PServer unlock CTA (AYN/Odin devices not yet whitelisted) ────
-        // Shown only when the device could be LIVE via PServer but the one-time
-        // unlock script has not been run yet. Dismissed once pserverSysfsLive flips.
+        // ── 3. Live savings MetricTile (only when data ready) ──────────────────
+        if (isRunning && runState.savings?.enoughData == true) {
+            item {
+                SavingsHeroRow(savings = runState.savings!!)
+            }
+        }
+
+        // ── 4. Rung disclosure ─────────────────────────────────────────────────
+        item { ArsenalRungBanner(rung = rung, runState = runState) }
+
+        // ── 5. Profile segmented control ───────────────────────────────────────
+        item {
+            ArsenalPanel(
+                accent = AccentBar.Blue,
+                title = "Profile",
+            ) {
+                ArsenalProfilePicker(
+                    selected = selectedProfile,
+                    onSelected = { viewModel.selectProfile(it) },
+                    excludeBatteryTarget = rung == AutoTdpRung.SCRIPT,
+                )
+            }
+        }
+
+        // ── 6. Battery target input (when selected) ────────────────────────────
+        if (selectedProfile == AutoTdpProfile.BATTERY_TARGET) {
+            item {
+                BatteryTargetArsenalCard(
+                    targetHours = targetHours,
+                    result = batteryTargetResult,
+                    onTargetHoursChanged = { viewModel.setTargetHours(it) },
+                )
+            }
+        }
+
+        // ── 7. Live "now" MetricTile grid ──────────────────────────────────────
+        // Always shown (shows "–" when not running / not available)
+        item {
+            ArsenalPanel(accent = AccentBar.Emerald, title = "Now") {
+                LiveNowArsenalGrid(snapshot = liveSnapshot, isRunning = isRunning)
+            }
+        }
+
+        // ── 8. Running state panel (parked cores, cap, GPU, decision reason) ───
+        if (runState.status != AutoTdpStatus.IDLE) {
+            item {
+                RunningStatePanels(runState = runState)
+            }
+        }
+
+        // ── 9. EfficiencyAdvisor surface ───────────────────────────────────────
+        item {
+            EfficiencyAdvisorPanel(
+                plan = efficiencyPlan,
+                sweepState = sweepProgress,
+                kneeKhz = kneeKhz,
+                onStartSweep = { viewModel.startEfficiencySweep() },
+                onCancelSweep = { viewModel.cancelSweep() },
+            )
+        }
+
+        // ── 10. Undervolt capability tier disclosure ──────────────────────────
+        undervoltCapability?.let { cap ->
+            item { UndervoltTierPanel(capability = cap) }
+        }
+
+        // ── 11. PServer unlock CTA ─────────────────────────────────────────────
         if (showPServerUnlockCta) {
             item {
-                PServerUnlockCtaCard(
+                PServerUnlockArsenalCard(
                     lastDeploy = lastUnlockDeploy,
                     onDeploy = { viewModel.deployUnlockScript() },
                     onRefresh = { viewModel.refreshCapability() },
@@ -139,64 +244,19 @@ fun AutoTdpScreen(
             }
         }
 
-        // ── 3. Main control ───────────────────────────────────────────────────
-        item {
-            when (rung) {
-                AutoTdpRung.LIVE -> LiveControlCard(
-                    isOn = manuallyOn,
-                    runState = runState,
-                    selectedProfile = selectedProfile,
-                    onToggle = { viewModel.setManualEnabled(it) },
-                    onProfileSelected = { viewModel.selectProfile(it) },
-                )
-                AutoTdpRung.SCRIPT, AutoTdpRung.ADVISORY -> ScriptControlCard(
-                    rung = rung,
-                    selectedProfile = selectedProfile,
-                    onProfileSelected = { viewModel.selectProfile(it) },
-                    onGenerateScript = { viewModel.generateEfficiencyScript() },
-                )
-            }
-        }
-
-        // ── 4. Battery target input (when selected) ────────────────────────────
-        if (selectedProfile == AutoTdpProfile.BATTERY_TARGET) {
-            item {
-                BatteryTargetCard(
-                    targetHours = targetHours,
-                    result = batteryTargetResult,
-                    onTargetHoursChanged = { viewModel.setTargetHours(it) },
-                )
-            }
-        }
-
-        // ── 5. Live state card ─────────────────────────────────────────────────
-        if (runState.status != AutoTdpStatus.IDLE) {
-            item { LiveStateCard(runState = runState, liveSnapshot = liveSnapshot) }
-        }
-
-        // ── 6. Efficiency Curve Finder ─────────────────────────────────────────
-        item {
-            EfficiencyCurveCard(
-                sweepState = sweepProgress,
-                kneeKhz = kneeKhz,
-                onStart = { viewModel.startEfficiencySweep() },
-                onCancel = { viewModel.cancelSweep() },
-            )
-        }
-
-        // ── 7. Last script deploy (SCRIPT rung) ───────────────────────────────
+        // ── 12. Last script deploy (SCRIPT rung) ──────────────────────────────
         lastScriptDeploy?.let { deployed ->
             item {
-                LastScriptDeployCard(
+                LastScriptArsenalCard(
                     deployed = deployed,
                     onDismiss = { viewModel.clearLastScriptDeploy() },
                 )
             }
         }
 
-        // ── 8. Companion toggles ──────────────────────────────────────────────
+        // ── 13. Companion toggles ─────────────────────────────────────────────
         item {
-            CompanionTogglesCard(
+            CompanionTogglesArsenalPanel(
                 idleChargeTriggerEnabled = idleChargeTriggerEnabled,
                 perAppMapCount = perAppMap.size,
                 onIdleChargeToggle = { viewModel.setIdleChargeTriggerEnabled(it) },
@@ -204,11 +264,10 @@ fun AutoTdpScreen(
             )
         }
 
-        // Bottom padding
-        item { Spacer(Modifier.height(16.dp)) }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 
-    // Per-app efficiency dialog
+    // Per-app efficiency dialog (unchanged logic, same dialog)
     if (showPerAppDialog) {
         PerAppEfficiencyDialog(
             currentMap = perAppMap,
@@ -218,330 +277,202 @@ fun AutoTdpScreen(
     }
 }
 
-// ─── Rung Banner ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Hero on/off block
+// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Always-visible rung disclosure. Tells the user exactly what AutoTDP can
- * and cannot do on this device. Never shows a fake control tier.
- *
- * For the LIVE rung the body text adapts to the specific live path active:
- *   - PServer (no root needed — AYN/Odin vendor service): most common live path.
- *   - sysfs directly writable (one-time unlock + SELinux permissive).
- *   - Root (full kernel access).
- */
 @Composable
-private fun RungBanner(rung: AutoTdpRung, runState: AutoTdpRunState) {
-    // Derive a more specific LIVE body from the run-state when available.
-    // runState.liveAvailable == true after the first RUNNING tick; before that,
-    // we fall back to a generic LIVE body (the rung resolved to LIVE from the
-    // capability report, so we know at least one live path is valid).
-    val liveBody = if (runState.liveAvailable || runState.status == AutoTdpStatus.RUNNING) {
-        // Post-start: we know exactly which path the daemon is using.
-        // The daemon doesn't currently annotate WHICH path it used, so we rely on
-        // the run-state being RUNNING as confirmation that writes are working.
-        "Live control confirmed — daemon is writing every second. " +
-            "Prime cores park when GPU-bound; big cluster is capped at the efficiency knee; " +
-            "GPU is prioritised. All writes revert automatically on stop."
-    } else {
-        // Pre-start: capability report says LIVE but daemon hasn't run yet.
-        // We still say LIVE confidently — the probe confirmed a real write path.
-        "Sysfs nodes are live-writable on this device (via PServer vendor service, " +
-            "direct sysfs access, or root). AutoTDP runs a real closed-loop daemon: " +
-            "parks prime cores when GPU-bound, caps the big cluster at the efficiency knee, " +
-            "and reverts everything on stop. No root required when using the PServer path."
-    }
+private fun HeroControlBlock(
+    rung: AutoTdpRung,
+    isOn: Boolean,
+    runState: AutoTdpRunState,
+    onToggle: (Boolean) -> Unit,
+    onGenerateScript: () -> Unit,
+) {
+    val isRunning = runState.status == AutoTdpStatus.RUNNING
 
-    val (icon, labelText, bodyText) = when (rung) {
-        AutoTdpRung.LIVE -> Triple(Icons.Outlined.PowerSettingsNew, "RUNG: LIVE", liveBody)
+    ArsenalPanel(
+        accent = if (isRunning) AccentBar.Emerald else AccentBar.Red,
+        accentEdge = PanelAccentEdge.Bottom,
+    ) {
+        when (rung) {
+            AutoTdpRung.LIVE -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
+                    Text(
+                        if (isOn) {
+                            when (runState.status) {
+                                AutoTdpStatus.RUNNING -> "DAEMON ACTIVE"
+                                else -> "STARTING…"
+                            }
+                        } else "STOPPED",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isRunning) AccentBar.Emerald else Color(0xFF999999),
+                        letterSpacing = 0.10.sp,
+                    )
+                    Text(
+                        if (isRunning) "Writing kernel clocks every second"
+                        else "All kernel writes reverted",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF777777),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    ArsenalButton(
+                        label = if (isOn) "Stop AutoTDP" else "Start AutoTDP",
+                        onClick = { onToggle(!isOn) },
+                        accent = if (isOn) AccentBar.Emerald else AccentBar.Red,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            AutoTdpRung.SCRIPT -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
+                    Text(
+                        "SCRIPT BUILDER",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = AccentBar.Amber,
+                        letterSpacing = 0.10.sp,
+                    )
+                    Text(
+                        "No live sysfs access. Generates a one-shot efficiency tune script — run it via Settings → Run script as Root.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF999999),
+                    )
+                    ArsenalButton(
+                        label = "Generate efficiency tune script",
+                        onClick = onGenerateScript,
+                        accent = AccentBar.Amber,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            AutoTdpRung.ADVISORY -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.group),
+                ) {
+                    Text(
+                        "ADVISORY MODE",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = AccentBar.Neutral,
+                        letterSpacing = 0.10.sp,
+                    )
+                    Text(
+                        "No write access. Showing efficiency advice only — no kernel changes applied.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF999999),
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Savings hero row (shown only when data is ready)
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun SavingsHeroRow(savings: SavingsResult) {
+    val saving = savings.deltaMw
+    val pct = kotlin.math.abs(savings.deltaPct)
+    val isSaving = saving > 0
+    val accent = if (isSaving) AccentBar.Emerald else AccentBar.Red
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.item),
+    ) {
+        val deltaLabel = if (isSaving) "-${saving}" else "+${-saving}"
+        MetricTile(
+            label = "Draw savings",
+            value = "$deltaLabel mW",
+            unit = null,
+            accent = accent,
+            valueColor = accent,
+            modifier = Modifier.weight(1f),
+        )
+        MetricTile(
+            label = "Reduction",
+            value = "${"%.1f".format(pct)}",
+            unit = "%",
+            accent = accent,
+            valueColor = if (isSaving) accent else null,
+            modifier = Modifier.weight(1f),
+        )
+        MetricTile(
+            label = "Samples",
+            value = "${savings.sampleCount}",
+            unit = null,
+            accent = AccentBar.Neutral,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Rung disclosure banner
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ArsenalRungBanner(rung: AutoTdpRung, runState: AutoTdpRunState) {
+    val (accent, statusLabel, body) = when (rung) {
+        AutoTdpRung.LIVE -> Triple(
+            AccentBar.Emerald,
+            "RUNG: LIVE",
+            if (runState.status == AutoTdpStatus.RUNNING) {
+                "Live control confirmed — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. All writes revert on stop."
+            } else {
+                "Sysfs is live-writable on this device (PServer, direct sysfs, or root). AutoTDP runs a closed-loop daemon — parks prime cores, caps big cluster, reverts everything on stop."
+            },
+        )
         AutoTdpRung.SCRIPT -> Triple(
-            Icons.Outlined.Code,
+            AccentBar.Amber,
             "RUNG: SCRIPT",
-            "Live auto-adjust needs the one-time unlock (see below) or root. " +
-                "This rung generates the best static efficiency tune as a shell script — " +
-                "run it once via your device's 'Run script as Root'. No live loop; " +
-                "settings are static until rebooted or a new script is run.",
+            "Live auto-adjust needs the one-time unlock (see below) or root. This rung generates the best static efficiency tune as a shell script — run it once via 'Run script as Root'. No live loop; settings revert on reboot.",
         )
         AutoTdpRung.ADVISORY -> Triple(
-            Icons.Outlined.Info,
+            AccentBar.Neutral,
             "RUNG: ADVISORY",
-            "No write access on this device. AutoTDP can read live telemetry and show " +
-                "efficiency advice (e.g. \"GPU-bound — parking 2 prime cores would save ~X mW\"), " +
-                "but cannot apply any changes. Run the unlock script or use root to reach " +
-                "SCRIPT or LIVE.",
+            "No write access. AutoTDP can read live telemetry and show efficiency advice, but cannot apply any changes. Run the unlock script or use root to reach SCRIPT or LIVE.",
         )
     }
 
-    // If the daemon itself confirmed writes are unavailable despite our LIVE probe,
-    // append that confirmation so the user isn't confused.
     val liveSuffix = if (runState.status == AutoTdpStatus.LIVE_UNAVAILABLE) {
         "\n\nDaemon confirmed: ${runState.liveUnavailableReason ?: "live writes not available — check sysfs permissions."}"
     } else ""
 
-    val containerColor = when (rung) {
-        AutoTdpRung.LIVE -> MaterialTheme.colorScheme.tertiaryContainer
-        AutoTdpRung.SCRIPT -> MaterialTheme.colorScheme.secondaryContainer
-        AutoTdpRung.ADVISORY -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    val contentColor = when (rung) {
-        AutoTdpRung.LIVE -> MaterialTheme.colorScheme.onTertiaryContainer
-        AutoTdpRung.SCRIPT -> MaterialTheme.colorScheme.onSecondaryContainer
-        AutoTdpRung.ADVISORY -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-    ) {
+    ArsenalPanel(accent = accent) {
         Row(
-            modifier = Modifier.padding(Spacing.card),
             horizontalArrangement = Arrangement.spacedBy(Spacing.group),
             verticalAlignment = Alignment.Top,
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = contentColor,
-                modifier = Modifier.size(20.dp).padding(top = 2.dp),
-            )
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Text(
-                    labelText,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = contentColor,
-                )
-                Text(
-                    bodyText + liveSuffix,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = contentColor,
-                )
-            }
-        }
-    }
-}
-
-// ─── PServer unlock CTA ───────────────────────────────────────────────────────
-
-/**
- * Shown on AYN/Odin devices where PServer is present but our package is NOT
- * yet in the whitelist. After the user runs the unlock script once, the next
- * capability refresh will set [CapabilityReport.pserverSysfsLive]=true and
- * the rung will flip to LIVE automatically — no root, no per-boot steps.
- *
- * The script is honest: it's plain text the user can audit before running.
- * The CTA disappears once [showPServerUnlockCta] becomes false (rung flipped).
- */
-@Composable
-private fun PServerUnlockCtaCard(
-    lastDeploy: AdvancedPermissionsScript.Deployed?,
-    onDeploy: () -> Unit,
-    onRefresh: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val context = LocalContext.current
-    val vendorName = remember {
-        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.vendorSettingsName(context)
-    }
-
-    SectionCard(
-        title = "One-Time Unlock → LIVE",
-        icon = Icons.Outlined.LockOpen,
-    ) {
-        Text(
-            "This device has AYN's PServer vendor service — which lets Calibrate SoC " +
-                "write CPU clocks and GPU levels with root authority, no Magisk needed. " +
-                "Run the unlock script ONCE via $vendorName → Run script as Root. " +
-                "After that, AutoTDP controls your clocks live until the next reboot. " +
-                "Re-running the script after a reboot re-enables it.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        Spacer(Modifier.height(Spacing.dense))
-
-        // What the script does — honesty-first
-        AlertCard(
-            type = AlertType.INFO,
-            title = "What the script does",
-            message = "• Adds this app to PServer's app_whiteList (Settings.System key)\n" +
-                "• Grants DUMP + PACKAGE_USAGE_STATS + WRITE_SECURE_SETTINGS (persist across reboot)\n" +
-                "• chmod 666 on cpufreq/GPU/governor sysfs nodes (requires Force SELinux ON; resets at reboot)\n" +
-                "The script is plain text — you can read it before running.",
-        )
-
-        Spacer(Modifier.height(Spacing.group))
-
-        if (lastDeploy == null) {
-            // No deploy yet — show the primary action
-            Button(
-                onClick = onDeploy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Outlined.LockOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(Spacing.group))
-                Text("Generate unlock script")
-            }
-        } else {
-            // Script has been generated — guide them through running it
-            val fileName = remember(lastDeploy.path) { lastDeploy.path.substringAfterLast('/') }
+            StatusPill(text = statusLabel, accent = accent)
             Text(
-                fileName,
-                fontFamily = FontFamily.Monospace,
+                body + liveSuffix,
                 style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFBBBBBB),
+                modifier = Modifier.weight(1f),
             )
-            if (lastDeploy.visibleToOdinPicker) {
-                Text(
-                    "1. Tap 'Open $vendorName' below\n" +
-                        "2. Tap 'Run script as Root'\n" +
-                        "3. Pick the .sh from the CalibrateSoC folder\n" +
-                        "4. Tap 'Check again' once it finishes — the rung should flip to LIVE.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    "Script saved to app-private folder. Copy to /sdcard/CalibrateSoC/ manually " +
-                        "or grant storage permission, then run via $vendorName → Run script as Root.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-            }
-            Spacer(Modifier.height(Spacing.group))
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                if (lastDeploy.visibleToOdinPicker) {
-                    Button(onClick = {
-                        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openVendorSettings(context)
-                    }) { Text("Open $vendorName") }
-                }
-                FilledTonalButton(onClick = onRefresh) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Check again")
-                }
-                TextButton(onClick = {
-                    onDismiss()
-                }) { Text("Dismiss") }
-            }
         }
     }
 }
 
-// ─── LIVE control card ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Arsenal profile picker (segmented control look)
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun LiveControlCard(
-    isOn: Boolean,
-    runState: AutoTdpRunState,
-    selectedProfile: AutoTdpProfile,
-    onToggle: (Boolean) -> Unit,
-    onProfileSelected: (AutoTdpProfile) -> Unit,
-) = SectionCard(
-    title = "AutoTDP Control",
-    icon = Icons.Outlined.PowerSettingsNew,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column {
-            Text(
-                if (isOn) "On" else "Off",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = if (isOn) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                when {
-                    isOn && runState.status == AutoTdpStatus.RUNNING -> "Daemon active — writing every second"
-                    isOn -> "Starting…"
-                    else -> "Stopped — all kernel writes reverted"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(
-            checked = isOn,
-            onCheckedChange = onToggle,
-        )
-    }
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
-    Text(
-        "Profile",
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    ProfilePicker(
-        selected = selectedProfile,
-        onSelected = onProfileSelected,
-    )
-}
-
-// ─── SCRIPT / ADVISORY control card ──────────────────────────────────────────
-
-@Composable
-private fun ScriptControlCard(
-    rung: AutoTdpRung,
-    selectedProfile: AutoTdpProfile,
-    onProfileSelected: (AutoTdpProfile) -> Unit,
-    onGenerateScript: () -> Unit,
-) = SectionCard(
-    title = if (rung == AutoTdpRung.SCRIPT) "Generate Efficiency Tune" else "Efficiency Advisor",
-    icon = Icons.Outlined.Code,
-) {
-    if (rung == AutoTdpRung.SCRIPT) {
-        Text(
-            "Generates the best static efficiency tune for your device as a one-shot script — " +
-                "parks prime cores, caps big-cluster at the efficiency knee (or heuristic ~67%), " +
-                "prioritises GPU. Run via your device's 'Run script as Root'. " +
-                "Re-run after each reboot (changes don't survive without the boot-install).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(Spacing.dense))
-
-        Text(
-            "Profile (determines aggressiveness)",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        // BATTERY_TARGET makes no sense for a static script — filter it out.
-        ProfilePicker(
-            selected = selectedProfile.takeIf { it != AutoTdpProfile.BATTERY_TARGET }
-                ?: AutoTdpProfile.EFFICIENCY,
-            onSelected = { if (it != AutoTdpProfile.BATTERY_TARGET) onProfileSelected(it) },
-            excludeBatteryTarget = true,
-        )
-        Spacer(Modifier.height(Spacing.group))
-        Button(
-            onClick = onGenerateScript,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(Icons.Outlined.Code, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(Spacing.group))
-            Text("Generate efficiency tune script")
-        }
-    } else {
-        // ADVISORY: no writes at all
-        AlertCard(
-            type = AlertType.INFO,
-            title = "Advisory mode",
-            message = "This device has no writable sysfs nodes for AutoTDP. " +
-                "The efficiency analysis below shows what AutoTDP would do if writes were available. " +
-                "Run the unlock script (Advanced Tuning → unlock sysfs) to move to SCRIPT rung, " +
-                "or enable root mode (Settings) for the LIVE rung.",
-        )
-    }
-}
-
-// ─── Profile picker ──────────────────────────────────────────────────────────
-
-@Composable
-private fun ProfilePicker(
+private fun ArsenalProfilePicker(
     selected: AutoTdpProfile,
     onSelected: (AutoTdpProfile) -> Unit,
     excludeBatteryTarget: Boolean = false,
@@ -552,636 +483,776 @@ private fun ProfilePicker(
         listOf(AutoTdpProfile.EFFICIENCY, AutoTdpProfile.BALANCED, AutoTdpProfile.BATTERY_TARGET)
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+    ) {
         profiles.forEach { profile ->
-            FilterChip(
-                selected = selected == profile,
-                onClick = { onSelected(profile) },
-                label = {
-                    Text(
-                        when (profile) {
-                            AutoTdpProfile.EFFICIENCY -> "Efficiency"
-                            AutoTdpProfile.BALANCED -> "Balanced"
-                            AutoTdpProfile.BATTERY_TARGET -> "Battery Target"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
+            val isSelected = selected == profile
+            val accent = when (profile) {
+                AutoTdpProfile.EFFICIENCY -> AccentBar.Emerald
+                AutoTdpProfile.BALANCED -> AccentBar.Blue
+                AutoTdpProfile.BATTERY_TARGET -> AccentBar.Amber
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .background(
+                        if (isSelected) accent.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                        RoundedCornerShape(4.dp),
                     )
-                },
-            )
+                    .border(
+                        1.dp,
+                        if (isSelected) accent else Color.White.copy(alpha = 0.08f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .clickable { onSelected(profile) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = when (profile) {
+                        AutoTdpProfile.EFFICIENCY -> "EFFICIENCY"
+                        AutoTdpProfile.BALANCED -> "BALANCED"
+                        AutoTdpProfile.BATTERY_TARGET -> "BATTERY"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isSelected) accent else Color(0xFF888888),
+                    letterSpacing = 0.06.sp,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 
-    // Brief profile description
+    Spacer(Modifier.height(Spacing.dense))
     Text(
         when (selected) {
             AutoTdpProfile.EFFICIENCY ->
-                "Aggressive: parks prime cores, caps big-cluster at ~67% of max. Best for GPU-bound emulation."
+                "Aggressive: parks prime cores, caps big cluster at ~67% of max. Best for GPU-bound emulation."
             AutoTdpProfile.BALANCED ->
                 "Mild: parks prime cores on GPU-bound load, caps big at ~75%. Good for mixed workloads."
             AutoTdpProfile.BATTERY_TARGET ->
-                "Target mode: you set desired battery life; AutoTDP computes the cap needed to hit it."
+                "Target mode: set desired battery life; AutoTDP computes the cap needed to hit it."
         },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.labelSmall,
+        color = Color(0xFF777777),
     )
 }
 
-// ─── Battery Target card ──────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Live "now" mini-grid (4 MetricTiles)
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun BatteryTargetCard(
-    targetHours: Double,
-    result: BatteryTarget.BatteryTargetResult?,
-    onTargetHoursChanged: (Double) -> Unit,
-) = SectionCard(title = "Battery Target", icon = Icons.Outlined.BatteryChargingFull) {
-    Text(
-        "Set how many hours you want. AutoTDP computes the big-cluster cap that would " +
-            "sustain that life at the current draw. The result below is an estimate — " +
-            "real life depends on your actual workload.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(Spacing.dense))
-
-    var hoursText by remember(targetHours) { mutableStateOf("%.1f".format(targetHours)) }
-    OutlinedTextField(
-        value = hoursText,
-        onValueChange = { text ->
-            hoursText = text
-            text.toDoubleOrNull()?.takeIf { it > 0 }?.let { onTargetHoursChanged(it) }
-        },
-        label = { Text("Target hours") },
-        suffix = { Text("h") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-
-    result?.let { r ->
-        Spacer(Modifier.height(Spacing.dense))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-        Spacer(Modifier.height(Spacing.dense))
-
-        // Honesty note always shown first
-        Text(
-            r.honestyNote,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (r.achievable) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.secondary,
-        )
-
-        if (r.achievable && r.mappedCapKhz != null) {
-            Spacer(Modifier.height(Spacing.dense))
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.item)) {
-                StatTile(
-                    label = "Required cap",
-                    value = "${r.mappedCapKhz / 1000}",
-                    unit = "MHz",
-                )
-                StatTile(
-                    label = "Budget",
-                    value = "%.1f".format(r.budgetW),
-                    unit = "W",
-                )
-            }
-        }
-    }
-}
-
-// ─── Live state card ──────────────────────────────────────────────────────────
-
-/**
- * Shown when the daemon is running (or in a terminal state).
- * Displays: current decision reason, parked cores, cap, draw delta,
- * and a "Live now" mini-grid fed from [liveSnapshot].
- * Draw savings are ALWAYS labeled "measured on your device, this session"
- * and NEVER shown until [SavingsResult.enoughData] is true.
- */
-@Composable
-private fun LiveStateCard(
-    runState: AutoTdpRunState,
-    liveSnapshot: AutoTdpViewModel.LiveSnapshot?,
-) = SectionCard(
-    title = "Live State",
-    icon = Icons.Outlined.QueryStats,
+private fun LiveNowArsenalGrid(
+    snapshot: AutoTdpViewModel.LiveSnapshot?,
+    isRunning: Boolean,
 ) {
-    when (runState.status) {
-        AutoTdpStatus.RUNNING -> RunningStateContent(runState, liveSnapshot)
-        AutoTdpStatus.KILLED_BY_SAFETY -> AlertCard(
-            type = AlertType.WARNING,
-            title = "Stopped by safety guard",
-            message = runState.killReason
-                ?: "AutoTDP stopped itself. All kernel writes have been reverted.",
-        )
-        AutoTdpStatus.WRITE_DENIED -> AlertCard(
-            type = AlertType.ERROR,
-            title = "Kernel write denied",
-            message = runState.writeFailure
-                ?: "A mid-run write was rejected by the kernel. All writes reverted. " +
-                "Try the unlock script or root.",
-        )
-        AutoTdpStatus.STOPPED -> Text(
-            "Stopped cleanly. All kernel writes reverted.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        AutoTdpStatus.LIVE_UNAVAILABLE -> AlertCard(
-            type = AlertType.INFO,
-            title = "Live writes unavailable",
-            message = runState.liveUnavailableReason
-                ?: "This device cannot do live sysfs writes. Use the SCRIPT rung instead.",
-        )
-        AutoTdpStatus.IDLE -> Unit // nothing to show
-    }
-}
+    val dimColor = if (isRunning) null else AccentBar.Neutral.copy(alpha = 0.5f)
 
-@Composable
-private fun RunningStateContent(
-    runState: AutoTdpRunState,
-    liveSnapshot: AutoTdpViewModel.LiveSnapshot?,
-) {
-    val state = runState.appliedState
-
-    // ── "Live now" mini-grid ──────────────────────────────────────────────────
-    // Shows four at-a-glance telemetry tiles sourced from MonitorService.
-    // Always rendered at the top of RunningStateContent; individual tiles show
-    // "–" when the corresponding telemetry field is null.
-    LiveNowMiniGrid(snapshot = liveSnapshot)
-
-    Spacer(Modifier.height(Spacing.dense))
-
-    // Decision reason — the engine's human-readable explanation of the current action.
-    // Shown monospace so core indices / MHz values line up cleanly.
-    if (runState.lastReason.isNotBlank()) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-            ),
-        ) {
-            Text(
-                runState.lastReason,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(Spacing.group),
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-        Spacer(Modifier.height(Spacing.dense))
-    }
-
-    // Applied kernel state — what is actually written to the kernel right now.
-    if (state != null) {
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-        Spacer(Modifier.height(Spacing.dense))
-        Text(
-            "Current kernel writes",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(Spacing.dense))
-        Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-            if (state.parkedPrimeCores.isNotEmpty()) {
-                KvRow(
-                    label = "Parked prime cores",
-                    value = state.parkedPrimeCores.sorted().joinToString(", ") { "cpu$it" },
-                    explainer = "Offlined to shed thermal load and cut power draw.",
-                )
-            } else {
-                KvRow(
-                    label = "Prime cores",
-                    value = "all online",
-                    explainer = "No parking — CPU-bound or load below threshold.",
-                )
-            }
-            state.bigClusterCapKhz?.let { cap ->
-                KvRow(
-                    label = "Big-cluster cap",
-                    value = "${cap / 1000} MHz",
-                    explainer = "Frequency ceiling for big/prime cluster. Efficiency knee or target.",
-                )
-            }
-            state.gpuFloorLevel?.let { lvl ->
-                KvRow(
-                    label = "GPU max power level",
-                    value = "$lvl${if (lvl == 0) " (max performance)" else ""}",
-                    explainer = "0 = fastest; higher = slower. AutoTDP keeps GPU fast when CPU is parked.",
-                )
-            }
-            if (state.governorOverrides.isNotEmpty()) {
-                KvRow(
-                    label = "Governor overrides",
-                    value = state.governorOverrides.entries.joinToString(", ") { (p, g) -> "policy$p→$g" },
-                )
-            }
-        }
-    }
-
-    // Measured draw savings — NEVER fabricated. Shown prominently when data is ready.
-    Spacer(Modifier.height(Spacing.group))
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-    Spacer(Modifier.height(Spacing.group))
-    DrawSavingsBlock(savings = runState.savings)
-}
-
-/**
- * Renders the measured draw-delta with honest labeling.
- * Shows "measuring…" until [SavingsResult.enoughData] is true.
- * Never shows a fabricated number — always labeled "measured on your device, this session".
- *
- * When data is available, the saving is shown prominently as both absolute (mW)
- * and percentage so the user can trust it is real.
- */
-@Composable
-private fun DrawSavingsBlock(savings: SavingsResult?) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
     ) {
-        Text(
-            "Draw savings",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        val cpuMhz = snapshot?.cpuMaxMhz?.toString() ?: "–"
+        val gpuMhz = snapshot?.gpuMhz?.toString() ?: "–"
+        val tempC = snapshot?.hottestTempC?.toString() ?: "–"
+        val drawW = snapshot?.batteryDrawW?.let { "%.1f".format(it) } ?: "–"
+
+        MetricTile(
+            label = "CPU MAX",
+            value = cpuMhz,
+            unit = if (snapshot?.cpuMaxMhz != null) "MHz" else null,
+            accent = AccentBar.Blue,
+            valueColor = dimColor,
+            modifier = Modifier.weight(1f),
         )
-        Text(
-            "Measured on your device, this session",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        MetricTile(
+            label = "GPU",
+            value = gpuMhz,
+            unit = if (snapshot?.gpuMhz != null) "MHz" else null,
+            accent = AccentBar.Purple,
+            valueColor = dimColor,
+            modifier = Modifier.weight(1f),
+        )
+        MetricTile(
+            label = "HOTTEST",
+            value = tempC,
+            unit = if (snapshot?.hottestTempC != null) "°C" else null,
+            accent = AccentBar.Amber,
+            valueColor = if (snapshot?.hottestTempC?.let { it > 85 } == true) AccentBar.Red else dimColor,
+            modifier = Modifier.weight(1f),
+        )
+        MetricTile(
+            label = "DRAW",
+            value = drawW,
+            unit = if (snapshot?.batteryDrawW != null) "W" else null,
+            accent = AccentBar.Neutral,
+            valueColor = dimColor,
+            modifier = Modifier.weight(1f),
         )
     }
-    Spacer(Modifier.height(Spacing.dense))
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Running state panels
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun RunningStatePanels(runState: AutoTdpRunState) {
+    when (runState.status) {
+        AutoTdpStatus.RUNNING -> {
+            val state = runState.appliedState
+
+            ArsenalPanel(accent = AccentBar.Blue, title = "Current kernel writes") {
+                if (state != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                        if (state.parkedPrimeCores.isNotEmpty()) {
+                            KvRow(
+                                label = "PARKED PRIME CORES",
+                                value = state.parkedPrimeCores.sorted().joinToString(", ") { "cpu$it" },
+                                explainer = "Offlined to shed thermal load and cut power draw.",
+                            )
+                        } else {
+                            KvRow(label = "PRIME CORES", value = "all online", explainer = "No parking — CPU-bound or below threshold.")
+                        }
+                        state.bigClusterCapKhz?.let { cap ->
+                            KvRow(label = "BIG CLUSTER CAP", value = "${cap / 1000} MHz", explainer = "Frequency ceiling. Efficiency knee or target.")
+                        }
+                        state.gpuFloorLevel?.let { lvl ->
+                            KvRow(
+                                label = "GPU MAX POWER LEVEL",
+                                value = "$lvl${if (lvl == 0) " (max perf)" else ""}",
+                                explainer = "0 = fastest. AutoTDP keeps GPU fast when CPU is parked.",
+                            )
+                        }
+                        if (state.governorOverrides.isNotEmpty()) {
+                            KvRow(
+                                label = "GOVERNOR OVERRIDES",
+                                value = state.governorOverrides.entries.joinToString(", ") { (p, g) -> "policy$p→$g" },
+                            )
+                        }
+                    }
+                }
+
+                // Decision reason — monospace
+                if (runState.lastReason.isNotBlank()) {
+                    Spacer(Modifier.height(Spacing.dense))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                    Spacer(Modifier.height(Spacing.dense))
+                    Text(
+                        "DECISION",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentBar.Neutral,
+                        letterSpacing = 0.07.sp,
+                    )
+                    Spacer(Modifier.height(Spacing.dense))
+                    Text(
+                        runState.lastReason,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFFCCCCCC),
+                    )
+                }
+            }
+
+            // Savings block (shown when measuring OR ready)
+            Spacer(Modifier.height(Spacing.item))
+            ArsenalPanel(accent = AccentBar.Emerald, title = "Draw savings (measured this session)") {
+                DrawSavingsArsenalBlock(savings = runState.savings)
+            }
+        }
+
+        AutoTdpStatus.KILLED_BY_SAFETY -> {
+            ArsenalPanel(accent = AccentBar.Red, title = "Stopped by safety guard") {
+                Text(
+                    runState.killReason ?: "AutoTDP stopped itself. All kernel writes reverted.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AccentBar.Red,
+                )
+            }
+        }
+
+        AutoTdpStatus.WRITE_DENIED -> {
+            ArsenalPanel(accent = AccentBar.Red, title = "Kernel write denied") {
+                Text(
+                    runState.writeFailure
+                        ?: "A mid-run write was rejected. All writes reverted. Try the unlock script or root.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AccentBar.Red,
+                )
+            }
+        }
+
+        AutoTdpStatus.STOPPED -> {
+            ArsenalPanel(accent = AccentBar.Neutral, title = "Stopped") {
+                Text(
+                    "Stopped cleanly. All kernel writes reverted.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+        }
+
+        AutoTdpStatus.LIVE_UNAVAILABLE -> {
+            ArsenalPanel(accent = AccentBar.Amber, title = "Live writes unavailable") {
+                Text(
+                    runState.liveUnavailableReason
+                        ?: "This device cannot do live sysfs writes. Use the SCRIPT rung instead.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AccentBar.Amber,
+                )
+            }
+        }
+
+        AutoTdpStatus.IDLE -> Unit
+    }
+}
+
+@Composable
+private fun DrawSavingsArsenalBlock(savings: SavingsResult?) {
     when {
         savings == null -> {
             Text(
-                "Measuring baseline… sampling battery draw before AutoTDP enables (~20 s). " +
-                    "Keep the same workload running for an accurate comparison.",
+                "Measuring baseline… sampling battery draw before AutoTDP enables (~20 s). Keep the same workload running.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color(0xFF999999),
             )
         }
         !savings.enoughData -> {
-            LinearProgressIndicator(
-                progress = {
-                    savings.sampleCount.toFloat() / io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings.MIN_SAMPLES_FOR_REPORT
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(Spacing.dense))
-            Text(
-                "Measuring… (${savings.sampleCount} / ${io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings.MIN_SAMPLES_FOR_REPORT} samples)",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            StatBar(
+                label = "Measuring",
+                value = "${savings.sampleCount} / ${AutoTdpSavings.MIN_SAMPLES_FOR_REPORT}",
+                fraction = savings.sampleCount.toFloat() / AutoTdpSavings.MIN_SAMPLES_FOR_REPORT,
+                accent = AccentBar.Emerald,
             )
         }
         else -> {
             val saving = savings.deltaMw
             val pct = kotlin.math.abs(savings.deltaPct)
             val isSaving = saving > 0
-            val highlightColor = if (isSaving) MaterialTheme.colorScheme.tertiary
-            else MaterialTheme.colorScheme.error
+            val accent = if (isSaving) AccentBar.Emerald else AccentBar.Red
 
-            // Prominent saving headline
             if (isSaving) {
                 Text(
                     "Saving ~${saving} mW / ${"%.1f".format(pct)}%",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
-                    color = highlightColor,
+                    color = accent,
                 )
+                Spacer(Modifier.height(Spacing.dense))
             }
 
-            Spacer(Modifier.height(Spacing.dense))
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.item)) {
-                StatTile(label = "Baseline", value = "${savings.baselineMw}", unit = "mW")
-                StatTile(label = "With AutoTDP", value = "${savings.tunedMw}", unit = "mW")
-                val deltaLabel = if (isSaving) "-$saving" else "+${-saving}"
-                StatTile(
-                    label = "Delta",
-                    value = "$deltaLabel mW",
-                    valueColor = highlightColor,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+            ) {
+                MetricTile(
+                    label = "BASELINE",
+                    value = "${savings.baselineMw}",
+                    unit = "mW",
+                    accent = AccentBar.Neutral,
+                    modifier = Modifier.weight(1f),
+                )
+                MetricTile(
+                    label = "WITH AUTOTDP",
+                    value = "${savings.tunedMw}",
+                    unit = "mW",
+                    accent = AccentBar.Emerald,
+                    modifier = Modifier.weight(1f),
+                )
+                MetricTile(
+                    label = "DELTA",
+                    value = if (isSaving) "-$saving" else "+${-saving}",
+                    unit = "mW",
+                    accent = accent,
+                    valueColor = accent,
+                    modifier = Modifier.weight(1f),
                 )
             }
             Spacer(Modifier.height(Spacing.dense))
             Text(
-                "${savings.sampleCount} samples — measured on this device, this session. " +
-                    "Keep the same workload running for a stable reading.",
+                "${savings.sampleCount} samples — measured on this device, this session.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color(0xFF777777),
             )
         }
     }
 }
 
-// ─── Live now mini-grid ───────────────────────────────────────────────────────
-
-/**
- * Compact 2×2 grid of live telemetry tiles shown at the top of [RunningStateContent].
- *
- * Sources: [AutoTdpViewModel.liveSnapshot] — updated every MonitorService tick (1 Hz).
- * Fields show "–" when the corresponding sensor value is unavailable.
- *
- * Tiles:
- *   CPU max MHz  |  GPU MHz
- *   Hot °C       |  Draw W
- */
-@Composable
-private fun LiveNowMiniGrid(snapshot: AutoTdpViewModel.LiveSnapshot?) {
-    Text(
-        "Live now",
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(Spacing.dense))
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.item),
-    ) {
-        val cpuMhz = snapshot?.cpuMaxMhz?.toString() ?: "–"
-        val gpuMhz = snapshot?.gpuMhz?.toString() ?: "–"
-        val tempC  = snapshot?.hottestTempC?.toString() ?: "–"
-        val drawW  = snapshot?.batteryDrawW?.let { "%.1f".format(it) } ?: "–"
-        StatTile(label = "CPU max", value = cpuMhz, unit = if (snapshot?.cpuMaxMhz != null) "MHz" else null, modifier = Modifier.weight(1f))
-        StatTile(label = "GPU",     value = gpuMhz, unit = if (snapshot?.gpuMhz   != null) "MHz" else null, modifier = Modifier.weight(1f))
-        StatTile(label = "Hot",     value = tempC,  unit = if (snapshot?.hottestTempC != null) "°C" else null, modifier = Modifier.weight(1f))
-        StatTile(label = "Draw",    value = drawW,  unit = if (snapshot?.batteryDrawW != null) "W"  else null, modifier = Modifier.weight(1f))
-    }
-}
-
-// ─── Efficiency Curve Finder ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  EfficiencyAdvisor surface
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun EfficiencyCurveCard(
+private fun EfficiencyAdvisorPanel(
+    plan: EfficiencyPlan?,
     sweepState: SweepUiState,
     kneeKhz: Int?,
-    onStart: () -> Unit,
-    onCancel: () -> Unit,
-) = SectionCard(title = "Efficiency Curve Finder", icon = Icons.Outlined.Search) {
-    Text(
-        "Steps the big-cluster cap down through its OPP table under a fixed synthetic load, " +
-            "measures performance and battery draw at each step, then finds the 'knee' — " +
-            "the cap with the best perf-per-watt on your exact silicon. " +
-            "Takes ~${estimateSweepMinutes(sweepState)} minutes. Run while discharging for accurate draw readings.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    onStartSweep: () -> Unit,
+    onCancelSweep: () -> Unit,
+) {
+    ArsenalPanel(accent = AccentBar.Emerald, title = "Efficiency Advisor") {
+        if (plan == null) {
+            // No plan yet
+            Text(
+                "No efficiency data. Run the sweep below to measure your device's perf-per-watt curve.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+        } else {
+            // Show the plan summary
+            Text(
+                plan.summaryText,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFCCCCCC),
+            )
 
-    kneeKhz?.let { knee ->
+            if (plan.drawEstimateSource == EstimateSource.MEASURED && plan.estimatedDrawReductionPct != null) {
+                Spacer(Modifier.height(Spacing.dense))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+                ) {
+                    plan.bigClusterKneeCap?.let { cap ->
+                        MetricTile(
+                            label = "KNEE CAP",
+                            value = "${cap / 1000}",
+                            unit = "MHz",
+                            accent = AccentBar.Emerald,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    MetricTile(
+                        label = "DRAW REDUCTION",
+                        value = "${plan.estimatedDrawReductionPct}",
+                        unit = "%",
+                        accent = AccentBar.Emerald,
+                        valueColor = AccentBar.Emerald,
+                        modifier = Modifier.weight(1f),
+                    )
+                    plan.gpuPowerLevelFloor?.let { lvl ->
+                        MetricTile(
+                            label = "GPU FLOOR LVL",
+                            value = "$lvl",
+                            unit = null,
+                            accent = AccentBar.Purple,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(Spacing.dense))
+                StatusPill(text = "MEASURED", accent = AccentBar.Emerald)
+            } else if (plan.drawEstimateSource == EstimateSource.ESTIMATED) {
+                Spacer(Modifier.height(Spacing.dense))
+                StatusPill(text = "ESTIMATED — run sweep for real data", accent = AccentBar.Amber)
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // Efficiency sweep section
+        SectionHeader(title = "Efficiency Curve Finder", accent = AccentBar.Emerald)
         Spacer(Modifier.height(Spacing.dense))
         Text(
-            "Knee from last sweep: ${knee / 1000} MHz (approximate, measured on your device)",
+            "Steps the big-cluster cap through its OPP table under synthetic load; finds the perf-per-watt knee. " +
+                "Takes ~${estimateSweepMinutes(sweepState)} min. Run while discharging.",
             style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.tertiary,
-            fontWeight = FontWeight.SemiBold,
+            color = Color(0xFF999999),
         )
-        Text(
-            "This cap is used as the efficiency target in the active profile and script generation.",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
 
-    Spacer(Modifier.height(Spacing.dense))
+        Spacer(Modifier.height(Spacing.group))
 
-    when (val s = sweepState) {
-        is SweepUiState.Idle -> {
-            OutlinedButton(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(Spacing.group))
-                Text("Run efficiency sweep")
-            }
-        }
-        is SweepUiState.Running -> {
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Text(
-                    "Measuring step ${s.stepIndex} / ${s.totalSteps} — ${s.currentCapKhz / 1000} MHz cap",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-                LinearProgressIndicator(
-                    progress = { if (s.totalSteps > 0) s.stepIndex.toFloat() / s.totalSteps else 0f },
+        when (val s = sweepState) {
+            is SweepUiState.Idle -> {
+                ArsenalButton(
+                    label = if (kneeKhz != null) "Re-run efficiency sweep" else "Run efficiency sweep",
+                    onClick = onStartSweep,
+                    accent = AccentBar.Emerald,
+                    style = ArsenalButtonStyle.Secondary,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                TextButton(onClick = onCancel) { Text("Cancel sweep") }
             }
-        }
-        is SweepUiState.Done -> {
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Text(
-                    s.result.summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.height(Spacing.dense))
-                // Bar chart: one row per OPP step, bar width proportional to perf/W,
-                // knee highlighted in tertiary (emerald in the dark theme), others muted.
+            is SweepUiState.Running -> {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    StatBar(
+                        label = "Step ${s.stepIndex} / ${s.totalSteps} — ${s.currentCapKhz / 1000} MHz cap",
+                        value = "${s.stepIndex}/${s.totalSteps}",
+                        fraction = if (s.totalSteps > 0) s.stepIndex.toFloat() / s.totalSteps else 0f,
+                        accent = AccentBar.Emerald,
+                    )
+                    ArsenalButton(
+                        label = "Cancel sweep",
+                        onClick = onCancelSweep,
+                        accent = AccentBar.Red,
+                        style = ArsenalButtonStyle.Secondary,
+                    )
+                }
+            }
+            is SweepUiState.Done -> {
                 val ranked = remember(s.result) {
                     AutoTdpViewModel.rankOppPoints(s.result.points, s.result.knee?.capKhz)
                 }
-                ranked.forEach { pt -> OppBarRow(pt) }
-                Text(
-                    "Measured on your device, approximate. " +
-                        "Bar width = perf/W relative to best step.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(Spacing.dense))
-                OutlinedButton(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                    Text("Re-run sweep")
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    Text(
+                        s.result.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCCCCCC),
+                    )
+                    ranked.forEach { pt ->
+                        StatBar(
+                            label = "${pt.capMhz} MHz",
+                            value = "${"%.1f".format(pt.perfPerWatt)} p/W  ${pt.drawMw}mW",
+                            fraction = pt.ppwFraction,
+                            accent = if (pt.isKnee) AccentBar.Emerald else AccentBar.Neutral.copy(alpha = 0.5f),
+                        )
+                        if (pt.isKnee) {
+                            StatusPill(text = "KNEE — BEST EFFICIENCY", accent = AccentBar.Emerald)
+                            Spacer(Modifier.height(2.dp))
+                        }
+                    }
+                    Text(
+                        "Bar width = perf/W relative to best step. Measured on your device, approximate.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF777777),
+                    )
+                    ArsenalButton(
+                        label = "Re-run sweep",
+                        onClick = onStartSweep,
+                        accent = AccentBar.Emerald,
+                        style = ArsenalButtonStyle.Secondary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
-        }
-        is SweepUiState.Failed -> {
-            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                AlertCard(
-                    type = AlertType.WARNING,
-                    title = "Sweep failed",
-                    message = s.reason,
-                )
-                OutlinedButton(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                    Text("Retry sweep")
+            is SweepUiState.Failed -> {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    AlertCard(type = AlertType.WARNING, title = "Sweep failed", message = s.reason)
+                    ArsenalButton(
+                        label = "Retry sweep",
+                        onClick = onStartSweep,
+                        accent = AccentBar.Amber,
+                        style = ArsenalButtonStyle.Secondary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
     }
 }
 
-/**
- * One horizontal bar row for an OPP efficiency-curve step.
- *
- * Layout:
- *   [capMhz label]  [████████░░  bar fills to ppwFraction]  [ppW value + draw]
- *
- * Knee / best step:  bar + MHz label rendered in [MaterialTheme.colorScheme.tertiary].
- * Other steps:       bar rendered at 30 % alpha of onSurfaceVariant (muted).
- *
- * The bar is purely visual — no accessibility content needed beyond the text labels.
- */
-@Composable
-private fun OppBarRow(pt: RankedOppPoint) {
-    val isKnee = pt.isKnee
-    val barColor = if (isKnee) MaterialTheme.colorScheme.tertiary
-                   else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.30f)
-    val labelColor = if (isKnee) MaterialTheme.colorScheme.tertiary
-                     else MaterialTheme.colorScheme.onSurfaceVariant
+// ─────────────────────────────────────────────────────────────────────────────
+//  Undervolt capability tier panel
+// ─────────────────────────────────────────────────────────────────────────────
 
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
-    ) {
-        // MHz label (fixed width via weight so bars align)
-        Text(
-            text = "${pt.capMhz}",
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = labelColor,
-            modifier = Modifier.width(48.dp),
+@Composable
+private fun UndervoltTierPanel(capability: io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapability) {
+    val (accent, tierLabel, tierBody) = when (capability.tier) {
+        io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityTier.REAL_VOLTAGE_TABLE -> Triple(
+            AccentBar.Emerald,
+            "VOLTAGE TABLE PRESENT",
+            "A per-OPP voltage table was found and is writable on this device. Real per-frequency voltage control is available (rare on stock firmware).",
         )
-        // Bar track
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(10.dp)
-                .background(
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(5.dp),
-                ),
+        io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityTier.KNEE_EQUIVALENT -> Triple(
+            AccentBar.Blue,
+            "KNEE-EQUIVALENT EFFICIENCY",
+            "No writable voltage table on this device (stock Snapdragon/Qualcomm CPR manages voltages in signed firmware). Efficiency is achieved by frequency-capping clusters at the measured perf-per-watt knee — this achieves most of the battery benefit of undervolting by staying on the flat V/F curve.",
+        )
+        io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityTier.READ_ONLY -> Triple(
+            AccentBar.Neutral,
+            "READ ONLY",
+            "Neither voltage table nor frequency-cap writes are available. Advisory mode only.",
+        )
+    }
+
+    ArsenalPanel(accent = accent, title = "Efficiency capability") {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalAlignment = Alignment.Top,
         ) {
-            if (pt.ppwFraction > 0f) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(pt.ppwFraction)
-                        .height(10.dp)
-                        .background(color = barColor, shape = RoundedCornerShape(5.dp)),
-                )
-            }
+            StatusPill(text = tierLabel, accent = accent)
         }
-        // ppW + draw label
+        Spacer(Modifier.height(Spacing.dense))
         Text(
-            text = "${"%.1f".format(pt.perfPerWatt)} p/W  ${pt.drawMw}mW",
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = labelColor,
+            tierBody,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFBBBBBB),
         )
+
+        // NEVER show a fake voltage slider — only if real table is present
+        if (capability.tier == io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityTier.REAL_VOLTAGE_TABLE) {
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "CPU voltage table writable: ${capability.cpuVoltTableWritable} | GPU voltage table writable: ${capability.gpuVoltTableWritable}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = AccentBar.Emerald,
+            )
+        }
+        // On KNEE_EQUIVALENT: explicit note — never a fake slider
+        if (capability.tier == io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityTier.KNEE_EQUIVALENT) {
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "Freq-cap writes available: ${capability.freqCapWritable}  |  Voltage table: not exposed by stock firmware",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF888888),
+            )
+        }
     }
 }
 
-private fun estimateSweepMinutes(state: SweepUiState): String {
-    val steps = when (state) {
-        is SweepUiState.Running -> state.totalSteps
-        else -> 8 // typical OPP table size
-    }
-    // 4s per step + overhead
-    val totalSeconds = steps * 5
-    return if (totalSeconds < 60) "<1" else "${totalSeconds / 60}"
-}
-
-// ─── Last script deploy card ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Battery target card
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun LastScriptDeployCard(
-    deployed: AynScriptDeployer.Deployed,
+private fun BatteryTargetArsenalCard(
+    targetHours: Double,
+    result: io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget.BatteryTargetResult?,
+    onTargetHoursChanged: (Double) -> Unit,
+) {
+    ArsenalPanel(accent = AccentBar.Amber, title = "Battery target") {
+        Text(
+            "Set how many hours you want. AutoTDP computes the big-cluster cap that would sustain that life at current draw. Estimate — real life depends on your actual workload.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+        var hoursText by remember(targetHours) { mutableStateOf("%.1f".format(targetHours)) }
+        OutlinedTextField(
+            value = hoursText,
+            onValueChange = { text ->
+                hoursText = text
+                text.toDoubleOrNull()?.takeIf { it > 0 }?.let { onTargetHoursChanged(it) }
+            },
+            label = { Text("Target hours") },
+            suffix = { Text("h") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        result?.let { r ->
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                r.honestyNote,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (r.achievable) Color(0xFFBBBBBB) else AccentBar.Amber,
+            )
+            if (r.achievable && r.mappedCapKhz != null) {
+                Spacer(Modifier.height(Spacing.dense))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+                ) {
+                    MetricTile(
+                        label = "REQUIRED CAP",
+                        value = "${r.mappedCapKhz / 1000}",
+                        unit = "MHz",
+                        accent = AccentBar.Amber,
+                        modifier = Modifier.weight(1f),
+                    )
+                    MetricTile(
+                        label = "BUDGET",
+                        value = "%.1f".format(r.budgetW),
+                        unit = "W",
+                        accent = AccentBar.Amber,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PServer unlock CTA
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun PServerUnlockArsenalCard(
+    lastDeploy: AdvancedPermissionsScript.Deployed?,
+    onDeploy: () -> Unit,
+    onRefresh: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
     val vendorName = remember {
-        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.vendorSettingsName(context)
+        OdinIntents.vendorSettingsName(context)
     }
-    SectionCard(title = "Script generated", icon = Icons.Outlined.Code) {
-        val fileName = remember(deployed.path) { deployed.path.substringAfterLast('/') }
-        Text(fileName, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
-        if (deployed.visibleToOdinPicker) {
-            Text(
-                "1. Tap 'Open $vendorName' (or navigate there manually)\n" +
-                    "2. Tap 'Run script as Root'\n" +
-                    "3. Pick the .sh from the CalibrateSoC folder\n" +
-                    "Re-run after each reboot (changes don't survive without boot-install).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+    ArsenalPanel(accent = AccentBar.Amber, title = "One-Time Unlock → LIVE") {
+        Text(
+            "This device has AYN's PServer vendor service. Run the unlock script ONCE via $vendorName → Run script as Root. " +
+                "After that, AutoTDP controls clocks live until the next reboot.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFBBBBBB),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+        AlertCard(
+            type = AlertType.INFO,
+            title = "What the script does",
+            message = "• Adds this app to PServer whitelist\n" +
+                "• Grants DUMP + PACKAGE_USAGE_STATS + WRITE_SECURE_SETTINGS\n" +
+                "• chmod 666 on cpufreq/GPU/governor sysfs nodes (resets at reboot)\n" +
+                "Plain text — you can audit it before running.",
+        )
+        Spacer(Modifier.height(Spacing.group))
+        if (lastDeploy == null) {
+            ArsenalButton(
+                label = "Generate unlock script",
+                onClick = onDeploy,
+                accent = AccentBar.Amber,
+                modifier = Modifier.fillMaxWidth(),
             )
         } else {
-            Text(
-                "Script saved to app-private folder — copy to /sdcard/CalibrateSoC/ manually " +
-                    "or grant storage permission.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.secondary,
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            if (deployed.visibleToOdinPicker) {
-                Button(onClick = {
-                    OdinIntents.openVendorSettings(context)
-                }) { Text("Open $vendorName") }
+            val fileName = remember(lastDeploy.path) { lastDeploy.path.substringAfterLast('/') }
+            Text(fileName, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+            if (lastDeploy.visibleToOdinPicker) {
+                Text(
+                    "1. Tap 'Open $vendorName'\n2. Tap 'Run script as Root'\n3. Pick the .sh\n4. Tap 'Check again'",
+                    style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999),
+                )
+            } else {
+                Text(
+                    "Script saved to app-private folder. Copy to /sdcard/CalibrateSoC/ manually then run.",
+                    style = MaterialTheme.typography.bodySmall, color = AccentBar.Amber,
+                )
             }
-            TextButton(onClick = onDismiss) { Text("Dismiss") }
+            Spacer(Modifier.height(Spacing.group))
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                if (lastDeploy.visibleToOdinPicker) {
+                    ArsenalButton(label = "Open $vendorName", onClick = { OdinIntents.openVendorSettings(context) }, accent = AccentBar.Amber)
+                }
+                ArsenalButton(label = "Check again", onClick = onRefresh, accent = AccentBar.Blue, style = ArsenalButtonStyle.Secondary)
+                ArsenalButton(label = "Dismiss", onClick = onDismiss, accent = AccentBar.Neutral, style = ArsenalButtonStyle.Secondary)
+            }
         }
     }
 }
 
-// ─── Companion toggles ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Last script deploy card
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun CompanionTogglesCard(
+private fun LastScriptArsenalCard(
+    deployed: AynScriptDeployer.Deployed,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val vendorName = remember { OdinIntents.vendorSettingsName(context) }
+
+    ArsenalPanel(accent = AccentBar.Amber, title = "Script generated") {
+        val fileName = remember(deployed.path) { deployed.path.substringAfterLast('/') }
+        Text(fileName, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
+        if (deployed.visibleToOdinPicker) {
+            Text(
+                "1. Tap 'Open $vendorName'\n2. Tap 'Run script as Root'\n3. Pick the .sh\nRe-run after each reboot.",
+                style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999),
+            )
+        } else {
+            Text(
+                "Script in app-private folder — copy to /sdcard/CalibrateSoC/ manually.",
+                style = MaterialTheme.typography.bodySmall, color = AccentBar.Amber,
+            )
+        }
+        Spacer(Modifier.height(Spacing.group))
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            if (deployed.visibleToOdinPicker) {
+                ArsenalButton(label = "Open $vendorName", onClick = { OdinIntents.openVendorSettings(context) }, accent = AccentBar.Amber)
+            }
+            ArsenalButton(label = "Dismiss", onClick = onDismiss, accent = AccentBar.Neutral, style = ArsenalButtonStyle.Secondary)
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Companion toggles panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun CompanionTogglesArsenalPanel(
     idleChargeTriggerEnabled: Boolean,
     perAppMapCount: Int,
     onIdleChargeToggle: (Boolean) -> Unit,
     onOpenPerApp: () -> Unit,
-) = SectionCard(title = "Companion Features", icon = Icons.Outlined.TipsAndUpdates) {
-    // Idle/charge auto-downclock
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text("Idle / charge auto-downclock", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "Automatically applies EFFICIENCY floor when screen turns off or device is charging. " +
-                    "Restores on screen-on / unplug. Never silent — toggle is always shown here.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(Modifier.width(Spacing.group))
-        Switch(
-            checked = idleChargeTriggerEnabled,
-            onCheckedChange = onIdleChargeToggle,
-        )
-    }
-
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
-    // Per-app efficiency map
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text("Per-app AutoTDP profiles", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "Bind an AutoTDP profile to a specific app — e.g. this emulator → EFFICIENCY, " +
-                    "this 3D game → BALANCED. Applies automatically when that app is in the foreground.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (perAppMapCount > 0) {
+) {
+    ArsenalPanel(accent = AccentBar.Blue, title = "Companion features") {
+        // Idle/charge toggle
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("IDLE / CHARGE DOWNCLOCK", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White, letterSpacing = 0.06.sp)
                 Text(
-                    "$perAppMapCount app${if (perAppMapCount == 1) "" else "s"} mapped",
+                    "Applies EFFICIENCY floor when screen off or charging. Restores on screen-on/unplug.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+            Spacer(Modifier.width(Spacing.group))
+            Box(
+                modifier = Modifier
+                    .background(
+                        if (idleChargeTriggerEnabled) AccentBar.Emerald.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .border(1.dp, if (idleChargeTriggerEnabled) AccentBar.Emerald else Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                    .clickable { onIdleChargeToggle(!idleChargeTriggerEnabled) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (idleChargeTriggerEnabled) "ON" else "OFF",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    color = if (idleChargeTriggerEnabled) AccentBar.Emerald else Color(0xFF888888),
+                    letterSpacing = 0.06.sp,
                 )
             }
         }
-        Spacer(Modifier.width(Spacing.group))
-        OutlinedButton(onClick = onOpenPerApp) { Text("Edit") }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // Per-app map
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                    Text("PER-APP AUTOTDP PROFILES", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White, letterSpacing = 0.06.sp)
+                    if (perAppMapCount > 0) StatusPill(text = "$perAppMapCount", accent = AccentBar.Blue)
+                }
+                Text(
+                    "Bind an AutoTDP profile to a specific app. Applies automatically when that app is in the foreground.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+            Spacer(Modifier.width(Spacing.group))
+            ArsenalButton(
+                label = "Edit",
+                onClick = onOpenPerApp,
+                accent = AccentBar.Blue,
+                style = ArsenalButtonStyle.Secondary,
+            )
+        }
     }
 }
 
-// ─── Per-app efficiency dialog ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Per-app efficiency dialog (unchanged behavior, same logic)
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 private fun PerAppEfficiencyDialog(
@@ -1198,21 +1269,14 @@ private fun PerAppEfficiencyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
                 Text(
-                    "Map a package name to an AutoTDP profile. When that app is in the foreground " +
-                        "and AutoTDP is not manually ON, this profile is automatically applied.",
+                    "Map a package name to an AutoTDP profile. When that app is in the foreground and AutoTDP is not manually ON, this profile is automatically applied.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-
-                // Show current map
                 if (currentMap.isNotEmpty()) {
                     HorizontalDivider()
                     Text("Current mappings:", style = MaterialTheme.typography.labelMedium)
                     currentMap.forEach { (pkg, profile) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(pkg.substringAfterLast('.'), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Text(profile.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
@@ -1222,8 +1286,6 @@ private fun PerAppEfficiencyDialog(
                     }
                     HorizontalDivider()
                 }
-
-                // Add new mapping
                 OutlinedTextField(
                     value = packageInput,
                     onValueChange = { packageInput = it },
@@ -1231,13 +1293,11 @@ private fun PerAppEfficiencyDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-
-                ProfilePicker(
+                ArsenalProfilePicker(
                     selected = selectedProfile,
                     onSelected = { selectedProfile = it },
                     excludeBatteryTarget = true,
                 )
-
                 Button(
                     onClick = {
                         val pkg = packageInput.trim()
@@ -1253,4 +1313,17 @@ private fun PerAppEfficiencyDialog(
         },
         confirmButton = { Button(onClick = onDismiss) { Text("Done") } },
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+private fun estimateSweepMinutes(state: SweepUiState): String {
+    val steps = when (state) {
+        is SweepUiState.Running -> state.totalSteps
+        else -> 8
+    }
+    val totalSeconds = steps * 5
+    return if (totalSeconds < 60) "<1" else "${totalSeconds / 60}"
 }

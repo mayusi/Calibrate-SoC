@@ -30,21 +30,44 @@ data class BenchRun(
      *  the integer CPU score as the headline number. */
     val cpuScore: Long? get() = kernels.cpuIntegerSingle
 
-    /** Weighted composite. CPU (single + multi) accounts for half,
-     *  GPU + memory + AES split the other half. Returns null when no
-     *  kernel ran (e.g. all-failure outcome). */
+    /**
+     * Weighted composite. Fixed-weight formula so cross-flavor scores are
+     * honest: a QUICK run (only cpuIntegerSingle) produces a lower score
+     * than a STANDARD run (all kernels) because the missing kernels
+     * contribute 0 to the numerator while the denominator stays fixed at
+     * the full kernel weight sum (4.6). Do NOT compare QUICK vs STANDARD
+     * scores — they measure different things.
+     *
+     * Kernel weights and scale factors (chosen so typical values land in
+     * the same 1 000–15 000 range):
+     *   cpuIntegerSingle × 1.0   (raw score ~1 000–15 000)
+     *   cpuIntegerMulti  × 1.0   (raw score ~4 000–60 000 — multi inflates naturally)
+     *   cpuFloat         × 1.0   (raw score ~1 000–15 000)
+     *   cpuAes           × 0.5   (raw score ~2 000–30 000, halved to match integer)
+     *   memoryBandwidthMBps × 0.1 (raw ~30 000–80 000 MB/s → 3 000–8 000 in composite)
+     *   gpuFps           × 100.0 (raw FPS 20–120 → 2 000–12 000 in composite)
+     *
+     * Returns null when no kernel ran at all (e.g. FAILED_NATIVE outcome).
+     */
     val overallScore: Long?
         get() {
-            val parts = listOfNotNull(
-                kernels.cpuIntegerSingle?.let { it * 1.0 },
-                kernels.cpuIntegerMulti?.let { it * 1.0 },
-                kernels.cpuFloat?.let { it * 1.0 },
-                kernels.cpuAes?.let { it * 0.5 },
-                kernels.memoryBandwidthMBps?.let { it * 10.0 },
-                kernels.gpuFps?.let { it * 100.0 },
-            )
-            if (parts.isEmpty()) return null
-            return parts.average().toLong()
+            // Fixed weight sum. All six slots always participate in the denominator;
+            // null kernels contribute 0 so the score is always comparable within a flavor.
+            val WEIGHT_TOTAL = 1.0 + 1.0 + 1.0 + 0.5 + 0.1 + 1.0  // = 4.6
+            val weightedSum =
+                (kernels.cpuIntegerSingle?.let { it * 1.0 } ?: 0.0) +
+                (kernels.cpuIntegerMulti?.let  { it * 1.0 } ?: 0.0) +
+                (kernels.cpuFloat?.let         { it * 1.0 } ?: 0.0) +
+                (kernels.cpuAes?.let           { it * 0.5 } ?: 0.0) +
+                (kernels.memoryBandwidthMBps?.let { it * 0.1 } ?: 0.0) +
+                (kernels.gpuFps?.let           { it * 100.0 } ?: 0.0)
+            // Return null only when truly nothing ran.
+            val anyRan =
+                kernels.cpuIntegerSingle != null || kernels.cpuIntegerMulti != null ||
+                kernels.cpuFloat != null || kernels.cpuAes != null ||
+                kernels.memoryBandwidthMBps != null || kernels.gpuFps != null
+            if (!anyRan) return null
+            return (weightedSum / WEIGHT_TOTAL).toLong()
         }
 }
 
