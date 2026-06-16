@@ -669,11 +669,14 @@ class AutoTdpViewModel @Inject constructor(
             val onlineId = Tunables.cpuOnline(0)
             if (!writerRegistry.isLiveWritable(onlineId, report)) return false
         }
-        // Prime-cluster cap: the policy whose top OPP is highest is the one
-        // AutoTDP caps. Same selection the daemon uses.
-        val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }
-        if (bigPolicy != null) {
-            val freqId = Tunables.cpuMaxFreq(bigPolicy.policyId)
+        // HIGH-3: gate on the EXACT node the daemon actuates — cpuMaxFreq(caps.bigPolicyId),
+        // derived from the SAME TdpCaps the engine uses — NOT maxByOrNull{availableFreqsKhz}
+        // (which selects prime policy7 on a 3-cluster AYANEO while the cap is written to the
+        // gold policy3). Kept symmetric with AutoTdpService.liveUnavailableReason so the rung
+        // shown before START agrees with the node the daemon writes after.
+        val caps = io.github.mayusi.calibratesoc.data.autotdp.TdpCaps.from(report)
+        if (report.cpuPolicies.isNotEmpty()) {
+            val freqId = Tunables.cpuMaxFreq(caps.bigPolicyId)
             if (!writerRegistry.isLiveWritable(freqId, report)) return false
         }
         return true

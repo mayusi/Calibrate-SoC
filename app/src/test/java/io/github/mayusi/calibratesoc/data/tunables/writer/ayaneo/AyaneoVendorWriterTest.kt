@@ -16,14 +16,19 @@ import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import android.util.Log
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
 import io.mockk.slot
+import io.mockk.unmockkAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import okio.Path.Companion.toPath
 import okio.fakefilesystem.FakeFileSystem
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -38,6 +43,24 @@ import org.junit.Test
  * readback uses an Okio FakeFileSystem so the verify path is exercised deterministically.
  */
 class AyaneoVendorWriterTest {
+
+    @Before
+    fun stubLog() {
+        // android.util.Log is unavailable in the pure-JVM unit-test runtime. The UNVERIFIED
+        // and READBACK-MISMATCH paths emit Log.w, so stub the static here so these tests are
+        // self-contained rather than free-riding on another class's leaked Log mock (which
+        // makes them fail when run in isolation / under test sharding).
+        mockkStatic(Log::class)
+        every { Log.d(any<String>(), any<String>()) } returns 0
+        every { Log.i(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.e(any<String>(), any<String>()) } returns 0
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
 
     // ── Fixtures ───────────────────────────────────────────────────────────────
 

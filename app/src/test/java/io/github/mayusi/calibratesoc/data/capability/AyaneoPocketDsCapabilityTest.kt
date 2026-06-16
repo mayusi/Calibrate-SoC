@@ -521,4 +521,68 @@ class AyaneoPocketDsCapabilityTest {
         assertThat(writer).isInstanceOf(NoopWriter::class.java)
         assertThat(registry.isLiveWritable(Tunables.cpuMaxFreq(7), report)).isFalse()
     }
+
+    // ── HIGH-3: the LIVE gate must check the node the daemon ACTUATES ───────────
+    // ── (cpuMaxFreq(caps.bigPolicyId) = gold policy3), NOT maxByOrNull (policy7). ─
+
+    @Test
+    fun `the gate node is cpuMaxFreq(caps_bigPolicyId) which DIFFERS from the maxByOrNull policy`() {
+        val report = pocketDsReportBinderLive()
+        val caps = TdpCaps.from(report)
+
+        // The daemon writes the GOLD policy cap (caps.bigPolicyId) via TdpStateTransition.delta…
+        assertThat(caps.bigPolicyId).isEqualTo(3)
+        // …but the OLD gate selected the PRIME policy via maxByOrNull{availableFreqsKhz.max}.
+        val oldGatePolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }!!.policyId
+        assertThat(oldGatePolicy).isEqualTo(7)
+        // They DIFFER — so a gate keyed on maxByOrNull would validate a DIFFERENT node than
+        // the actuator writes. The fix gates on cpuMaxFreq(caps.bigPolicyId) = policy3.
+        assertThat(caps.bigPolicyId).isNotEqualTo(oldGatePolicy)
+    }
+
+    @Test
+    fun `gate reports LIVE when ONLY the gold policy3 cap is writable (not policy7)`() {
+        // Build a Shizuku-tier report where the per-node probe confirmed policy3's
+        // scaling_max_freq is writable but policy7's is NOT. The fixed gate checks
+        // cpuMaxFreq(caps.bigPolicyId)=policy3 → LIVE. The OLD gate checked policy7 → it
+        // would have wrongly reported NOT-live (or validated a node the daemon never writes).
+        val report = pocketDsReportWithShizuku()
+        val caps = TdpCaps.from(report)
+        assertThat(caps.bigPolicyId).isEqualTo(3)
+
+        val policy3Cap = Tunables.cpuMaxFreq(3).target
+        val nodeCache = mockk<ShizukuNodeCache>().also {
+            every { it.isCachedWritable(any()) } returns false
+            every { it.isCachedWritable(policy3Cap) } returns true // ONLY policy3 probed-writable
+        }
+        val registry = makeRegistry(nodeCache = nodeCache)
+
+        // The node the gate now checks (the actuated gold-policy cap) IS live…
+        assertThat(registry.isLiveWritable(Tunables.cpuMaxFreq(caps.bigPolicyId), report)).isTrue()
+        // …while the prime policy7 cap the OLD gate checked is NOT live — proving the two
+        // can diverge and that checking the wrong one would mis-gate.
+        assertThat(registry.isLiveWritable(Tunables.cpuMaxFreq(7), report)).isFalse()
+    }
+
+    @Test
+    fun `gate reports NOT-live when the gold policy3 cap is NOT writable even if policy7 is`() {
+        // The inverse asymmetry: policy7 (old gate node) writable, policy3 (actuated node)
+        // NOT. The fixed gate must report NOT-live because the daemon would self-stop on the
+        // policy3 cap write it can't actually perform. The OLD gate (policy7) would have
+        // wrongly shown LIVE and then the daemon would fail at runtime — the exact drift trap.
+        val report = pocketDsReportWithShizuku()
+        val caps = TdpCaps.from(report)
+
+        val policy7Cap = Tunables.cpuMaxFreq(7).target
+        val nodeCache = mockk<ShizukuNodeCache>().also {
+            every { it.isCachedWritable(any()) } returns false
+            every { it.isCachedWritable(policy7Cap) } returns true // ONLY policy7 probed-writable
+        }
+        val registry = makeRegistry(nodeCache = nodeCache)
+
+        // Fixed gate node (gold policy3) is NOT live → the gate honestly says NOT-live.
+        assertThat(registry.isLiveWritable(Tunables.cpuMaxFreq(caps.bigPolicyId), report)).isFalse()
+        // The OLD gate node (policy7) WOULD have reported live — the drift the fix removes.
+        assertThat(registry.isLiveWritable(Tunables.cpuMaxFreq(7), report)).isTrue()
+    }
 }

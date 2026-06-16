@@ -189,11 +189,16 @@ fun FanCurveScreen(
 
         // ── 7. Warnings + sub-floor opt-in ──────────────────────────────────
         if (validation is FanCurveValidation.Invalid) {
+            val reason = (validation as FanCurveValidation.Invalid).reason
+            // A cooling-floor failure is a thermal-safety stop, not a generic
+            // structural error — title it so the user understands the device
+            // would run hot, and that this CANNOT be overridden.
+            val isCoolingFloor = reason.startsWith("This curve won't cool enough")
             item {
                 AlertCard(
                     type = AlertType.ERROR,
-                    title = "Curve is not valid",
-                    message = (validation as FanCurveValidation.Invalid).reason,
+                    title = if (isCoolingFloor) "Won't cool enough — can't apply" else "Curve is not valid",
+                    message = reason,
                 )
             }
         }
@@ -233,8 +238,9 @@ fun FanCurveScreen(
                 )
                 ToggleRow(
                     title = "Re-apply when the app opens",
-                    subtitle = "Re-asserts your curve on app launch (it survives reboots " +
-                        "only while the device keeps it; this guarantees it).",
+                    subtitle = "Each time you open Calibrate, it re-asserts your saved curve " +
+                        "(verified, the same as Apply). The device may drop the curve across a " +
+                        "reboot, so this re-applies it next time you launch the app.",
                     checked = applyOnOpen,
                     onChange = viewModel::setApplyOnOpen,
                 )
@@ -442,8 +448,9 @@ private fun ApplyStatusCard(result: ApplyResult) {
             if (result.liveConfirmed) AlertType.INFO else AlertType.WARNING,
             if (result.liveConfirmed) "Applied & verified" else "Applied (live effect unconfirmed)",
             if (result.liveConfirmed) {
-                "The curve is in place and the fan node confirms it " +
-                    "(duty ${result.fanDuty}, period ${result.fanPeriod})."
+                "The curve is in place and the fan node is active " +
+                    "(duty ${result.fanDuty}, period ${result.fanPeriod} — reflects the " +
+                    "current temperature)."
             } else {
                 "The curve was written to config.xml and Smart mode was set, but the " +
                     "live fan node couldn't be read to confirm the effect."

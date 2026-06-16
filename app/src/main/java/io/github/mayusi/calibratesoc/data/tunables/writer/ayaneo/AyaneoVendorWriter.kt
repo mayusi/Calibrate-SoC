@@ -188,8 +188,11 @@ class AyaneoVendorWriter @Inject constructor(
         if (readback == null) {
             // Cannot confirm — accept-but-warn so AutoTDP proceeds, but never claim the
             // node moved. (Same posture as PServerWriter's readback-failed branch.)
+            // HIGH-1: flag verified=false so the journal-clear in TunableWriter.revertAll
+            // knows this revert was NOT confirmed and keeps BootRevertReceiver as a backstop
+            // for the (CPU-cap) node we could not read back.
             Log.w(TAG, "write(): UNVERIFIED — ${id.target} not app-readable; binder accepted '$command'")
-            return WriteResult.Success(id, previousValue = previous, newValue = value)
+            return WriteResult.Success(id, previousValue = previous, newValue = value, verified = false)
         }
 
         val matched = when (verifyKind) {

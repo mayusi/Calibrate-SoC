@@ -128,16 +128,6 @@ class FanCurveViewModel @Inject constructor(
         commitCustom(pts)
     }
 
-    /** Update the temperature of a NON-sentinel point. The sentinel point's temp
-     *  is immutable (always INT_MAX). Clamped to a sane 0..120 range. */
-    fun setPointTemp(index: Int, tempC: Int) {
-        val pts = _curve.value.points.toMutableList()
-        if (index !in pts.indices) return
-        if (pts[index].isSentinel) return
-        pts[index] = pts[index].copy(tempC = tempC.coerceIn(0, 120))
-        commitCustom(pts)
-    }
-
     private fun commitCustom(points: List<FanCurvePoint>) {
         _curve.value = FanCurve(points)
         _selectedPresetId.value = null

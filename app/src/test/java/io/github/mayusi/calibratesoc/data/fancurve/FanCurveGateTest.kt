@@ -75,12 +75,47 @@ class FanCurveGateTest {
     }
 
     @Test
-    fun `Odin detected via the settings package even when the handheld key is null`() {
+    fun `settings package present WITH an AYN key qualifies (corroboration path)`() {
+        // The Odin settings package is only accepted as corroboration when the
+        // device ALSO reports an AYN handheld key — never package-presence alone.
+        val result = FanCurveGate.resolve(
+            report(handheldKey = "ayn_loki", pserverLive = true),
+            odinSettingsInstalled = true,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Available::class.java)
+    }
+
+    @Test
+    fun `M1 - settings package on a NON-AYN device does NOT qualify`() {
+        // A sideloaded com.odin.settings on, say, a Retroid must NOT light up the
+        // feature (it would write hardcoded Odin-3 paths to the wrong device).
+        val result = FanCurveGate.resolve(
+            report(handheldKey = "retroid_pocket6", pserverLive = true),
+            odinSettingsInstalled = true,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+        assertThat((result as FanCurveAvailability.Unavailable).reason).contains("Odin")
+    }
+
+    @Test
+    fun `M1 - settings package with a null handheld key does NOT qualify`() {
+        // Package-presence alone (no device key at all) must not qualify.
         val result = FanCurveGate.resolve(
             report(handheldKey = null, pserverLive = true),
             odinSettingsInstalled = true,
         )
-        assertThat(result).isInstanceOf(FanCurveAvailability.Available::class.java)
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+    }
+
+    @Test
+    fun `M1 - a non-Odin AYN model without the settings package is Unavailable`() {
+        // startsWith("ayn") no longer qualifies on its own — a recognized Odin
+        // key (or the corroboration path) is required.
+        val result = FanCurveGate.resolve(
+            report(handheldKey = "ayn_odin_lite", pserverLive = true),
+            odinSettingsInstalled = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
     }
 
     @Test

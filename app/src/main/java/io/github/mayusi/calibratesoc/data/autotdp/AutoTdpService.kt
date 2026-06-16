@@ -72,6 +72,14 @@ class AutoTdpService : Service() {
     @Inject lateinit var sampler: AutoTdpSampler
     @Inject lateinit var writerRegistry: io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
     @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+    /**
+     * CRITICAL-1: the AYANEO vendor-binder availability cache must be busted right before
+     * each `capabilityProbe.refresh()` — exactly as [pServerWriter]'s transactable cache is
+     * — so a stale `true` from before a gamewindow force-stop/restart can't make the LIVE
+     * gate claim live on a binder we can no longer drive. (It's a @Singleton; injected the
+     * same way as PServerWriter.)
+     */
+    @Inject lateinit var ayaneoBinderClient: io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient
     @Inject lateinit var deviceAdapterRegistry: io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
 
     /**
@@ -208,6 +216,11 @@ class AutoTdpService : Service() {
         // so we never evaluate the LIVE gate against a stale false cached from an
         // earlier binder blip. The cache is cheap to rebuild (one `true` transact).
         pServerWriter.invalidateTransactableCache()
+        // CRITICAL-1: bust the AYANEO vendor-binder availability cache the SAME way, so
+        // the refresh re-probes the binder (one bind round-trip) instead of trusting a
+        // stale `true` from before a gamewindow force-stop/restart. Mirrors the PServer
+        // bust exactly — without it the LIVE gate could claim live on a dead binder.
+        ayaneoBinderClient.invalidateAvailabilityCache()
 
         // Always refresh rather than using the cached value so that
         // pserverSysfsLive / sysfsDirectlyWritable reflect the CURRENT
@@ -229,6 +242,10 @@ class AutoTdpService : Service() {
             Log.w(TAG, "LIVE not available (PServer-related), retrying in 300ms: $liveReason")
             delay(300)
             pServerWriter.invalidateTransactableCache()
+            // CRITICAL-1: bust the AYANEO cache on the retry too — a transient binder blip
+            // (gamewindow restarting) often clears within hundreds of ms, and the retry
+            // probe must re-bind rather than echo the stale first-probe result.
+            ayaneoBinderClient.invalidateAvailabilityCache()
             report = capabilityProbe.refresh()
             liveReason = liveUnavailableReason(report)
         }
@@ -272,6 +289,13 @@ class AutoTdpService : Service() {
         sessionReport = report
         val caps = TdpCaps.from(report)
         val gpuRootPath = report.gpu?.rootPath
+        // RUNTIME-GAP FIX: the CORE LIVE NODE — the big-cluster CAP the daemon actually
+        // writes (cpuMaxFreq(caps.bigPolicyId), via TdpStateTransition.delta). A
+        // CapabilityDenied on THIS node is a total loss of the live path → fatal; a
+        // CapabilityDenied on any OTHER (non-bindable) lever is a single-lever denial we
+        // skip so the daemon keeps running on the cap path. Derived from the same caps the
+        // engine uses, so it tracks the actuated node exactly.
+        val capNodeTarget = Tunables.cpuMaxFreq(caps.bigPolicyId).target
 
         // Resolve the vendor fan_mode Settings.System key from the device adapter
         // (AYN/Retroid expose it as `fan_mode`). Null when this device has no
@@ -401,14 +425,34 @@ class AutoTdpService : Service() {
                                 // Good — continue to next op.
                             }
                             is WriteResult.CapabilityDenied -> {
-                                // CapabilityDenied means WriterRegistry resolved to NoopWriter —
-                                // no tier can write this node. This is genuinely unrecoverable
-                                // for the current capability state: stop the daemon so the user
-                                // isn't left with a "Running" notification that does nothing.
-                                val failure = "No write tier available for ${op.description}: ${result.reason}"
-                                Log.e(TAG, failure)
-                                stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
-                                return@collect
+                                // RUNTIME-GAP FIX: a CapabilityDenied is FATAL only when it
+                                // denies the CORE LIVE NODE — the big-cluster CAP the daemon's
+                                // whole live path rides (cpuMaxFreq(caps.bigPolicyId)). Denying
+                                // THAT is a total loss of write: stop honestly so the user isn't
+                                // left with a "Running" notification that does nothing.
+                                //
+                                // For ANY OTHER lever (min-freq floor, core-park cpu/online,
+                                // GPU pwrlevel, devfreq-min, uclamp), CapabilityDenied means
+                                // "this single lever isn't writable on THIS tier" — not a total
+                                // loss. On a binder-only tier like AYANEO the tighten ladder
+                                // escalates past the CAP floor to these NON-bindable levers;
+                                // treating that as fatal would self-terminate the daemon
+                                // mid-session. Skip the op and KEEP RUNNING (same posture as
+                                // Rejected): the engine rides the cap lever, which is live.
+                                if (op.id.target == capNodeTarget) {
+                                    val failure = "No write tier available for ${op.description}: ${result.reason}"
+                                    Log.e(TAG, failure)
+                                    stopDaemon(AutoTdpStatus.WRITE_DENIED, writeFailure = failure)
+                                    return@collect
+                                } else {
+                                    Log.w(
+                                        TAG,
+                                        "Non-cap lever not writable on this tier (skipping, daemon keeps running): " +
+                                            "${op.description}: ${result.reason}",
+                                    )
+                                    allOpsSucceeded = false
+                                    // Do not return@collect — skip this lever, continue the loop.
+                                }
                             }
                             is WriteResult.Rejected -> {
                                 // Still rejected after all retries — transient became persistent
@@ -692,11 +736,17 @@ class AutoTdpService : Service() {
         // is accessible. If it's not, parking any other core will fail too.
         //
         // EXCEPTION — AYANEO vendor-binder live path: the binder drives the CPU cluster
-        // CAP (scaling_max_freq), governor, GPU max, and fan, but has NO command for core
-        // parking (cpu/online). That is fine: the engine's PARK lever skips itself when no
-        // core can be parked and walks to the CAP lever, so AutoTDP runs LIVE purely on the
-        // cap path. So on a binder-live AYANEO we do NOT require cpu/online — the cap check
-        // below is the live gate. (The hard cap floor + revert-on-exit still apply equally.)
+        // CAP (scaling_max_freq), governor, GPU max, and fan, but has NO command for the
+        // other levers (core-park cpu/online, min-freq floor, GPU pwrlevel, devfreq-min,
+        // uclamp). The CAP is the live gate below; cpu/online is NOT required here.
+        //
+        // The CAP is the daemon's PRIMARY live lever, but not its ONLY emitted op: when the
+        // tighten ladder bottoms the cap at the 40% floor and keeps tightening, the engine
+        // does emit non-bindable levers (min-freq floor / park / GPU floor). Those come back
+        // CapabilityDenied — which the runDaemon op-loop now SKIPS (keeps running) rather
+        // than treating as fatal; only a CapabilityDenied on the CAP node itself stops the
+        // daemon. So AutoTDP stays alive on the cap path even under sustained tightening.
+        // (The hard cap floor + revert-on-exit still apply equally.)
         if (!report.ayaneoBinderLive) {
             val onlineId = Tunables.cpuOnline(0)
             if (!writerRegistry.isLiveWritable(onlineId, report)) {
@@ -704,10 +754,14 @@ class AutoTdpService : Service() {
                 return "cpu online/offline not writable — ${why ?: "writer would deny"}"
             }
         }
-        // Check the first policy's scaling_max_freq.
-        val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }
-        if (bigPolicy != null) {
-            val freqId = Tunables.cpuMaxFreq(bigPolicy.policyId)
+        // HIGH-3: gate on the EXACT node the daemon actuates — cpuMaxFreq(caps.bigPolicyId),
+        // the gold/big policy [TdpCaps.from] selects and [TdpStateTransition.delta] writes —
+        // NOT maxByOrNull{availableFreqsKhz} (which picks the prime policy7 on a 3-cluster
+        // AYANEO, a DIFFERENT node than the cap write to policy3). Deriving from the SAME
+        // TdpCaps the engine uses means the gate and the actuator can never drift.
+        val caps = TdpCaps.from(report)
+        if (report.cpuPolicies.isNotEmpty()) {
+            val freqId = Tunables.cpuMaxFreq(caps.bigPolicyId)
             if (!writerRegistry.isLiveWritable(freqId, report)) {
                 val why = Tunables.whyWriteDenied(freqId, report)
                 return "scaling_max_freq not writable — ${why ?: "writer would deny"}"

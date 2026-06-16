@@ -7,10 +7,15 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
  * honest reason. Pure decision so it is unit-testable without Android.
  *
  * Two hard requirements (BOTH must hold):
- *   1. The device is an AYN Odin (the curve storage + reload procedure is
- *      Odin-specific). We detect this via the existing handheld key
- *      (`ayn_odin3` / `ayn_odin2` / any `ayn*`) — the same signal the rest of
- *      the app uses — falling back to the presence of `com.odin.settings`.
+ *   1. The device is a SPECIFIC AYN Odin model whose fan-curve storage + reload
+ *      procedure we have verified (`ayn_odin3` / `ayn_odin2`). The apply path
+ *      writes HARDCODED Odin-3 paths (`com.odin.settings` config.xml +
+ *      the `/sys/class/gpio5_pwm2/` nodes), so we must NOT over-match: a loose
+ *      `startsWith("ayn")` would let other AYN models (Loki, Odin Lite, future
+ *      SKUs) through, and a sideloaded `com.odin.settings` alone could qualify a
+ *      non-Odin device. We therefore require a recognized Odin key; the settings
+ *      package is only accepted as corroboration on a device that ALSO reports an
+ *      AYN handheld key (never package-presence by itself).
  *   2. A privileged write path is live: AYN PServer is whitelisted
  *      ([CapabilityReport.pserverSysfsLive]). Editing `com.odin.settings`'s
  *      private prefs and killing its process both require root, which on a
@@ -69,10 +74,27 @@ object FanCurveGate {
         return FanCurveAvailability.Available(FanCurveVendor.ODIN)
     }
 
-    /** Odin detection: handheld key OR the Odin settings package being present. */
+    /**
+     * The specific AYN Odin device keys whose fan-curve schema + node paths this
+     * feature targets. Verified live on the Odin 3; the Odin 2 shares the same
+     * `com.odin.settings` config.xml + `fan_mode` mechanism. Deliberately an
+     * allowlist, NOT a `startsWith("ayn")` prefix — other AYN SKUs may store the
+     * curve differently or lack the gpio5_pwm2 node.
+     */
+    private val ODIN_DEVICE_KEYS = setOf("ayn_odin3", "ayn_odin2")
+
+    /**
+     * Odin detection (tightened — see class doc, bug M1). A recognized Odin
+     * device key is required; the Odin settings package being installed only
+     * counts when the device ALSO reports an AYN handheld key (so a sideloaded
+     * `com.odin.settings` on a non-AYN device can never qualify, and AYN models
+     * we don't target are excluded).
+     */
     internal fun isOdin(report: CapabilityReport, odinSettingsInstalled: Boolean): Boolean {
         val key = report.device.knownHandheldKey.orEmpty()
-        val keyMatch = key == "ayn_odin3" || key == "ayn_odin2" || key.startsWith("ayn")
-        return keyMatch || odinSettingsInstalled
+        if (key in ODIN_DEVICE_KEYS) return true
+        // Corroboration path: the Odin settings package is present AND the device
+        // is at least an AYN handheld. Never package-presence alone.
+        return odinSettingsInstalled && key.startsWith("ayn")
     }
 }

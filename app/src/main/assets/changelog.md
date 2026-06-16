@@ -1,3 +1,42 @@
+## [0.1.32-alpha] — 2026-06-16
+
+A correctness & safety pass over the new AYANEO and fan-curve work.
+
+### Fixed
+- **AYANEO: AutoTDP can no longer claim to be running when it isn't.** If AYANEO's system overlay restarted between opening the app and starting AutoTDP, the app could show "live" while silently doing nothing — now it re-checks each time.
+- **AYANEO: AutoTDP no longer stops itself mid-session** if it reaches a control it can't use on this device — it just skips that step and keeps tuning.
+- **AYANEO: stopping AutoTDP always restores stock**, even when a clock change couldn't be confirmed — the boot-time safety restore stays armed.
+- **Fan curves can no longer let your device overheat.** A custom curve must keep meaningful fan speed at high temps (≥45% by 95°C, ≥60% by 105°C) — weak curves are now blocked, not just warned about.
+- **The "re-apply on app open" fan-curve toggle now actually works** (it previously did nothing).
+- Tightened where the fan-curve feature is offered (Odin only) and made the "applied" confirmation wording honest.
+
+## [0.1.31-alpha] — 2026-06-16
+
+### Added
+- **AYANEO handhelds: full live tuning with zero setup** — no root, no Shizuku, no scripts. Smart AutoTDP just works on AYANEO (Pocket DS and siblings).
+- **Odin 3: custom Smart fan curves** — presets (Quiet / Balanced / Cool / Max Cooling) or your own temp→fan% curve, with live verification.
+- First-class AYANEO Pocket DS recognition.
+
+## [0.1.30-alpha] — 2026-06-16
+
+### Fixed
+- **Critical: Smart AutoTDP can no longer floor your CPU mid-game or leave clocks stuck.** A translation-layer game (e.g. via GameNative) combined with a dropped sensor reading could drive the CPU to its lowest frequency; a hard floor + always-restore-on-stop + signal-loss safety now make that impossible.
+
+### Added
+- Smart AutoTDP now reaches live tuning on any handheld with Shizuku (not just AYN/Retroid).
+
+## [0.1.29-alpha] — 2026-06-16
+
+### Added
+- **Smart AutoTDP** — a goal-seeking governor (5 modes incl. AUTO) that hunts the best real-time balance of FPS, temps, and battery. Plus Game Boost, Predictive Throttle Guard, per-app tune bundles, and a background app reaper.
+- "Presets" are now called **Tunes**.
+
+## [0.1.22-alpha] — 2026-06-15
+
+### Fixed
+- AutoTDP is now load- and thermal-aware (no more false throttling), and reliably starts.
+- New horizontal HUD; AutoTDP is the single clock control (manual stepper removed).
+
 ## [0.1.16-alpha] — 2026-06-14
 
 A correctness & safety pass — fixes found by a deep audit of the newer features.

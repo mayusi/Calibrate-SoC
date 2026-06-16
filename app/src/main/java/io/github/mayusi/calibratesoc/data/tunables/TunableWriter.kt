@@ -135,6 +135,13 @@ class TunableWriter @Inject constructor(
         val journal = snapshotStore.read()
         var ok = 0
         var failed = 0
+        // HIGH-1: track whether any CRITICAL node (a CPU cap, scaling_max_freq) was
+        // reverted ACCEPTED-but-UNVERIFIED — i.e. the writer accepted the stock-restoring
+        // command but could not read the node back to confirm it landed (AYANEO EACCES CPU
+        // path). When that happens we must NOT clear the journal even on `failed == 0`, so
+        // BootRevertReceiver stays armed as a backstop: an unconfirmed revert that silently
+        // didn't land must not leave the device capped with nothing to restore.
+        var unverifiedCriticalRevert = false
         for (entry in journal.entries.reversed()) {
             val writer = registry.writerFor(entry.id, report)
             val prev = entry.previousValue
@@ -143,8 +150,17 @@ class TunableWriter @Inject constructor(
                 ok++
                 continue
             }
-            when (writer.write(entry.id, prev)) {
-                is WriteResult.Success -> ok++
+            when (val result = writer.write(entry.id, prev)) {
+                is WriteResult.Success -> {
+                    ok++
+                    // HIGH-1: an unverified revert of a critical (CPU-cap) node is NOT a
+                    // confirmed restore. Keep the journal so the boot-revert backstop
+                    // survives. The existing verified writers (Root/Shizuku/PServer, and
+                    // verified AYANEO readbacks) report verified=true → no effect.
+                    if (!result.verified && isCriticalNode(entry.id)) {
+                        unverifiedCriticalRevert = true
+                    }
+                }
                 // CapabilityDenied means the current privilege tier cannot write
                 // this tunable at all (e.g. rebooted from ROOT → VENDOR_SETTINGS
                 // tier). The sysfs value is unchanged — nothing was reverted but
@@ -155,9 +171,35 @@ class TunableWriter @Inject constructor(
                 else -> failed++
             }
         }
-        if (failed == 0) snapshotStore.clear()
-        return RevertSummary(ok = ok, failed = failed, totalEntries = journal.entries.size)
+        // Clear the journal only on a FULLY-confirmed revert: no hard failures AND no
+        // unverified critical-node revert. An unverified critical revert keeps the journal
+        // so BootRevertReceiver can retry the restore on next boot (HIGH-1).
+        if (failed == 0 && !unverifiedCriticalRevert) snapshotStore.clear()
+        return RevertSummary(
+            ok = ok,
+            failed = failed,
+            totalEntries = journal.entries.size,
+            journalCleared = failed == 0 && !unverifiedCriticalRevert,
+        )
     }
 
-    data class RevertSummary(val ok: Int, val failed: Int, val totalEntries: Int)
+    /**
+     * A CRITICAL node is one where leaving the device in a non-stock state is materially
+     * harmful if the revert silently didn't land — today the CPU big-cluster CAP
+     * (scaling_max_freq). HIGH-1 keeps the boot-revert backstop armed for these when an
+     * AYANEO EACCES revert returns Success-unverified. GPU/fan revert-misses are benign
+     * (they re-verify on readback, and a stuck GPU max/fan is not a device-pinning hazard
+     * like a CPU cap), so they are not gated here.
+     */
+    private fun isCriticalNode(id: TunableId): Boolean =
+        id.kind == TunableKind.SYSFS && id.target.endsWith("/scaling_max_freq")
+
+    data class RevertSummary(
+        val ok: Int,
+        val failed: Int,
+        val totalEntries: Int,
+        /** HIGH-1: false when the journal was deliberately PRESERVED because a critical
+         *  node was reverted accepted-but-unverified (boot-revert backstop kept). */
+        val journalCleared: Boolean = true,
+    )
 }

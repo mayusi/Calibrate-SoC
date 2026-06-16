@@ -12,8 +12,10 @@ import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
+import io.github.mayusi.calibratesoc.data.fancurve.FanCurveController
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient
 import io.github.mayusi.calibratesoc.ui.CalibrateSocApp
 import io.github.mayusi.calibratesoc.ui.setup.OnboardingScreen
 import io.github.mayusi.calibratesoc.ui.theme.CalibrateSocTheme
@@ -36,7 +38,9 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var refreshRateController: RefreshRateController
     @Inject lateinit var userPrefs: UserPrefs
     @Inject lateinit var pServerWriter: PServerWriter
+    @Inject lateinit var ayaneoBinderClient: AyaneoBinderClient
     @Inject lateinit var capabilityProbe: CapabilityProbe
+    @Inject lateinit var fanCurveController: FanCurveController
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +64,14 @@ class MainActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch { applyPreferredRefreshRate() }
+        // H2: honour the user's "Re-apply when the app opens" fan-curve toggle.
+        // Runs ONCE per cold launch (the literal "app opens" moment, not every
+        // foreground resume — re-asserting on each resume would needlessly bounce
+        // the live fan). The controller self-gates: it no-ops unless the toggle is
+        // on AND a curve is saved AND the device is an Odin with a privileged
+        // write path, and it inherits applyCurve's verification + honesty (the
+        // outcome is logged; it never claims a re-apply it didn't make).
+        lifecycleScope.launch { reapplyFanCurveOnOpen() }
     }
 
     override fun onResume() {
@@ -72,7 +84,28 @@ class MainActivity : ComponentActivity() {
         // transact("true") at most; no-op on non-AYN devices (binder() returns null).
         lifecycleScope.launch {
             pServerWriter.invalidateTransactableCache()
+            // CRITICAL-1: bust the AYANEO vendor-binder availability cache on resume too,
+            // mirroring the PServer bust, so returning to the app after gamewindow was
+            // force-stopped/restarted re-probes the binder instead of trusting a stale
+            // `true`. Cheap: a package-presence short-circuit on non-AYANEO devices.
+            ayaneoBinderClient.invalidateAvailabilityCache()
             capabilityProbe.refresh()
+        }
+    }
+
+    /**
+     * H2: re-assert the saved Odin fan curve on app open when the user enabled
+     * the "Re-apply when the app opens" toggle. Delegates to
+     * [FanCurveController.maybeReapplyOnOpen], which returns null when nothing
+     * was attempted (toggle off / no saved curve / feature unavailable) and an
+     * honest [io.github.mayusi.calibratesoc.data.fancurve.ApplyResult] otherwise.
+     * We log the outcome so a failed re-apply is never silently treated as
+     * success.
+     */
+    private suspend fun reapplyFanCurveOnOpen() {
+        val result = runCatching { fanCurveController.maybeReapplyOnOpen() }.getOrNull()
+        if (result != null) {
+            android.util.Log.i("CalibrateSoC-FanCurve", "on-open re-apply result: $result")
         }
     }
 

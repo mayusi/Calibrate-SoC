@@ -37,12 +37,23 @@ data class FanCurvePoint(
  *  - Every [FanCurvePoint.dutyPct] is in 0..100.
  *  - No NON-final point may use the sentinel temperature.
  *
+ * ## Hard thermal floor (enforced by [validate] — NOT opt-out-able)
+ *  - The curve MUST deliver enough cooling in the hot band. At and above
+ *    [HOT_ZONE_TEMP_C] the effective duty MUST be >= [MIN_HOT_DUTY_PCT], and
+ *    at and above [CRITICAL_ZONE_TEMP_C] it MUST be >= [MIN_CRITICAL_DUTY_PCT].
+ *    "Effective duty" includes the sentinel/ceiling that governs everything
+ *    above the last real point (see [hotZoneDuty] / [bandMinDuty]). A curve
+ *    that pins the fan low in the hot zone can let the device cook, so this is
+ *    a HARD validation failure — there is deliberately no opt-in to bypass it.
+ *
  * ## Recommendations (warnings, NOT hard errors)
  *  - Duty should be non-decreasing as temperature rises (a curve that ramps
  *    DOWN as it heats up is almost always a mistake). Surfaced via [warnings].
- *  - Duty below [SAFE_MIN_DUTY_PCT] (20%) is the documented sub-floor the
- *    stock UI hides; the backend accepts it but it is risky. Surfaced via
- *    [warnings] and gated behind an explicit opt-in in the repository.
+ *  - Duty below [SAFE_MIN_DUTY_PCT] (20%) in the LOW temperature band is the
+ *    documented sub-floor the stock UI hides; the backend accepts it but it is
+ *    risky. Surfaced via [warnings] and gated behind an explicit opt-in in the
+ *    repository. (This opt-in covers the LOW band only — the hot-zone floor
+ *    above is non-negotiable and cannot be opted out of.)
  *
  * The model is vendor-neutral on purpose: a future non-Odin adapter can reuse
  * [FanCurve] / [FanCurvePoint] and supply its own serializer + write path. Only
@@ -110,6 +121,31 @@ data class FanCurve(
             }
         }
 
+        // ── HARD thermal floor (NOT opt-out-able) ──────────────────────────
+        // This controls device cooling, so a curve that doesn't cool enough in
+        // the hot band is REJECTED outright — never merely warned. We check the
+        // MINIMUM effective duty across each band, which includes the
+        // sentinel/ceiling that governs everything above the last real point
+        // (so a "collapse to a low sentinel" curve cannot slip through).
+        val hotMin = bandMinDuty(HOT_ZONE_TEMP_C)
+        if (hotMin != null && hotMin < MIN_HOT_DUTY_PCT) {
+            return FanCurveValidation.Invalid(
+                "This curve won't cool enough at high temperatures: it runs the fan at " +
+                    "only $hotMin% somewhere at or above $HOT_ZONE_TEMP_C°C, below the " +
+                    "$MIN_HOT_DUTY_PCT% safety floor for the hot zone. Raise the duty in " +
+                    "the hot zone (including the catch-all ceiling point) before applying.",
+            )
+        }
+        val criticalMin = bandMinDuty(CRITICAL_ZONE_TEMP_C)
+        if (criticalMin != null && criticalMin < MIN_CRITICAL_DUTY_PCT) {
+            return FanCurveValidation.Invalid(
+                "This curve won't cool enough at critical temperatures: it runs the fan " +
+                    "at only $criticalMin% somewhere at or above $CRITICAL_ZONE_TEMP_C°C, " +
+                    "below the $MIN_CRITICAL_DUTY_PCT% safety floor. Raise the duty at the " +
+                    "top of the curve (including the catch-all ceiling point) before applying.",
+            )
+        }
+
         return FanCurveValidation.Valid
     }
 
@@ -117,14 +153,19 @@ data class FanCurve(
     val isValid: Boolean get() = validate() is FanCurveValidation.Valid
 
     /**
-     * Non-blocking advisories that do NOT make the curve invalid but should be
-     * surfaced to the user. Empty when the curve is clean.
+     * Non-blocking advisories that should be surfaced to the user. Empty when
+     * the curve is clean.
      *
      *  - A duty drop as temperature rises (non-monotonic duty).
      *  - Any non-sentinel point below the documented [SAFE_MIN_DUTY_PCT] floor.
-     *  - The curve never reaching a strong duty by the hot zone (runaway risk):
-     *    the highest real (non-sentinel) point's duty is below
-     *    [MIN_HOT_DUTY_PCT] at-or-above [HOT_ZONE_TEMP_C].
+     *  - The curve never reaching a strong duty in the hot zone (runaway risk):
+     *    the minimum effective duty across the >= [HOT_ZONE_TEMP_C] band (incl.
+     *    the sentinel) is below [MIN_HOT_DUTY_PCT].
+     *
+     * NOTE: the hot-zone shortfall is ALSO a HARD [validate] failure now, so a
+     * curve carrying [FanCurveWarning.WeakHotZone] is never [FanCurveValidation.Valid].
+     * The warning is retained so the UI can explain WHY an in-progress edit is
+     * being rejected (warnings render even while the curve is invalid).
      */
     fun warnings(): List<FanCurveWarning> {
         val out = mutableListOf<FanCurveWarning>()
@@ -166,20 +207,40 @@ data class FanCurve(
     }
 
     /**
-     * The duty the curve delivers in the hot zone (>= [HOT_ZONE_TEMP_C]).
+     * The WORST (minimum) duty the curve delivers anywhere in the hot zone
+     * (every temperature >= [HOT_ZONE_TEMP_C], up to INT_MAX). This is the
+     * number that matters for runaway-cooling safety, so it must reflect the
+     * sentinel/ceiling duty too: a curve like [(0,80),(90,80),(MAX,20)] runs at
+     * the sentinel's 20% for everything above 90°C, so its hot-zone duty is 20%,
+     * NOT the 80% of the last real point below the hot zone.
      *
-     * Because the controller interpolates/steps between points, the duty that
-     * actually applies at [HOT_ZONE_TEMP_C] is the duty of the LAST point whose
-     * temperature is <= [HOT_ZONE_TEMP_C] — or, if all real points are below it,
-     * the sentinel/ceiling duty. Returns null only for a degenerate empty curve.
+     * Returns null only for a degenerate empty curve.
      */
-    fun hotZoneDuty(): Int? {
+    fun hotZoneDuty(): Int? = bandMinDuty(HOT_ZONE_TEMP_C)
+
+    /**
+     * The minimum effective duty the curve applies across the temperature band
+     * `[fromTempC, INT_MAX]`. The controller steps between points, so for any
+     * temperature T the effective duty is the duty of the highest point whose
+     * threshold is <= T; above the last real point the sentinel/ceiling governs.
+     *
+     * The minimum across the band is therefore the smaller of:
+     *   - the duty of the point that governs exactly [fromTempC] (the last point
+     *     at-or-below it, or the first point if none precede it), and
+     *   - the duty of every point with threshold >= [fromTempC] (these include
+     *     the sentinel, so the ceiling duty is always considered).
+     *
+     * Returns null only for an empty curve.
+     */
+    fun bandMinDuty(fromTempC: Int): Int? {
         if (points.isEmpty()) return null
-        // Highest real point at-or-below the hot-zone temp governs that band;
-        // if none, the catch-all ceiling does.
-        val governing = points.lastOrNull { it.tempC <= HOT_ZONE_TEMP_C }
-            ?: points.first()
-        return governing.dutyPct
+        // Duty in effect right at fromTempC: the highest threshold at-or-below it,
+        // falling back to the first point when fromTempC precedes every threshold.
+        val atFrom = (points.lastOrNull { it.tempC <= fromTempC } ?: points.first()).dutyPct
+        // Every point that lies inside the band (threshold >= fromTempC),
+        // including the INT_MAX sentinel that governs the very top.
+        val insideBand = points.filter { it.tempC >= fromTempC }.map { it.dutyPct }
+        return (insideBand + atFrom).min()
     }
 
     companion object {
@@ -198,12 +259,27 @@ data class FanCurve(
         const val SAFE_MIN_DUTY_PCT = 20
 
         /** Temperature at which we consider the device to be in its hot zone.
-         *  By here the fan should be ramping hard or the device can run away. */
+         *  By here the fan must be ramping hard or the device can run away. */
         const val HOT_ZONE_TEMP_C = 95
 
-        /** Minimum duty we want to see in the hot zone before warning about a
-         *  runaway-cooling risk. */
+        /** HARD minimum effective duty required across the >= [HOT_ZONE_TEMP_C]
+         *  band. A curve that drops below this anywhere in that band is REJECTED
+         *  by [validate] (not merely warned). Chosen to match the stock Odin
+         *  "Smart" curve, which delivers 45% at 95°C — every safe built-in
+         *  preset meets-or-exceeds it, while a flat/low curve (e.g. pinned at
+         *  20%) does not. NOT opt-out-able: this is the thermal-safety floor. */
         const val MIN_HOT_DUTY_PCT = 45
+
+        /** Temperature at which the device is in its CRITICAL zone — by here the
+         *  fan must be running strong or thermals are unsafe. Matches the top
+         *  threshold of the stock curve. */
+        const val CRITICAL_ZONE_TEMP_C = 105
+
+        /** HARD minimum effective duty required across the >= [CRITICAL_ZONE_TEMP_C]
+         *  band. The stock "Smart" curve reaches exactly 60% by 105°C; every safe
+         *  built-in preset meets-or-exceeds it. A curve that runs weaker than this
+         *  at/above 105°C is REJECTED by [validate]. NOT opt-out-able. */
+        const val MIN_CRITICAL_DUTY_PCT = 60
 
         /**
          * The Odin stock "Smart" curve, used as the Balanced reference preset

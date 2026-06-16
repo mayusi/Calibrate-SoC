@@ -132,10 +132,18 @@ class FanCurveController @Inject constructor(
             )
         }
 
+        // ── 2b. Capture the ORIGINAL file metadata so we can restore it EXACTLY
+        //        after the write (H1: never leave com.odin.settings unable to
+        //        read its own prefs). Best-effort: a null capture falls back to
+        //        the sibling-dir reference + 660 + restorecon inside the script.
+        val metadata = FanCurveScript.parseConfigMetadata(
+            privilegedRead(FanCurveScript.readConfigMetadataCommand()),
+        )
+
         // ── 3. Encode + run the apply script ────────────────────────────────
         // Standard base64, NO_WRAP, so the device's toybox `base64 -d` decodes it.
         val b64 = Base64.encodeToString(newXml.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        val script = FanCurveScript.buildApplyScript(b64)
+        val script = FanCurveScript.buildApplyScript(b64, metadata)
         val applyResult = pServer.executeShell(script)
         if (applyResult == null) {
             return@withContext ApplyResult.Failed(
@@ -144,6 +152,22 @@ class FanCurveController @Inject constructor(
             )
         }
         Log.i(TAG, "applyCurve(): apply script status=${applyResult.first}")
+
+        // The apply script is a single `if … then (reload) else exit 1 fi`. A
+        // non-zero status means the write OR the metadata restore failed — in
+        // which case the script did NOT kill/relaunch com.odin.settings. Treat
+        // it as a hard failure and report honestly: we never claim "applied"
+        // when we couldn't restore the file's ownership/mode/context, and we
+        // never persist such a curve.
+        if (applyResult.first != 0) {
+            return@withContext ApplyResult.Failed(
+                "The fan-curve write could not be completed safely (could not restore " +
+                    "the config file's ownership/permissions/SELinux context, or the " +
+                    "write itself failed). To avoid leaving the Odin settings service " +
+                    "with a file it can't read, Calibrate aborted WITHOUT reloading it. " +
+                    "Your curve was NOT applied and other settings are untouched.",
+            )
+        }
 
         // ── 4. Settle + verify ──────────────────────────────────────────────
         delay(SETTLE_MS)

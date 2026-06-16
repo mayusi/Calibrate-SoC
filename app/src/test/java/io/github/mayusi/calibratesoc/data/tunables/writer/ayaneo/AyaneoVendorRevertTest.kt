@@ -14,14 +14,19 @@ import io.github.mayusi.calibratesoc.data.capability.SoCIdentity
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import android.util.Log
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
 import io.mockk.slot
+import io.mockk.unmockkAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import okio.Path.Companion.toPath
 import okio.fakefilesystem.FakeFileSystem
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -34,6 +39,23 @@ import org.junit.Test
  * the writer issues the stock-restoring command and verifies it.
  */
 class AyaneoVendorRevertTest {
+
+    @Before
+    fun stubLog() {
+        // android.util.Log is unavailable in the pure-JVM unit-test runtime. The
+        // unverified-revert path (HIGH-1) emits Log.w, so stub the static here rather than
+        // relying on another test class's leaked mock (which is fragile under test sharding).
+        mockkStatic(Log::class)
+        every { Log.d(any<String>(), any<String>()) } returns 0
+        every { Log.i(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.e(any<String>(), any<String>()) } returns 0
+    }
+
+    @After
+    fun tearDown() {
+        unmockkAll()
+    }
 
     private val policies = listOf(
         CpuPolicyProbe(
@@ -135,5 +157,34 @@ class AyaneoVendorRevertTest {
         )
         assertThat(revert).isInstanceOf(WriteResult.Success::class.java)
         assertThat(fs.read(capId.target.toPath()) { readUtf8() }).isEqualTo("3187200")
+        // The node WAS readable here, so the revert is VERIFIED (verified=true). The next
+        // test proves the EACCES (unreadable) path returns verified=false instead.
+        assertThat((revert as WriteResult.Success).verified).isTrue()
+    }
+
+    // ── HIGH-1: an EACCES (unreadable) CPU-cap revert is Success-UNVERIFIED ──────
+    // This is the signal TunableWriter.revertAll keys on to KEEP the journal so
+    // BootRevertReceiver remains the backstop for a revert we could not confirm landed.
+
+    @Test
+    fun `revert of an unreadable EACCES cpu cap is Success but verified=false`() = runTest {
+        // No file seeded for the cap node → the readback is null (the app-UID EACCES path),
+        // so the writer accepts-but-cannot-confirm. The binder still "accepts" the command.
+        val fs = FakeFileSystem()
+        val capId = Tunables.cpuMaxFreq(7)
+
+        val binder = mockk<AyaneoBinderClient>()
+        coEvery { binder.isAvailable() } returns true
+        // Accept the command but DO NOT actuate any readable node (stays unreadable).
+        coEvery { binder.sendCommand(any()) } returns true
+        val w = writer(binder, fs)
+
+        // Re-send the stock cap (what revertAll does with the journaled previousValue).
+        val revert = w.write(capId, "3187200")
+
+        // HONESTY: accepted, so AutoTDP proceeds — but we never claim the node moved, and
+        // the result is explicitly flagged unverified so the journal backstop is preserved.
+        assertThat(revert).isInstanceOf(WriteResult.Success::class.java)
+        assertThat((revert as WriteResult.Success).verified).isFalse()
     }
 }

@@ -64,12 +64,28 @@ class AyaneoBinderClient @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
 
-    /** Cached live connection + its binder. Rebound on death. */
-    private var connection: ServiceConnection? = null
+    /**
+     * Cached live connection + its binder. Rebound on death.
+     *
+     * MEDIUM-2: [connection] is @Volatile and mutated only under [bindMutex] (the lone
+     * exception is [onServiceDisconnected]'s teardown, which calls [dropConnection]).
+     * Without @Volatile a torn read across threads could unbind a connection another
+     * thread just replaced.
+     */
+    @Volatile private var connection: ServiceConnection? = null
     @Volatile private var binder: IBinder? = null
 
     /** Serialises bind / rebind so two callers never launch parallel binds. */
     private val bindMutex = Mutex()
+
+    /**
+     * MEDIUM-2: serialises a single [sendCommand] send + its dead-binder retry so a
+     * concurrent probe rebind cannot swap [binder] out from under an in-flight retry.
+     * Distinct from [bindMutex] (which only guards bind/rebind) so a send never holds
+     * the bind lock across the transact — the critical section here is just the
+     * send-then-maybe-rebind-then-retry sequence, all of which is fast.
+     */
+    private val sendMutex = Mutex()
 
     /** Memoised availability probe result. null = not yet probed. */
     @Volatile private var availableCache: Boolean? = null
@@ -110,18 +126,26 @@ class AyaneoBinderClient @Inject constructor(
      * node. Any failure (no binder, dead binder, SecurityException, server exception)
      * returns false — never throws.
      */
-    suspend fun sendCommand(command: String): Boolean {
+    suspend fun sendCommand(command: String): Boolean = sendMutex.withLock {
+        // MEDIUM-2: the whole send (+ dead-binder rebind + retry) is serialised so a
+        // concurrent probe rebind can't swap the binder under our in-flight retry. The
+        // transact itself is fast and oneway-ish, so a single send holding this lock is
+        // a short critical section; it does NOT hold bindMutex across the transact.
         val live = ensureBinder() ?: run {
             Log.w(TAG, "sendCommand(): no binder available — bind failed/denied")
-            return false
+            return@withLock false
         }
-        return when (val r = transact(live, command)) {
+        when (val r = transact(live, command)) {
             is TransactOutcome.Ok -> true
             is TransactOutcome.DeadObject -> {
                 // The cached binder died between calls. Drop it, rebind once, retry.
                 Log.w(TAG, "sendCommand(): dead binder, rebinding once: ${r.reason}")
+                // HIGH-2: dropConnection() unbinds the dead connection before we rebind so
+                // we never leak it. MEDIUM-3: the availability we cached referred to this
+                // now-dead binder — clear it so availability can't diverge from liveness.
                 dropConnection()
-                val rebound = ensureBinder() ?: return false
+                availableCache = null
+                val rebound = ensureBinder() ?: return@withLock false
                 transact(rebound, command) is TransactOutcome.Ok
             }
             is TransactOutcome.Failed -> {
@@ -133,7 +157,16 @@ class AyaneoBinderClient @Inject constructor(
 
     /**
      * Invalidate the cached availability result so the next [isAvailable] re-probes.
-     * Call after the user (re)installs gamewindow or on an onResume re-probe trigger.
+     * Call after the user (re)installs gamewindow or on an onResume / daemon-start
+     * re-probe trigger.
+     *
+     * CRITICAL-1: this MUST be called immediately before every [CapabilityProbe.refresh]
+     * that feeds a LIVE gate (mirroring [PServerWriter.invalidateTransactableCache]) so a
+     * stale `true` from before a gamewindow force-stop/restart can't make us claim LIVE on
+     * a binder we can no longer drive. Production call sites:
+     *   - [io.github.mayusi.calibratesoc.data.autotdp.AutoTdpService.runDaemon] before each
+     *     `capabilityProbe.refresh()` (the initial probe AND the PServer-retry probe).
+     *   - [io.github.mayusi.calibratesoc.MainActivity.onResume] before `capabilityProbe.refresh()`.
      */
     fun invalidateAvailabilityCache() {
         availableCache = null
@@ -149,10 +182,18 @@ class AyaneoBinderClient @Inject constructor(
      * denied / times out / the service hands back a null binder.
      */
     private suspend fun ensureBinder(): IBinder? {
-        binder?.let { if (it.isBinderAlive) return it else dropConnection() }
+        // Fast path: a live cached binder needs no lock. A DEAD binder must NOT be
+        // dropped here (MEDIUM-1) — dropConnection() mutates `connection`/`binder` and
+        // must run under bindMutex so concurrent callers don't double-unbind / churn.
+        binder?.let { if (it.isBinderAlive) return it }
         return bindMutex.withLock {
             // Re-check inside the lock — another caller may have bound while we waited.
             binder?.let { if (it.isBinderAlive) return@withLock it }
+            // A stale (dead) binder may still be cached with its connection bound.
+            // HIGH-2: unbind the old connection BEFORE binding a fresh one so we never
+            // leak a ServiceConnection (ServiceConnectionLeaked) across rebinds. Safe to
+            // call when nothing is bound. Exactly one live binding at a time.
+            dropConnection()
             bindOnce()
         }
     }
@@ -178,8 +219,17 @@ class AyaneoBinderClient @Inject constructor(
 
                         override fun onServiceDisconnected(name: ComponentName?) {
                             Log.w(TAG, "onServiceDisconnected: ${name?.flattenToShortString()}")
-                            // The cached binder is now stale — drop it so the next call rebinds.
-                            binder = null
+                            // HIGH-2: the binding is dead — UNBIND the old connection (not
+                            // just null the binder) so the next ensureBinder() doesn't bind a
+                            // fresh ServiceConnection on top of a leaked one. dropConnection()
+                            // unbinds + nulls both connection and binder.
+                            dropConnection()
+                            // MEDIUM-3: the binder we probed as available is gone, so the
+                            // memoised availability is now potentially stale. Clear it so the
+                            // next isAvailable() re-probes (a re-bind) rather than returning a
+                            // `true` that no longer holds — availability can't diverge from
+                            // binder-liveness.
+                            availableCache = null
                         }
 
                         override fun onNullBinding(name: ComponentName?) {

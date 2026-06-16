@@ -184,6 +184,64 @@ class TunableWriterTest {
         assertThat(store.read().entries).isEmpty()
     }
 
+    // ── HIGH-1 regression: an UNVERIFIED revert of a critical (CPU-cap) node must ──
+    // ── NOT clear the journal, so BootRevertReceiver stays armed as the backstop. ──
+
+    @Test
+    fun `revertAll keeps journal when a critical CPU-cap revert is Success-unverified`() = runTest {
+        val capId = Tunables.cpuMaxFreq(7) // scaling_max_freq → a CRITICAL node
+        coEvery { fakeBackend.read(capId) } returns "3187200"
+        // The AYANEO EACCES path: the binder accepted the stock-restoring command but the
+        // node is not app-readable, so the writer returns Success with verified=false.
+        coEvery { fakeBackend.write(capId, "3187200") } returns
+            WriteResult.Success(capId, previousValue = "2419200", newValue = "3187200", verified = false)
+        writer.write(capId, "2419200", REPORT, "AutoTDP cap")
+
+        val summary = writer.revertAll(REPORT)
+
+        // The revert "succeeded" at the binder layer (counts toward ok, no failure)…
+        assertThat(summary.ok).isEqualTo(1)
+        assertThat(summary.failed).isEqualTo(0)
+        // …but it was UNVERIFIED on a critical node, so the journal is PRESERVED: the
+        // boot-revert backstop must survive an unconfirmed revert that may not have landed.
+        assertThat(summary.journalCleared).isFalse()
+        assertThat(store.read().entries).hasSize(1)
+    }
+
+    @Test
+    fun `revertAll still clears journal for a VERIFIED critical CPU-cap revert`() = runTest {
+        val capId = Tunables.cpuMaxFreq(7)
+        coEvery { fakeBackend.read(capId) } returns "3187200"
+        // Verified revert (readback confirmed) → default verified=true → journal clears,
+        // exactly as the existing PServer/Shizuku/Root verified paths do (no regression).
+        coEvery { fakeBackend.write(capId, "3187200") } returns
+            WriteResult.Success(capId, previousValue = "2419200", newValue = "3187200")
+        writer.write(capId, "2419200", REPORT, "AutoTDP cap")
+
+        val summary = writer.revertAll(REPORT)
+
+        assertThat(summary.failed).isEqualTo(0)
+        assertThat(summary.journalCleared).isTrue()
+        assertThat(store.read().entries).isEmpty()
+    }
+
+    @Test
+    fun `revertAll clears journal when only a NON-critical node is reverted unverified`() = runTest {
+        // A GPU max revert that comes back unverified is benign (not device-pinning) — it
+        // must NOT keep the journal pinned. Only the CPU cap is gated by HIGH-1.
+        val gpuId = Tunables.gpuMaxFreq("/sys/class/kgsl/kgsl-3d0")
+        coEvery { fakeBackend.read(gpuId) } returns "680000000"
+        coEvery { fakeBackend.write(gpuId, "680000000") } returns
+            WriteResult.Success(gpuId, previousValue = "585000000", newValue = "680000000", verified = false)
+        writer.write(gpuId, "585000000", REPORT, "AutoTDP gpu")
+
+        val summary = writer.revertAll(REPORT)
+
+        assertThat(summary.failed).isEqualTo(0)
+        assertThat(summary.journalCleared).isTrue()
+        assertThat(store.read().entries).isEmpty()
+    }
+
     // ── BUG 3 regression: PServerWriter must receive protocol pre/post hooks ──
 
     @Test
