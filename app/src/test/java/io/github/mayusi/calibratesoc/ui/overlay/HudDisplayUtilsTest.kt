@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.ui.overlay
 
 import com.google.common.truth.Truth.assertThat
+import io.github.mayusi.calibratesoc.data.autotdp.HoldReason
 import org.junit.Test
 
 /**
@@ -355,5 +356,205 @@ class HudDisplayUtilsTest {
         assertThat(HudDisplayUtils.formatOpacityPct(0.94f)).isEqualTo("94%")
         assertThat(HudDisplayUtils.formatOpacityPct(1.0f)).isEqualTo("100%")
         assertThat(HudDisplayUtils.formatOpacityPct(0.5f)).isEqualTo("50%")
+    }
+
+    // ── holdReasonLabel ──────────────────────────────────────────────────────
+
+    @Test
+    fun `holdReasonLabel maps every reason to a non-empty label`() {
+        for (reason in HoldReason.values()) {
+            assertThat(HudDisplayUtils.holdReasonLabel(reason)).isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `holdReasonLabel LOAD_BLIND reads unreadable not idle`() {
+        // HONESTY INVARIANT: load-blind must NEVER claim the device is idle.
+        val label = HudDisplayUtils.holdReasonLabel(HoldReason.LOAD_BLIND_HOLDING)
+        assertThat(label.lowercase()).contains("unreadable")
+        assertThat(label.lowercase()).doesNotContain("idle")
+    }
+
+    @Test
+    fun `holdReasonLabel IDLE is the only one that may say lightly loaded`() {
+        assertThat(HudDisplayUtils.holdReasonLabel(HoldReason.IDLE_HOLDING).lowercase())
+            .contains("lightly loaded")
+        // Load-blind must not borrow the idle wording.
+        assertThat(HudDisplayUtils.holdReasonLabel(HoldReason.LOAD_BLIND_HOLDING).lowercase())
+            .doesNotContain("lightly")
+    }
+
+    @Test
+    fun `holdReasonLabel distinguishes cpu-bound and gpu-bound`() {
+        assertThat(HudDisplayUtils.holdReasonLabel(HoldReason.CPU_BOUND_RELAXING).lowercase())
+            .contains("cpu-bound")
+        assertThat(HudDisplayUtils.holdReasonLabel(HoldReason.GPU_BOUND_CAPPING).lowercase())
+            .contains("gpu-bound")
+    }
+
+    @Test
+    fun `holdReasonLabel NO_TELEMETRY reads as starting`() {
+        assertThat(HudDisplayUtils.holdReasonLabel(HoldReason.NO_TELEMETRY).lowercase())
+            .contains("starting")
+    }
+
+    // ── heartbeatLabel ───────────────────────────────────────────────────────
+
+    @Test
+    fun `heartbeatLabel returns null when no tick yet`() {
+        assertThat(HudDisplayUtils.heartbeatLabel(null, nowMs = 10_000L)).isNull()
+    }
+
+    @Test
+    fun `heartbeatLabel reads just now under one second`() {
+        val now = 10_000L
+        assertThat(HudDisplayUtils.heartbeatLabel(now - 500L, now)).isEqualTo("adjusted just now")
+    }
+
+    @Test
+    fun `heartbeatLabel reads seconds ago`() {
+        val now = 10_000L
+        assertThat(HudDisplayUtils.heartbeatLabel(now - 4_000L, now)).isEqualTo("adjusted 4s ago")
+    }
+
+    @Test
+    fun `heartbeatLabel reads minutes ago`() {
+        val now = 200_000L
+        assertThat(HudDisplayUtils.heartbeatLabel(now - 125_000L, now)).isEqualTo("adjusted 2m ago")
+    }
+
+    @Test
+    fun `heartbeatLabel clamps a future timestamp to just now`() {
+        val now = 10_000L
+        // Clock skew: epoch slightly ahead of now must not produce negative age.
+        assertThat(HudDisplayUtils.heartbeatLabel(now + 5_000L, now)).isEqualTo("adjusted just now")
+    }
+
+    // ── heartbeatIsLive ──────────────────────────────────────────────────────
+
+    @Test
+    fun `heartbeatIsLive false when null`() {
+        assertThat(HudDisplayUtils.heartbeatIsLive(null, nowMs = 10_000L)).isFalse()
+    }
+
+    @Test
+    fun `heartbeatIsLive true within window`() {
+        val now = 10_000L
+        assertThat(HudDisplayUtils.heartbeatIsLive(now - 2_000L, now)).isTrue()
+    }
+
+    @Test
+    fun `heartbeatIsLive false beyond window`() {
+        val now = 10_000L
+        assertThat(HudDisplayUtils.heartbeatIsLive(now - 5_000L, now)).isFalse()
+    }
+
+    @Test
+    fun `heartbeatIsLive true exactly at window boundary`() {
+        val now = 10_000L
+        assertThat(
+            HudDisplayUtils.heartbeatIsLive(now - HudDisplayUtils.HEARTBEAT_LIVE_WINDOW_MS, now)
+        ).isTrue()
+    }
+
+    // ── formatProofChipCap ───────────────────────────────────────────────────
+
+    @Test
+    fun `formatProofChipCap returns STOCK when null`() {
+        assertThat(HudDisplayUtils.formatProofChipCap(null)).isEqualTo("STOCK")
+    }
+
+    @Test
+    fun `formatProofChipCap formats GHz with one decimal`() {
+        assertThat(HudDisplayUtils.formatProofChipCap(3000)).isEqualTo("3.0G")
+        assertThat(HudDisplayUtils.formatProofChipCap(1690)).isEqualTo("1.7G")
+    }
+
+    // ── formatCapLine ────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatCapLine returns null when uncapped`() {
+        assertThat(HudDisplayUtils.formatCapLine(null, 420)).isNull()
+    }
+
+    @Test
+    fun `formatCapLine includes delta when positive`() {
+        assertThat(HudDisplayUtils.formatCapLine(3000, 420)).isEqualTo("3.0 GHz - 420 MHz vs max")
+    }
+
+    @Test
+    fun `formatCapLine omits delta when null or non-positive`() {
+        assertThat(HudDisplayUtils.formatCapLine(3000, null)).isEqualTo("3.0 GHz")
+        assertThat(HudDisplayUtils.formatCapLine(3000, 0)).isEqualTo("3.0 GHz")
+    }
+
+    // ── formatParkedCoresLine ────────────────────────────────────────────────
+
+    @Test
+    fun `formatParkedCoresLine returns null when empty`() {
+        assertThat(HudDisplayUtils.formatParkedCoresLine(emptySet())).isNull()
+    }
+
+    @Test
+    fun `formatParkedCoresLine singular and plural`() {
+        assertThat(HudDisplayUtils.formatParkedCoresLine(setOf(7))).isEqualTo("1 prime core off")
+        assertThat(HudDisplayUtils.formatParkedCoresLine(setOf(6, 7))).isEqualTo("2 prime cores off")
+    }
+
+    // ── formatGpuLevelLine ───────────────────────────────────────────────────
+
+    @Test
+    fun `formatGpuLevelLine returns null when no floor`() {
+        assertThat(HudDisplayUtils.formatGpuLevelLine(null)).isNull()
+    }
+
+    @Test
+    fun `formatGpuLevelLine tags level 0 as max perf`() {
+        assertThat(HudDisplayUtils.formatGpuLevelLine(0)).isEqualTo("GPU lvl 0 - max perf")
+    }
+
+    @Test
+    fun `formatGpuLevelLine plain label for non-zero level`() {
+        assertThat(HudDisplayUtils.formatGpuLevelLine(3)).isEqualTo("GPU lvl 3")
+    }
+
+    // ── isHoldingAtStock ─────────────────────────────────────────────────────
+
+    @Test
+    fun `isHoldingAtStock true only when nothing applied`() {
+        assertThat(HudDisplayUtils.isHoldingAtStock(null, emptySet(), null)).isTrue()
+    }
+
+    @Test
+    fun `isHoldingAtStock false when any field present`() {
+        assertThat(HudDisplayUtils.isHoldingAtStock(3000, emptySet(), null)).isFalse()
+        assertThat(HudDisplayUtils.isHoldingAtStock(null, setOf(7), null)).isFalse()
+        assertThat(HudDisplayUtils.isHoldingAtStock(null, emptySet(), 0)).isFalse()
+    }
+
+    // ── formatSessionWhLine ──────────────────────────────────────────────────
+
+    @Test
+    fun `formatSessionWhLine returns null when unmeasured`() {
+        assertThat(HudDisplayUtils.formatSessionWhLine(null)).isNull()
+    }
+
+    @Test
+    fun `formatSessionWhLine formats three decimals`() {
+        assertThat(HudDisplayUtils.formatSessionWhLine(0.012)).isEqualTo("saved 0.012 Wh this session")
+    }
+
+    // ── formatDecisionCap ────────────────────────────────────────────────────
+
+    @Test
+    fun `formatDecisionCap returns stock when null`() {
+        assertThat(HudDisplayUtils.formatDecisionCap(null)).isEqualTo("stock")
+    }
+
+    @Test
+    fun `formatDecisionCap formats kHz to GHz`() {
+        // 3_000_000 kHz = 3.0 GHz
+        assertThat(HudDisplayUtils.formatDecisionCap(3_000_000)).isEqualTo("3.0G")
+        assertThat(HudDisplayUtils.formatDecisionCap(1_690_000)).isEqualTo("1.7G")
     }
 }

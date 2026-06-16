@@ -1,5 +1,11 @@
 package io.github.mayusi.calibratesoc.ui.overlay
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,6 +32,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -42,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
+import io.github.mayusi.calibratesoc.data.autotdp.DecisionRecord
 import io.github.mayusi.calibratesoc.ui.components.CutCorner
 import io.github.mayusi.calibratesoc.ui.components.CutCornerShape
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
@@ -136,12 +147,20 @@ private fun HudCompactBar(
     onCycleLayout: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val nowMs = System.currentTimeMillis()
     val a11y = buildString {
         append(if (state.gameFps != null) "${state.gameFps} ${if (state.gameFpsIsReal) "FPS" else "Hz"}" else "FPS unavailable")
         append(", CPU ${HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 })}")
         append(", GPU ${state.gpuMhz?.let { "${it}M" } ?: "N/A"}")
         append(", ${HudDisplayUtils.formatWatts(state.batteryW)}")
         append(", ${HudDisplayUtils.formatTemp(state.cpuTempC)}")
+        if (state.autoTdpRunning) {
+            val capWord = if (state.autoTdpBigCapMhz != null) {
+                "cap ${HudDisplayUtils.formatProofChipCap(state.autoTdpBigCapMhz)}"
+            } else "stock"
+            val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
+            append(", AutoTDP $capWord, ${if (live) "live" else "stalled"}")
+        }
     }
 
     Row(
@@ -199,23 +218,27 @@ private fun HudCompactBar(
             value = HudDisplayUtils.formatTemp(state.cpuTempC),
         )
 
-        // TDP pill -- only shown, not interactive in compact
-        if (state.autoTdpRunning || true) {
-            CompactDivider()
-            val tdpAccent = if (state.autoTdpRunning) HudEmerald else HudDim
-            val tdpLabel = if (state.autoTdpRunning) {
-                "TDP ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}"
-            } else "TDP"
+        // AutoTDP proof chip.
+        // RUNNING  → live proof chip: current cap (or STOCK) + heartbeat pulse dot.
+        //            Dot is emerald + pulsing when a write landed within the live
+        //            window; muted + static "stalled" otherwise. This is the honest
+        //            "is it REALLY working" signal — a stalled daemon shows as muted,
+        //            never as a fake "live".
+        // STOPPED  → plain muted "TDP" pill (unchanged affordance).
+        CompactDivider()
+        if (state.autoTdpRunning) {
+            CompactProofChip(state = state)
+        } else {
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(4.dp))
-                    .background(tdpAccent.copy(alpha = if (state.autoTdpRunning) 0.15f else 0.07f))
-                    .border(0.5.dp, tdpAccent.copy(alpha = if (state.autoTdpRunning) 0.5f else 0.25f), RoundedCornerShape(4.dp))
+                    .background(HudDim.copy(alpha = 0.07f))
+                    .border(0.5.dp, HudDim.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 5.dp, vertical = 2.dp),
             ) {
                 Text(
-                    text = tdpLabel,
-                    color = tdpAccent,
+                    text = "TDP",
+                    color = HudDim,
                     fontSize = 8.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
@@ -291,6 +314,76 @@ private fun CompactMetric(dot: Color, value: String) {
     }
 }
 
+/**
+ * COMPACT-bar live AutoTDP proof chip (only rendered while running):
+ *   [pulse-dot]  3.0G   (or "STOCK" when uncapped)
+ *
+ * The pulse dot proves the daemon is alive: emerald + animated when a write
+ * landed within the live window, muted + static when stalled (age > ~3s). The
+ * cap value is a DERIVED fact (live immediately), so it never hides; "STOCK" is
+ * the honest label for "no cap applied".
+ */
+@Composable
+private fun CompactProofChip(state: HudUiState) {
+    val nowMs = System.currentTimeMillis()
+    val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
+    val accent = if (live) HudEmerald else HudDim
+
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(accent.copy(alpha = if (live) 0.15f else 0.07f))
+            .border(0.5.dp, accent.copy(alpha = if (live) 0.5f else 0.25f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            HeartbeatDot(live = live, size = 5.dp)
+            Text(
+                text = HudDisplayUtils.formatProofChipCap(state.autoTdpBigCapMhz),
+                color = accent,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+/**
+ * Heartbeat pulse dot. When [live] it slowly pulses its alpha (emerald) to show
+ * the daemon is actively writing; when stalled it renders a static muted dot.
+ * The animation is purely cosmetic — colour/liveness is decided by the caller
+ * from the real heartbeat age, so a stalled daemon can never *look* alive.
+ */
+@Composable
+private fun HeartbeatDot(live: Boolean, size: Dp) {
+    val color = if (live) HudEmerald else HudDim
+    val alpha = if (live) {
+        val transition = rememberInfiniteTransition(label = "heartbeat")
+        val pulse by transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 900, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "heartbeatAlpha",
+        )
+        pulse
+    } else {
+        0.6f
+    }
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = alpha)),
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  FULL mode -- horizontal panel
 // ─────────────────────────────────────────────────────────────────────────────
@@ -340,9 +433,9 @@ private fun HudFullPanel(
         // ── Body: FPS block | Metric grid ───────────────────────────────────
         FullPanelBody(state)
 
-        // ── AutoTDP control strip ────────────────────────────────────────────
+        // ── AutoTDP proof-of-effect section ──────────────────────────────────
         HudDivider()
-        AutoTdpControlStrip(
+        AutoTdpProofSection(
             state = state,
             onToggleAutoTdp = onToggleAutoTdp,
             onSetAutoTdpProfile = onSetAutoTdpProfile,
@@ -623,72 +716,32 @@ private fun FullMetricTile(
     }
 }
 
-// ── AutoTDP control strip ────────────────────────────────────────────────────
+// ── AutoTDP proof-of-effect section ──────────────────────────────────────────
 
 /**
- * When AutoTDP is stopped: Start button + 3-segment profile picker.
- * When running: green status + Stop affordance.
+ * The "is AutoTDP REALLY working" proof section.
+ *
+ * STOPPED → Start button + 3-segment profile picker (unchanged controls).
+ *
+ * RUNNING → a stacked proof block, every row HONESTY-GATED (a row only renders
+ * when its backing field is non-null; nulls hide, never fake):
+ *   1. HEADER   — "AUTOTDP PROOF" label + heartbeat pulse dot/age + STOP.
+ *   2. CHANGED  — cap+delta / parked cores / GPU floor, each hidden if absent;
+ *                 "Holding at stock" when nothing is applied.
+ *   3. WHY      — clean hold-reason label, tap to expand the raw engine reason
+ *                 (carries live %s). LOAD_BLIND reads "load unreadable", never idle.
+ *   4. EFFECT   — measured session Wh saved; if null, an honest "measuring…" hint.
+ *   5. TICKER   — last-N decisions + a flat-ok cap sparkline (flat = holding steady).
+ *   6. CONTROL  — profile picker (EFF/BAL/TGT) so the user can switch while running.
  */
 @Composable
-private fun AutoTdpControlStrip(
+private fun AutoTdpProofSection(
     state: HudUiState,
     onToggleAutoTdp: () -> Unit,
     onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
 ) {
-    if (state.autoTdpRunning) {
-        // Running state -- green status line + Stop
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(5.dp))
-                .background(HudAutoTdpBg)
-                .border(0.5.dp, HudAutoTdpBorder, RoundedCornerShape(5.dp))
-                .padding(horizontal = 8.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(Icons.Outlined.Bolt, null, tint = HudEmerald, modifier = Modifier.size(11.dp))
-            val detailParts = buildList {
-                state.autoTdpBigCapMhz?.let { add("cap ${HudDisplayUtils.formatGhzFromMhz(it)}") }
-                if (state.autoTdpParkedCores.isNotEmpty()) {
-                    add("park cpu${state.autoTdpParkedCores.sorted().joinToString(",")}")
-                }
-                state.autoTdpGpuLevel?.let { add("GPU lvl $it") }
-            }
-            val statusText = if (detailParts.isEmpty()) {
-                "AutoTDP ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)} running"
-            } else {
-                detailParts.joinToString(" - ")
-            }
-            Text(
-                text = statusText,
-                color = HudEmerald,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.weight(1f),
-            )
-            if (state.autoTdpSavingsReady && state.autoTdpSavingsMw != null) {
-                Text(
-                    text = HudDisplayUtils.formatAutoTdpSavings(
-                        state.autoTdpSavingsMw,
-                        state.autoTdpSavingsPct,
-                        state.autoTdpSavingsReady,
-                    ),
-                    color = HudEmerald,
-                    fontSize = 8.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            HudChipBtn(
-                label = "STOP",
-                enabled = true,
-                accent = HudRed,
-                onClick = onToggleAutoTdp,
-            )
-        }
-    } else {
-        // Stopped state -- Start button + profile picker
+    if (!state.autoTdpRunning) {
+        // ── STOPPED: Start + profile picker ──────────────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -701,22 +754,419 @@ private fun AutoTdpControlStrip(
                 onClick = onToggleAutoTdp,
             )
             Spacer(Modifier.weight(1f))
-            // 3-segment profile picker
-            listOf(
-                AutoTdpProfile.EFFICIENCY to "EFF",
-                AutoTdpProfile.BALANCED to "BAL",
-                AutoTdpProfile.BATTERY_TARGET to "TGT",
-            ).forEach { (profile, shortLabel) ->
-                val isActive = state.autoTdpActiveProfile == profile
-                AutoTdpProfileChip(
-                    label = shortLabel,
-                    selected = isActive,
-                    onClick = { onSetAutoTdpProfile(profile) },
+            AutoTdpProfilePicker(
+                active = state.autoTdpActiveProfile,
+                onSetAutoTdpProfile = onSetAutoTdpProfile,
+            )
+        }
+        // LIVE_UNAVAILABLE is an honest, non-faked state worth surfacing.
+        if (state.autoTdpStatus == AutoTdpStatus.LIVE_UNAVAILABLE) {
+            Text(
+                text = "live tuning unavailable on this device",
+                color = HudDim,
+                fontSize = 8.sp,
+                lineHeight = 11.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        return
+    }
+
+    // ── RUNNING: proof block ─────────────────────────────────────────────────
+    val nowMs = System.currentTimeMillis()
+    val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
+    val heartbeatText = HudDisplayUtils.heartbeatLabel(state.autoTdpLastAppliedEpochMs, nowMs)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(5.dp))
+            .background(HudAutoTdpBg)
+            .border(0.5.dp, HudAutoTdpBorder, RoundedCornerShape(5.dp))
+            .drawBehind {
+                // Emerald left-edge accent bar — "this section is live".
+                drawRect(if (live) HudEmerald else HudDim, size = size.copy(width = 2.dp.toPx()))
+            }
+            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        // 1. HEADER — label + heartbeat + STOP ────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Icon(Icons.Outlined.Bolt, null, tint = HudEmerald, modifier = Modifier.size(11.dp))
+            Text(
+                text = "AUTOTDP - ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}",
+                color = HudEmerald,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            // 4. HEARTBEAT — pulse dot + "adjusted Xs ago" (hidden if no tick yet)
+            HeartbeatDot(live = live, size = 6.dp)
+            if (heartbeatText != null) {
+                Text(
+                    text = heartbeatText,
+                    color = if (live) HudEmerald else HudAmber,
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.semantics {
+                        contentDescription =
+                            "AutoTDP ${if (live) "live" else "stalled"}, $heartbeatText"
+                    },
+                )
+            }
+            Spacer(Modifier.width(2.dp))
+            HudChipBtn(label = "STOP", enabled = true, accent = HudRed, onClick = onToggleAutoTdp)
+        }
+
+        // 2. WHAT IT CHANGED NOW ──────────────────────────────────────────────
+        AutoTdpChangedRows(state)
+
+        // 3. WHY (hold-reason, tap to expand raw) ─────────────────────────────
+        AutoTdpWhyRow(state)
+
+        // 5. EFFECT (measured only) ───────────────────────────────────────────
+        AutoTdpEffectRow(state)
+
+        // 6. DECISION TICKER + sparkline ──────────────────────────────────────
+        if (state.autoTdpDecisions.isNotEmpty()) {
+            AutoTdpDecisionTicker(state.autoTdpDecisions)
+        }
+
+        // 7. CONTROL — profile picker (switch while running) ──────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "PROFILE",
+                color = HudLabel,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            AutoTdpProfilePicker(
+                active = state.autoTdpActiveProfile,
+                onSetAutoTdpProfile = onSetAutoTdpProfile,
+            )
+        }
+    }
+}
+
+/** 3-segment EFF/BAL/TGT profile picker. Shared by running + stopped states. */
+@Composable
+private fun AutoTdpProfilePicker(
+    active: AutoTdpProfile,
+    onSetAutoTdpProfile: (AutoTdpProfile) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(
+            AutoTdpProfile.EFFICIENCY to "EFF",
+            AutoTdpProfile.BALANCED to "BAL",
+            AutoTdpProfile.BATTERY_TARGET to "TGT",
+        ).forEach { (profile, shortLabel) ->
+            AutoTdpProfileChip(
+                label = shortLabel,
+                selected = active == profile,
+                onClick = { onSetAutoTdpProfile(profile) },
+            )
+        }
+    }
+}
+
+/**
+ * "WHAT IT CHANGED NOW" — DERIVED facts (live immediately). Each line is hidden
+ * when its field is absent. When NOTHING is applied, a single honest
+ * "Holding at stock" line is shown instead.
+ */
+@Composable
+private fun AutoTdpChangedRows(state: HudUiState) {
+    val capLine = HudDisplayUtils.formatCapLine(state.autoTdpBigCapMhz, state.autoTdpCapDeltaMhz)
+    val parkedLine = HudDisplayUtils.formatParkedCoresLine(state.autoTdpParkedCores)
+    val gpuLine = HudDisplayUtils.formatGpuLevelLine(state.autoTdpGpuLevel)
+    val holdingAtStock = HudDisplayUtils.isHoldingAtStock(
+        state.autoTdpBigCapMhz, state.autoTdpParkedCores, state.autoTdpGpuLevel,
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (holdingAtStock) {
+            ProofLine(dot = HudDim, text = "Holding at stock", color = HudValue)
+        } else {
+            if (capLine != null) ProofLine(dot = HudEmerald, text = capLine, color = HudValue)
+            if (parkedLine != null) ProofLine(dot = HudBlue, text = parkedLine, color = HudValue)
+            if (gpuLine != null) ProofLine(dot = HudPurple, text = gpuLine, color = HudValue)
+        }
+    }
+}
+
+/** One DERIVED-fact line: colored dot + mono text. */
+@Composable
+private fun ProofLine(dot: Color, text: String, color: Color) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier.semantics { contentDescription = text },
+    ) {
+        Box(
+            modifier = Modifier
+                .size(5.dp)
+                .clip(RoundedCornerShape(50))
+                .background(dot),
+        )
+        Text(
+            text = text,
+            color = color,
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * "WHY" — clean hold-reason label; tap to reveal the raw engine reason (which
+ * carries the live %s like "GPU 92%, big/prime 18%"). Honesty: LOAD_BLIND reads
+ * "CPU load unreadable - holding", never "idle".
+ */
+@Composable
+private fun AutoTdpWhyRow(state: HudUiState) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = HudDisplayUtils.holdReasonLabel(state.autoTdpHoldReason)
+    val hasRaw = state.autoTdpReason.isNotBlank()
+
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = hasRaw) { expanded = !expanded }
+                .semantics {
+                    contentDescription =
+                        "Reason: $label." + if (hasRaw) " Tap to ${if (expanded) "hide" else "show"} detail." else ""
+                },
+        ) {
+            Text(
+                text = "WHY",
+                color = HudLabel,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+            )
+            Text(
+                text = label,
+                color = HudAmber,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            if (hasRaw) {
+                Text(
+                    text = if (expanded) "[hide]" else "[detail]",
+                    color = HudDim,
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+        if (expanded && hasRaw) {
+            Text(
+                text = state.autoTdpReason,
+                color = HudDim,
+                fontSize = 8.sp,
+                lineHeight = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(start = 2.dp),
+            )
+        }
+    }
+}
+
+/**
+ * "EFFECT" — MEASURED-only. Shows session Wh saved (+ power-saved when the probe
+ * is ready). When no measured number exists yet, shows an honest one-line
+ * "measuring…" hint — NEVER a fabricated value.
+ */
+@Composable
+private fun AutoTdpEffectRow(state: HudUiState) {
+    val whLine = HudDisplayUtils.formatSessionWhLine(state.autoTdpSessionWh)
+    val powerReady = state.autoTdpSavingsReady && state.autoTdpSavingsMw != null
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = "EFFECT",
+            color = HudLabel,
+            fontSize = 7.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp,
+        )
+        if (whLine != null || powerReady) {
+            // At least one MEASURED number is available — show it.
+            val parts = buildList {
+                if (powerReady) {
+                    add(
+                        HudDisplayUtils.formatAutoTdpSavings(
+                            state.autoTdpSavingsMw,
+                            state.autoTdpSavingsPct,
+                            state.autoTdpSavingsReady,
+                        ),
+                    )
+                }
+                if (whLine != null) add(whLine)
+            }
+            Text(
+                text = parts.joinToString("  -  "),
+                color = HudEmerald,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "Measured effect: ${parts.joinToString(", ")}" },
+            )
+        } else {
+            // No measured probe yet — honest hint, not a number.
+            Text(
+                text = "measuring... (first ~40s)",
+                color = HudDim,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "Effect measuring, first reading in about 40 seconds" },
+            )
+        }
+    }
+}
+
+/**
+ * "DECISION TICKER" — the last few engine decisions (newest-first) plus a tiny
+ * cap-vs-time sparkline. A flat sparkline honestly reads as "holding steady".
+ */
+@Composable
+private fun AutoTdpDecisionTicker(decisions: List<DecisionRecord>) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = "RECENT",
+                color = HudLabel,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+            )
+            CapSparkline(
+                decisions = decisions,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(14.dp),
+            )
+        }
+        // Last 3 decisions, newest-first: reason + cap.
+        decisions.takeLast(3).reversed().forEach { d ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(holdReasonDot(d.holdReason)),
+                )
+                Text(
+                    text = HudDisplayUtils.holdReasonLabel(d.holdReason),
+                    color = HudDim,
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = HudDisplayUtils.formatDecisionCap(d.bigCapKhz),
+                    color = HudDim,
+                    fontSize = 8.sp,
+                    fontFamily = FontFamily.Monospace,
                 )
             }
         }
     }
 }
+
+/**
+ * Tiny cap-vs-time sparkline from the decision history. Uncapped (null) decisions
+ * sit at the top of the track (= stock ceiling). A flat line is honest: the
+ * engine has been holding the cap steady. Needs >= 2 points to draw a line.
+ */
+@Composable
+private fun CapSparkline(decisions: List<DecisionRecord>, modifier: Modifier = Modifier) {
+    val caps = decisions.map { it.bigCapKhz }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(2.dp))
+            .background(HudBarBg)
+            .semantics { contentDescription = "AutoTDP cap history sparkline" },
+    ) {
+        if (caps.size >= 2) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(14.dp)
+                    .drawBehind {
+                        val known = caps.filterNotNull()
+                        // Range for normalisation; uncapped -> top (stock ceiling).
+                        val maxCap = (known.maxOrNull() ?: 0)
+                        val minCap = (known.minOrNull() ?: 0)
+                        val span = (maxCap - minCap).coerceAtLeast(1)
+                        val n = caps.size
+                        val stepX = if (n > 1) size.width / (n - 1) else size.width
+                        val pad = 2f
+                        val usableH = size.height - pad * 2
+                        fun yFor(cap: Int?): Float {
+                            // null cap = uncapped = at the ceiling (top, small y).
+                            val c = cap ?: maxCap
+                            val frac = (c - minCap).toFloat() / span
+                            // Higher cap -> higher on screen (smaller y).
+                            return pad + (1f - frac) * usableH
+                        }
+                        val path = Path()
+                        caps.forEachIndexed { i, cap ->
+                            val x = i * stepX
+                            val y = yFor(cap)
+                            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        }
+                        drawPath(
+                            path = path,
+                            color = HudEmerald,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f),
+                        )
+                    },
+            )
+        }
+    }
+}
+
+/** Dot colour for a decision's hold-reason in the ticker. */
+private fun holdReasonDot(reason: io.github.mayusi.calibratesoc.data.autotdp.HoldReason): Color =
+    when (reason) {
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.CPU_BOUND_RELAXING -> HudBlue
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.GPU_BOUND_CAPPING -> HudPurple
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.BATTERY_TARGET_HOLDING -> HudAmber
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.LOAD_BLIND_HOLDING -> HudAmber
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.IDLE_HOLDING -> HudDim
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.NO_TELEMETRY -> HudDim
+    }
 
 // ── Full panel: Quick profiles ───────────────────────────────────────────────
 

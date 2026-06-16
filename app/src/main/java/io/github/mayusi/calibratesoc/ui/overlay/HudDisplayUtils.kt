@@ -1,5 +1,7 @@
 package io.github.mayusi.calibratesoc.ui.overlay
 
+import io.github.mayusi.calibratesoc.data.autotdp.HoldReason
+
 /**
  * Pure display-formatting helpers for the HUD overlay.
  *
@@ -38,9 +40,14 @@ object HudDisplayUtils {
         val parkedStr = if (parkedCores.isEmpty()) ""
             else " parked cpu${parkedCores.sorted().joinToString(",")}"
         val capStr = bigCapMhz?.let { " cap ${"%.2f".format(it / 1000.0)}G" } ?: ""
+        // savingsMw is baseline-tuned, so POSITIVE = saved, NEGATIVE = drawing
+        // more than stock (e.g. just unparked under CPU load). Honest sign — never
+        // render a power increase as a saving, and never produce a double "−−".
         val savingsStr = when {
-            savingsReady && savingsMw != null -> "  −${savingsMw}mW"
-            else -> "  measuring…"
+            !savingsReady || savingsMw == null -> "  measuring…"
+            savingsMw > 0 -> "  −${savingsMw}mW"
+            savingsMw < 0 -> "  +${-savingsMw}mW"
+            else -> "  ±0mW"
         }
         return "AutoTDP ●$parkedStr$capStr$savingsStr"
     }
@@ -160,13 +167,19 @@ object HudDisplayUtils {
      * Format an AutoTDP savings value for the verbose panel.
      *
      * [savingsMw] null or [savingsReady] false → "measuring…"
-     * Otherwise → "−1.8W (12%)" or "−1.8W" if pct is null.
+     * POSITIVE savingsMw = saved → "−1.8W (12%)"; NEGATIVE = drawing more than
+     * stock → "+1.8W (more)"; never a double sign, never a "saving" that's a cost.
      */
     @JvmStatic
     fun formatAutoTdpSavings(savingsMw: Int?, savingsPct: Double?, savingsReady: Boolean): String {
         if (!savingsReady || savingsMw == null) return "measuring…"
-        val w = "%.1f".format(savingsMw / 1000.0)
-        return if (savingsPct != null) "−${w}W (${savingsPct.toInt()}%)" else "−${w}W"
+        val w = "%.1f".format(kotlin.math.abs(savingsMw) / 1000.0)
+        val pctStr = savingsPct?.let { " (${kotlin.math.abs(it).toInt()}%)" } ?: ""
+        return when {
+            savingsMw > 0 -> "−${w}W$pctStr"
+            savingsMw < 0 -> "+${w}W$pctStr more"
+            else -> "±0W"
+        }
     }
 
     /**
@@ -183,4 +196,148 @@ object HudDisplayUtils {
      */
     @JvmStatic
     fun formatOpacityPct(opacity: Float): String = "${(opacity * 100).toInt()}%"
+
+    // ── AutoTDP proof-of-effect helpers ──────────────────────────────────────
+    // These power the "is AutoTDP REALLY working" HUD section. Each formats a
+    // DERIVED or MEASURED field into a short honest string, returning null when
+    // the backing field is absent so the composable can HIDE the row entirely
+    // instead of rendering a placeholder.
+
+    /** Heartbeat age threshold (ms). Beyond this the daemon is "stalled", not "live". */
+    const val HEARTBEAT_LIVE_WINDOW_MS = 3_000L
+
+    /**
+     * Clean one-line WHY label for the AutoTDP hold-reason.
+     *
+     * HONESTY INVARIANT: [HoldReason.LOAD_BLIND_HOLDING] must read as
+     * "CPU load unreadable - holding", NEVER "idle" — the CPU may actually be
+     * pegged; we simply cannot measure it. [HoldReason.IDLE_HOLDING] is the only
+     * state that may say "lightly loaded", because load IS readable there.
+     */
+    @JvmStatic
+    fun holdReasonLabel(reason: HoldReason): String = when (reason) {
+        HoldReason.CPU_BOUND_RELAXING    -> "CPU-bound - full clocks"
+        HoldReason.GPU_BOUND_CAPPING     -> "GPU-bound - capping"
+        HoldReason.BATTERY_TARGET_HOLDING -> "Battery-target - holding cap"
+        HoldReason.LOAD_BLIND_HOLDING    -> "CPU load unreadable - holding"
+        HoldReason.IDLE_HOLDING          -> "Lightly loaded - holding"
+        HoldReason.NO_TELEMETRY          -> "Starting - no telemetry yet"
+    }
+
+    /**
+     * Heartbeat-age string derived from the daemon's last applied epoch.
+     *
+     * Returns null when [lastAppliedEpochMs] is null (no tick yet → HIDE).
+     * Examples: "adjusted just now", "adjusted 2s ago", "adjusted 1m ago".
+     *
+     * @param lastAppliedEpochMs daemon's last write time, null = none yet
+     * @param nowMs              current wall-clock epoch (caller supplies for testability)
+     */
+    @JvmStatic
+    fun heartbeatLabel(lastAppliedEpochMs: Long?, nowMs: Long): String? {
+        if (lastAppliedEpochMs == null) return null
+        val ageMs = (nowMs - lastAppliedEpochMs).coerceAtLeast(0L)
+        val ageSec = ageMs / 1000L
+        val whenStr = when {
+            ageMs < 1_000L -> "just now"
+            ageSec < 60L   -> "${ageSec}s ago"
+            else           -> "${ageSec / 60L}m ago"
+        }
+        return "adjusted $whenStr"
+    }
+
+    /**
+     * Whether the heartbeat is "live" (a write happened within the last
+     * [HEARTBEAT_LIVE_WINDOW_MS]). Drives the pulse dot colour: live = emerald,
+     * stalled = muted. Null epoch → not live (nothing has been applied yet).
+     */
+    @JvmStatic
+    fun heartbeatIsLive(lastAppliedEpochMs: Long?, nowMs: Long): Boolean {
+        if (lastAppliedEpochMs == null) return false
+        val ageMs = (nowMs - lastAppliedEpochMs).coerceAtLeast(0L)
+        return ageMs <= HEARTBEAT_LIVE_WINDOW_MS
+    }
+
+    /**
+     * Compact cap label for the COMPACT proof chip: "3.0G" or "STOCK" when
+     * uncapped (null). Always returns a string — the chip is always shown while
+     * running; "STOCK" is the honest label for "no cap applied".
+     */
+    @JvmStatic
+    fun formatProofChipCap(bigCapMhz: Int?): String =
+        bigCapMhz?.let { "%.1fG".format(it / 1000.0) } ?: "STOCK"
+
+    /**
+     * "WHAT IT CHANGED NOW" cap line: big cap + delta-vs-max.
+     *
+     * Returns null when there is no cap (uncapped → caller hides this part and
+     * may fall back to a "holding at stock" line). Examples:
+     *  - cap 3000, delta 420  → "3.0 GHz - 420 MHz vs max"
+     *  - cap 3000, delta null → "3.0 GHz"
+     */
+    @JvmStatic
+    fun formatCapLine(bigCapMhz: Int?, capDeltaMhz: Int?): String? {
+        if (bigCapMhz == null) return null
+        val ghz = "%.1f GHz".format(bigCapMhz / 1000.0)
+        return if (capDeltaMhz != null && capDeltaMhz > 0) {
+            "$ghz - $capDeltaMhz MHz vs max"
+        } else {
+            ghz
+        }
+    }
+
+    /**
+     * Parked-cores line: "2 prime cores off" / "1 prime core off".
+     *
+     * Returns null when no cores are parked (→ HIDE the row).
+     */
+    @JvmStatic
+    fun formatParkedCoresLine(parkedCores: Set<Int>): String? {
+        val n = parkedCores.size
+        if (n == 0) return null
+        val noun = if (n == 1) "prime core" else "prime cores"
+        return "$n $noun off"
+    }
+
+    /**
+     * GPU-floor line: "GPU lvl 0 - max perf" (0 = highest performance level).
+     * Higher levels are lower clocks, so only level 0 gets the "max perf" tag.
+     *
+     * Returns null when no GPU floor is applied (→ HIDE the row).
+     */
+    @JvmStatic
+    fun formatGpuLevelLine(gpuLevel: Int?): String? {
+        if (gpuLevel == null) return null
+        return if (gpuLevel == 0) "GPU lvl 0 - max perf" else "GPU lvl $gpuLevel"
+    }
+
+    /**
+     * Whether the "WHAT IT CHANGED NOW" section should show the "Holding at
+     * stock" fallback: true only when there is no cap AND no parked cores AND no
+     * GPU floor. (When any of those is present, the specific rows render instead.)
+     */
+    @JvmStatic
+    fun isHoldingAtStock(bigCapMhz: Int?, parkedCores: Set<Int>, gpuLevel: Int?): Boolean =
+        bigCapMhz == null && parkedCores.isEmpty() && gpuLevel == null
+
+    /**
+     * MEASURED session energy line: "saved 0.012 Wh this session".
+     *
+     * Returns null when [sessionWh] is null (probe not complete → show the
+     * "measuring…" hint instead, never a fabricated number).
+     */
+    @JvmStatic
+    fun formatSessionWhLine(sessionWh: Double?): String? {
+        if (sessionWh == null) return null
+        // Show 3 decimals so small in-game savings (mWh-scale) are visible.
+        return "saved %.3f Wh this session".format(sessionWh)
+    }
+
+    /**
+     * Short cap label for one decision-ticker entry: "3.0G" or "stock".
+     * [bigCapKhz] is the DecisionRecord field (kHz), null = uncapped.
+     */
+    @JvmStatic
+    fun formatDecisionCap(bigCapKhz: Int?): String =
+        bigCapKhz?.let { "%.1fG".format(it / 1_000_000.0) } ?: "stock"
 }

@@ -19,13 +19,9 @@ import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.SettingsInputAntenna
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Wifi
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.baseline.BaselineDegradation
@@ -48,8 +45,14 @@ import io.github.mayusi.calibratesoc.data.hardware.NetworkTestResult
 import io.github.mayusi.calibratesoc.data.hardware.RadioInfo
 import io.github.mayusi.calibratesoc.data.hardware.SocInfo
 import io.github.mayusi.calibratesoc.data.hardware.StorageVolume
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
+import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
+import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 /**
@@ -78,12 +81,19 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item {
-            Column {
-                Text("Hardware", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                Text(
+                    "HARDWARE",
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    letterSpacing = 0.04.sp,
+                )
                 Text(
                     "Identify what's in your device + speed-test storage, memory, and network. Different from Benchmark — which stress-tests sustained CPU/GPU throughput.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = androidx.compose.ui.graphics.Color(0xFF999999),
                 )
             }
         }
@@ -137,8 +147,15 @@ fun HardwareScreen(viewModel: HardwareViewModel = hiltViewModel()) {
  */
 @Composable
 private fun BaselineDegradationCard(report: DegradationReport) {
+    val accent = when (report.status) {
+        DegradationStatus.OK -> AccentBar.Emerald
+        DegradationStatus.MINOR -> AccentBar.Amber
+        DegradationStatus.DEGRADED -> AccentBar.Red
+        DegradationStatus.INSUFFICIENT_DATA -> AccentBar.Neutral
+    }
     SectionCard(
         title = "Baseline health check",
+        accent = accent,
         explainer = "Compares current clock ceilings against your factory baseline.",
         icon = Icons.Outlined.HealthAndSafety,
     ) {
@@ -148,13 +165,13 @@ private fun BaselineDegradationCard(report: DegradationReport) {
                     "Not enough data to compare",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AccentBar.Neutral,
                 )
                 report.insufficientDataReason?.let { reason ->
                     Text(
                         reason,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = androidx.compose.ui.graphics.Color(0xFF999999),
                     )
                 }
             }
@@ -165,7 +182,7 @@ private fun BaselineDegradationCard(report: DegradationReport) {
                         "OK — clock ceilings match factory baseline",
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.tertiary,
+                        color = AccentBar.Emerald,
                     )
                 }
                 report.findings.forEach { finding ->
@@ -175,7 +192,7 @@ private fun BaselineDegradationCard(report: DegradationReport) {
                     Text(
                         note,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = androidx.compose.ui.graphics.Color(0xFF999999),
                     )
                 }
             }
@@ -214,12 +231,9 @@ private fun BaselineDegradationCard(report: DegradationReport) {
 @Composable
 private fun DegradationFindingRow(finding: io.github.mayusi.calibratesoc.data.baseline.DegradationFinding) {
     val valueColor = when {
-        finding.isDrop && finding.changePct >= BaselineDegradation.DEGRADED_THRESHOLD_PCT ->
-            MaterialTheme.colorScheme.error
-        finding.isDrop && finding.changePct >= BaselineDegradation.MINOR_THRESHOLD_PCT ->
-            MaterialTheme.colorScheme.secondary
-        else ->
-            MaterialTheme.colorScheme.tertiary
+        finding.isDrop && finding.changePct >= BaselineDegradation.DEGRADED_THRESHOLD_PCT -> AccentBar.Red
+        finding.isDrop && finding.changePct >= BaselineDegradation.MINOR_THRESHOLD_PCT -> AccentBar.Amber
+        else -> AccentBar.Emerald
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -230,18 +244,19 @@ private fun DegradationFindingRow(finding: io.github.mayusi.calibratesoc.data.ba
             Text(
                 finding.signal,
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = androidx.compose.ui.graphics.Color(0xFF999999),
             )
             Text(
-                "${finding.baselineValue} → ${finding.currentValue}",
+                "${finding.baselineValue} -> ${finding.currentValue}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
+                color = androidx.compose.ui.graphics.Color.White,
             )
         }
         Text(
             finding.formattedPct,
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace,
             color = valueColor,
         )
@@ -253,6 +268,7 @@ private fun DegradationFindingRow(finding: io.github.mayusi.calibratesoc.data.ba
 @Composable
 private fun SocCard(soc: SocInfo) = SectionCard(
     title = "SoC",
+    accent = AccentBar.Blue,
     explainer = "The chip, its GPU, and core layout.",
     icon = Icons.Outlined.DeveloperBoard,
 ) {
@@ -266,6 +282,7 @@ private fun SocCard(soc: SocInfo) = SectionCard(
 private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onRun: () -> Unit) =
     SectionCard(
         title = "Memory",
+        accent = AccentBar.Blue,
         explainer = "RAM type and measured bandwidth.",
         icon = Icons.Outlined.Memory,
     ) {
@@ -275,10 +292,17 @@ private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onR
         if (memory.measuredBandwidthMBps != null) {
             KV("Measured bandwidth", "%.1f MB/s".format(memory.measuredBandwidthMBps))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            Button(onClick = onRun, enabled = !running) {
-                Text(if (running) "Testing…" else "Measure RAM bandwidth")
-            }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArsenalButton(
+                label = if (running) "Testing..." else "Measure RAM bandwidth",
+                onClick = onRun,
+                style = ArsenalButtonStyle.Primary,
+                accent = AccentBar.Blue,
+                enabled = !running,
+            )
             if (running) {
                 CircularProgressIndicator(
                     modifier = Modifier.padding(start = Spacing.dense),
@@ -293,6 +317,7 @@ private fun MemoryCard(memory: MemoryInfo, running: Boolean, error: String?, onR
 private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?, onRun: () -> Unit, isPrimary: Boolean) =
     SectionCard(
         title = "Storage — ${volume.label}",
+        accent = AccentBar.Neutral,
         explainer = "Storage class and real read/write speeds.",
         icon = Icons.Outlined.Storage,
     ) {
@@ -300,17 +325,24 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
         KV("Class (inferred)", volume.inferredClass, volume.inferredConfidence)
         volume.vendorModel?.let { KV("Vendor model", it) }
         if (volume.seqReadMBps != null) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+            HorizontalDivider(color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f))
             KV("Sequential read", "%.0f MB/s".format(volume.seqReadMBps))
             KV("Sequential write", "%.0f MB/s".format(volume.seqWriteMBps ?: 0.0))
             KV("Random 4K read", "${volume.randomReadIOPS ?: 0} IOPS")
             KV("Random 4K write", "${volume.randomWriteIOPS ?: 0} IOPS")
         }
         if (isPrimary) {
-            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-                Button(onClick = onRun, enabled = !running) {
-                    Text(if (running) "Testing…" else "Run storage test")
-                }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ArsenalButton(
+                    label = if (running) "Testing..." else "Run storage test",
+                    onClick = onRun,
+                    style = ArsenalButtonStyle.Primary,
+                    accent = AccentBar.Neutral,
+                    enabled = !running,
+                )
                 if (running) {
                     CircularProgressIndicator(
                         modifier = Modifier.padding(start = Spacing.dense),
@@ -321,7 +353,7 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
             Text(
                 "Writes ~512 MB to internal storage during the test, deleted immediately after. Negligible wear.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = androidx.compose.ui.graphics.Color(0xFF999999),
             )
             TestError("Storage test failed", error)
         }
@@ -331,6 +363,7 @@ private fun StorageCard(volume: StorageVolume, running: Boolean, error: String?,
 private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: String?, onRun: () -> Unit) =
     SectionCard(
         title = "Network",
+        accent = AccentBar.Emerald,
         explainer = "Real-world download, upload, and latency.",
         icon = Icons.Outlined.Wifi,
     ) {
@@ -340,10 +373,17 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: Str
             result.latencyCloudflareMs?.let { KV("Latency · Cloudflare", "$it ms") }
             result.latencyGoogleMs?.let { KV("Latency · Google", "$it ms") }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            Button(onClick = onRun, enabled = !running) {
-                Text(if (running) "Testing…" else "Run network test")
-            }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArsenalButton(
+                label = if (running) "Testing..." else "Run network test",
+                onClick = onRun,
+                style = ArsenalButtonStyle.Primary,
+                accent = AccentBar.Emerald,
+                enabled = !running,
+            )
             if (running) {
                 CircularProgressIndicator(
                     modifier = Modifier.padding(start = Spacing.dense),
@@ -354,7 +394,7 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: Str
         Text(
             "Downloads 50 MB + uploads 25 MB to speed.cloudflare.com. ~15s on a 5G connection, longer on slower links.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = androidx.compose.ui.graphics.Color(0xFF999999),
         )
         TestError("Network test failed", error)
     }
@@ -362,10 +402,11 @@ private fun NetworkCard(running: Boolean, result: NetworkTestResult?, error: Str
 @Composable
 private fun DisplayCard(d: DisplayInfo) = SectionCard(
     title = "Display",
+    accent = AccentBar.Neutral,
     explainer = "Panel resolution, refresh rates, and HDR.",
     icon = Icons.Outlined.Brightness6,
 ) {
-    KV("Resolution", "${d.widthPx} × ${d.heightPx}")
+    KV("Resolution", "${d.widthPx} x ${d.heightPx}")
     KV("Density", "${d.densityDpi} dpi")
     KV("Refresh", "%.0f Hz".format(d.refreshHz))
     if (d.supportedRefreshHz.size > 1) {
@@ -377,6 +418,7 @@ private fun DisplayCard(d: DisplayInfo) = SectionCard(
 @Composable
 private fun BatteryCard(b: BatteryInfo) = SectionCard(
     title = "Battery",
+    accent = AccentBar.Amber,
     explainer = "Capacity, health, and live draw.",
     icon = Icons.Outlined.BatteryChargingFull,
 ) {
@@ -402,7 +444,7 @@ private fun BatteryCard(b: BatteryInfo) = SectionCard(
         Text(
             "Battery details aren't readable on this device — most stock Android kernels keep these sysfs nodes restricted.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = androidx.compose.ui.graphics.Color(0xFF999999),
         )
     }
 }
@@ -410,6 +452,7 @@ private fun BatteryCard(b: BatteryInfo) = SectionCard(
 @Composable
 private fun RadioCard(r: RadioInfo) = SectionCard(
     title = "Radios",
+    accent = AccentBar.Neutral,
     explainer = "Wireless connectivity and positioning.",
     icon = Icons.Outlined.SettingsInputAntenna,
 ) {
@@ -424,24 +467,23 @@ private fun RadioCard(r: RadioInfo) = SectionCard(
 // --- Shared helpers ----------------------------------------------
 
 /**
- * Local section card that wraps the shared [SectionCard] and adds an
- * optional one-line explainer under the title (onSurfaceVariant /
- * labelSmall), matching the benchmark cards' "what is this" subtitle.
- * Also threads through the optional [icon] param to the shared component.
+ * Local section card — wraps [ArsenalPanel] with a semantic accent color.
+ * An optional explainer is rendered as muted bodySmall below the panel header.
  */
 @Composable
 private fun SectionCard(
     title: String,
+    accent: androidx.compose.ui.graphics.Color = AccentBar.Neutral,
     explainer: String? = null,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     content: @Composable () -> Unit,
 ) {
-    io.github.mayusi.calibratesoc.ui.components.SectionCard(title = title, icon = icon) {
+    ArsenalPanel(accent = accent, title = title) {
         if (explainer != null) {
             Text(
                 explainer,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                color = androidx.compose.ui.graphics.Color(0xFF999999),
             )
         }
         content()
@@ -458,7 +500,8 @@ private fun TestError(prefix: String, error: String?) {
     Text(
         "$prefix: $error",
         style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.error,
+        color = AccentBar.Red,
+        fontFamily = FontFamily.Monospace,
     )
 }
 
@@ -469,13 +512,14 @@ private fun KV(label: String, value: String, confidence: Confidence? = null) {
             label,
             modifier = Modifier.padding(end = Spacing.item),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = androidx.compose.ui.graphics.Color(0xFF999999),
         )
         Text(
             value,
             modifier = Modifier.padding(end = Spacing.group),
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium,
+            color = androidx.compose.ui.graphics.Color.White,
         )
         confidence?.let { ConfidenceChip(it) }
     }
@@ -483,17 +527,13 @@ private fun KV(label: String, value: String, confidence: Confidence? = null) {
 
 @Composable
 private fun ConfidenceChip(c: Confidence) {
-    val (label, color) = when (c) {
-        Confidence.HIGH -> "verified" to MaterialTheme.colorScheme.tertiary
-        Confidence.MEDIUM -> "inferred" to MaterialTheme.colorScheme.secondary
-        Confidence.LOW -> "guess" to MaterialTheme.colorScheme.outline
-        Confidence.UNKNOWN -> "unknown" to MaterialTheme.colorScheme.error
+    val (label, accent) = when (c) {
+        Confidence.HIGH -> "verified" to AccentBar.Emerald
+        Confidence.MEDIUM -> "inferred" to AccentBar.Amber
+        Confidence.LOW -> "guess" to AccentBar.Neutral
+        Confidence.UNKNOWN -> "unknown" to AccentBar.Red
     }
-    AssistChip(
-        onClick = {},
-        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-        colors = AssistChipDefaults.assistChipColors(labelColor = color),
-    )
+    StatusPill(text = label, accent = accent)
 }
 
 /**

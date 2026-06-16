@@ -38,6 +38,34 @@ data class AutoTdpRunState(
      * so the UI can surface it honestly instead of hiding it.
      */
     val writeFailure: String? = null,
+    /**
+     * Machine-readable classification of the most recent engine decision (the
+     * clean label the UI shows by default; [lastReason] is the raw string shown
+     * on expand). Defaults to [HoldReason.NO_TELEMETRY] before the first tick.
+     */
+    val holdReason: HoldReason = HoldReason.NO_TELEMETRY,
+    /**
+     * HEARTBEAT: wall-clock epoch (ms) of the last tick where the daemon
+     * applied/updated state. Null before the first applied tick. The UI uses this
+     * to prove the daemon is alive (e.g. "last update 2 s ago") vs. silently stuck.
+     */
+    val lastAppliedEpochMs: Long? = null,
+    /**
+     * Wall-clock epoch (ms) when the daemon reached [AutoTdpStatus.RUNNING].
+     * Null until running. Used to compute session-elapsed for energy integration.
+     */
+    val sessionStartEpochMs: Long? = null,
+    /**
+     * The current proof-of-effect bundle (what AutoTDP is doing + measured impact).
+     * Null before the first applied tick. DERIVED fields are always trustworthy;
+     * MEASURED fields are gated on a completed probe (see [AutoTdpEffect]).
+     */
+    val effect: AutoTdpEffect? = null,
+    /**
+     * Rolling history of recent decisions (oldest-first, bounded by
+     * [MAX_DECISION_HISTORY]). Empty before the first applied tick.
+     */
+    val decisions: List<DecisionRecord> = emptyList(),
 )
 
 /** Lifecycle states for the AutoTDP daemon. */

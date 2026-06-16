@@ -78,4 +78,55 @@ class AutoTdpController @Inject constructor(
     internal fun updateSavings(savings: SavingsResult) {
         _state.value = _state.value.copy(savings = savings)
     }
+
+    /**
+     * Called by [AutoTdpSampler] when a probe cycle completes. Sets the measured
+     * [SavingsResult] AND patches the current [AutoTdpEffect]'s MEASURED fields
+     * (power, temp, fps, source) so the proof-of-effect bundle reflects the probe
+     * atomically.
+     *
+     * HONESTY: temp/fps deltas are only surfaced when the probe measured them
+     * (the [ProbeResult] carries null otherwise). The power fields + [EffectSource]
+     * are recomputed via [AutoTdpEffect.from] off the gated savings. The DERIVED
+     * fields (cap delta, parked cores, GPU floor) are preserved from the existing
+     * effect — they were set by the daemon tick.
+     */
+    internal fun updateProbeResult(probe: ProbeResult) {
+        val current = _state.value
+        val existing = current.effect
+        val patchedEffect = if (existing != null) {
+            // Recompute the MEASURED power fields + source off the gated savings,
+            // preserving the DERIVED fields the daemon tick already set.
+            existing.copy(
+                powerSavedMw = if (probe.savings.enoughData) probe.savings.deltaMw else null,
+                powerSavedPct = if (probe.savings.enoughData) probe.savings.deltaPct else null,
+                tempDeltaC = probe.tempDeltaC,
+                fpsDelta = probe.fpsDelta,
+                effectSource = if (probe.savings.enoughData) {
+                    EffectSource.MEASURED
+                } else {
+                    EffectSource.ESTIMATED
+                },
+                sessionEnergySavedMilliWh = sessionEnergyMilliWh(probe.savings, current),
+            )
+        } else {
+            existing
+        }
+        _state.value = current.copy(savings = probe.savings, effect = patchedEffect)
+    }
+
+    /**
+     * Integrate session energy saved (mWh) from a measured saving over the elapsed
+     * session window. Null when the saving isn't measured or the session start is
+     * unknown. Pure helper (epochs read from [state], not the clock).
+     */
+    private fun sessionEnergyMilliWh(savings: SavingsResult, state: AutoTdpRunState): Double? {
+        if (!savings.enoughData) return null
+        val start = state.sessionStartEpochMs ?: return null
+        val now = state.lastAppliedEpochMs ?: return null
+        val elapsedMs = now - start
+        if (elapsedMs <= 0L) return null
+        val hours = elapsedMs.toDouble() / 3_600_000.0
+        return savings.deltaMw.toDouble() * hours
+    }
 }

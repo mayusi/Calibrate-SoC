@@ -105,7 +105,9 @@ class AutoTdpStripDetailTest {
     }
 
     @Test
-    fun `savings shown when enough data`() {
+    fun `positive delta shows saving with no double sign`() {
+        // deltaMw positive = power SAVED vs stock. Must read "saving 800 mW" —
+        // never "saving -800" (the old double-negative bug).
         val result = autoTdpStripDetail(
             parkedCores = emptySet(),
             bigClusterCapKhz = null,
@@ -113,7 +115,35 @@ class AutoTdpStripDetailTest {
             enoughData = true,
             fallbackReason = "",
         )
-        assertThat(result).isEqualTo("saving -800 mW")
+        assertThat(result).isEqualTo("saving 800 mW")
+    }
+
+    @Test
+    fun `negative delta is honestly shown as using more, not a saving`() {
+        // deltaMw negative = drawing MORE than stock (e.g. unparked under CPU load).
+        // Must NOT call it a "saving" and must not produce "--416".
+        val result = autoTdpStripDetail(
+            parkedCores = emptySet(),
+            bigClusterCapKhz = null,
+            deltaMw = -416L,
+            enoughData = true,
+            fallbackReason = "",
+        )
+        assertThat(result).isEqualTo("using 416 mW more")
+        assertThat(result).doesNotContain("saving")
+        assertThat(result).doesNotContain("--")
+    }
+
+    @Test
+    fun `zero delta reads as no change`() {
+        val result = autoTdpStripDetail(
+            parkedCores = emptySet(),
+            bigClusterCapKhz = null,
+            deltaMw = 0L,
+            enoughData = true,
+            fallbackReason = "",
+        )
+        assertThat(result).isEqualTo("no change vs stock")
     }
 
     // ─── Combined ────────────────────────────────────────────────────────────────
@@ -127,7 +157,7 @@ class AutoTdpStripDetailTest {
             enoughData = true,
             fallbackReason = "",
         )
-        assertThat(result).isEqualTo("parked cpu4,cpu5 · cap 1.8G · saving -500 mW")
+        assertThat(result).isEqualTo("parked cpu4,cpu5 · cap 1.8G · saving 500 mW")
     }
 
     @Test

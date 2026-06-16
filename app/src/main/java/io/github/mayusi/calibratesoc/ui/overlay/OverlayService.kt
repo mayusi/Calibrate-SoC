@@ -101,6 +101,13 @@ class OverlayService :
     /** AutoTDP controller — used for HUD in-overlay start/stop/profile switch. */
     @Inject lateinit var autoTdpController: AutoTdpController
 
+    /**
+     * AutoTDP savings probe — bridged to [gameFpsSampler] here so the probe can
+     * read REAL game FPS while the HUD is active. The data layer has no FPS source
+     * of its own; this is the only honest place to supply it.
+     */
+    @Inject lateinit var autoTdpSampler: io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSampler
+
     /** State assembler: owns the single telemetry subscription + AutoTDP feed. */
     @Inject lateinit var assembler: HudStateAssembler
 
@@ -167,6 +174,14 @@ class OverlayService :
             ) { fps, pkg, isReal -> Triple(fps, pkg, isReal) }
                 .collect { (fps, pkg, isReal) -> assembler.feedGameFps(fps, pkg, isReal) }
         }
+
+        // Bridge REAL game FPS into the AutoTDP savings probe. HONESTY: returns the
+        // FPS ONLY when isRealFps is true (a genuine SurfaceFlinger measurement);
+        // otherwise null so AutoTdpEffect.fpsDelta stays null and the UI hides it.
+        autoTdpSampler.realFpsSupplier =
+            io.github.mayusi.calibratesoc.data.autotdp.RealFpsSupplier {
+                if (gameFpsSampler.isRealFps.value) gameFpsSampler.fps.value else null
+            }
 
         // Refresh rate → WindowManager preferred display mode ID.
         serviceScope.launch {
@@ -236,6 +251,9 @@ class OverlayService :
         }
         frameRateSampler.stop()
         gameFpsSampler.stop()
+        // Detach the FPS bridge — the overlay-layer sampler is going away.
+        autoTdpSampler.realFpsSupplier =
+            io.github.mayusi.calibratesoc.data.autotdp.RealFpsSupplier.NONE
         dragHandler?.stop()
         dragHandler = null
         runCatching { composeView?.let { windowManager?.removeView(it) } }
@@ -585,6 +603,18 @@ data class HudUiState(
     val autoTdpSavingsMw: Int? = null,
     val autoTdpSavingsPct: Double? = null,
     val autoTdpSavingsReady: Boolean = false,
+    /** Clean machine-readable classification of the last AutoTDP decision. */
+    val autoTdpHoldReason: io.github.mayusi.calibratesoc.data.autotdp.HoldReason =
+        io.github.mayusi.calibratesoc.data.autotdp.HoldReason.NO_TELEMETRY,
+    /** HEARTBEAT: wall-clock epoch (ms) of the last applied AutoTDP tick. Null = none yet. */
+    val autoTdpLastAppliedEpochMs: Long? = null,
+    /** Big-cluster cap delta vs stock ceiling, in MHz (stockCeiling − cap). Null = uncapped/unknown. */
+    val autoTdpCapDeltaMhz: Int? = null,
+    /** Session energy saved this session in Wh. MEASURED-only; null until probe-backed. */
+    val autoTdpSessionWh: Double? = null,
+    /** Rolling decision history (oldest-first, bounded). Empty before first tick. */
+    val autoTdpDecisions: List<io.github.mayusi.calibratesoc.data.autotdp.DecisionRecord> =
+        emptyList(),
     // AutoTDP active profile (used for the in-HUD profile picker)
     val autoTdpActiveProfile: io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile =
         io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile.BALANCED,

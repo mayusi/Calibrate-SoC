@@ -168,10 +168,15 @@ internal fun autoTdpStripDetail(
     val capLabel = bigClusterCapKhz?.let { khz ->
         "cap ${"%.1f".format(khz / 1_000_000.0)}G"
     }
+    // deltaMw is baselineMw - tunedMw, so POSITIVE = power saved, NEGATIVE =
+    // currently drawing more than the stock baseline (e.g. just unparked under a
+    // CPU-bound load). Never call a power increase a "saving" — honest sign.
     val savingsLabel = when {
         deltaMw == null -> null
         enoughData == false -> "measuring…"
-        else -> deltaMw.let { "saving -${it} mW" }
+        deltaMw > 0L -> "saving ${deltaMw} mW"
+        deltaMw < 0L -> "using ${-deltaMw} mW more"
+        else -> "no change vs stock"
     }
     val parts = listOfNotNull(parkedLabel, capLabel, savingsLabel)
     return if (parts.isEmpty()) fallbackReason.take(60).ifBlank { null }
@@ -252,7 +257,7 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
         val deviceName = capability?.device?.knownHandheldKey ?: "CALIBRATE SOC"
         Text(
             deviceName.uppercase(),
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.headlineLarge,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             color = Color.White,
@@ -493,7 +498,7 @@ private fun AtAGlanceCard(t: Telemetry) {
                 modifier = Modifier.weight(1f),
             )
         }
-        // Row 2: GPU Load + Battery
+        // Row 2: GPU Load + Battery — two tiles, equal width
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Spacing.group),
@@ -512,8 +517,6 @@ private fun AtAGlanceCard(t: Telemetry) {
                 accent = AccentBar.Emerald,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.weight(1f))
         }
     }
 }
@@ -616,8 +619,6 @@ private fun GpuCard(history: List<Telemetry>, latest: Telemetry) {
                 accent = AccentBar.Purple,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
-            Spacer(Modifier.weight(1f))
         }
 
         val series = history.map { it.gpuLoadPct?.toFloat() ?: 0f }

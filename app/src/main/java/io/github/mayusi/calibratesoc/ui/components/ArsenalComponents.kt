@@ -235,7 +235,7 @@ fun ArsenalPanel(
     content: @Composable () -> Unit,
 ) {
     val surfaceColor = Color(0xFF141419)
-    val accentBarWidth = 3.dp
+    val accentBarWidth = 4.dp
     val cornerRadius = 4.dp
 
     when (accentEdge) {
@@ -245,8 +245,8 @@ fun ArsenalPanel(
                     .fillMaxWidth()
                     .background(surfaceColor, RoundedCornerShape(cornerRadius))
                     .border(
-                        width = 0.5.dp,
-                        color = Color.White.copy(alpha = 0.06f),
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.08f),
                         shape = RoundedCornerShape(cornerRadius),
                     )
                     .height(IntrinsicSize.Min),
@@ -276,8 +276,8 @@ fun ArsenalPanel(
                     .fillMaxWidth()
                     .background(surfaceColor, RoundedCornerShape(cornerRadius))
                     .border(
-                        width = 0.5.dp,
-                        color = Color.White.copy(alpha = 0.06f),
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.08f),
                         shape = RoundedCornerShape(cornerRadius),
                     ),
             ) {
@@ -411,13 +411,13 @@ fun MetricTile(
     valueColor: Color? = null,
 ) {
     val tileBg = Color(0xFF0C0C10)
-    val accentBarHeight = 2.dp
+    val accentBarHeight = 3.dp
     val cornerRadius = 4.dp
 
     Column(
         modifier = modifier
             .background(tileBg, RoundedCornerShape(cornerRadius))
-            .border(0.5.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(cornerRadius)),
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(cornerRadius)),
     ) {
         Column(
             modifier = Modifier
@@ -502,7 +502,7 @@ fun StatBar(
 ) {
     val clampedFraction = fraction.coerceIn(0f, 1f)
     val trackColor = Color(0xFF1E1E26)
-    val barHeight = 6.dp
+    val barHeight = 7.dp
 
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -620,16 +620,16 @@ fun SectionHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.dense + 2.dp),
     ) {
-        // 3 dp wide × 16 dp tall colored tick
+        // 3 dp wide x 18 dp tall colored tick
         Box(
             modifier = Modifier
                 .width(3.dp)
-                .height(16.dp)
+                .height(18.dp)
                 .background(accent, RoundedCornerShape(1.dp)),
         )
         Text(
             text = title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelLarge,
             color = Color.White,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.08.sp,

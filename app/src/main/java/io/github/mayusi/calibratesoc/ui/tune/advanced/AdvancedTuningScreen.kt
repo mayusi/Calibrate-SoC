@@ -1200,8 +1200,8 @@ private fun ArsenalExpandableSection(
     ArsenalPanel(accent = accent) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = accent)
-                Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color.White, letterSpacing = 0.07.sp)
+                Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = accent)
+                Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = Color.White, letterSpacing = 0.07.sp)
             }
             IconButton(onClick = { expanded = !expanded }) {
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,

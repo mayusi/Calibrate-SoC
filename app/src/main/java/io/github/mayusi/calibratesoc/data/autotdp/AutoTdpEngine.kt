@@ -92,7 +92,7 @@ object AutoTdpEngine {
         current: TdpState,
     ): TdpDecision {
         if (window.isEmpty()) {
-            return TdpDecision(current, "no telemetry — holding")
+            return TdpDecision(current, "no telemetry — holding", HoldReason.NO_TELEMETRY)
         }
 
         // ── Compute smoothed signals from window ──────────────────────────────
@@ -136,11 +136,25 @@ object AutoTdpEngine {
                     append("battery-target ${config.targetMilliWatts} mW → ")
                     append("big cap ${budgetCap / 1000} MHz")
                 }
-                return TdpDecision(current.copy(bigClusterCapKhz = budgetCap), reason)
+                return TdpDecision(
+                    current.copy(bigClusterCapKhz = budgetCap),
+                    reason,
+                    HoldReason.BATTERY_TARGET_HOLDING,
+                )
             }
         }
 
-        return TdpDecision(current, "holding — ${signals.holdReason()}")
+        // ── Fallback hold ─────────────────────────────────────────────────────
+        // HONESTY: distinguish "load unreadable" from "genuinely idle". When any
+        // window sample is load-blind we CANNOT claim the device is idle — the CPU
+        // could be pegged and we simply can't see it. LOAD_BLIND_HOLDING surfaces
+        // that truthfully; IDLE_HOLDING is only used when load was actually read.
+        val holdReason = if (signals.anyLoadBlind) {
+            HoldReason.LOAD_BLIND_HOLDING
+        } else {
+            HoldReason.IDLE_HOLDING
+        }
+        return TdpDecision(current, "holding — ${signals.holdReason()}", holdReason)
     }
 
     // ── Signal extraction ─────────────────────────────────────────────────────
@@ -316,7 +330,7 @@ object AutoTdpEngine {
             bigClusterCapKhz = newCap,
             gpuFloorLevel = caps.gpuMinLevel, // keep GPU permissive (prioritise GPU)
         )
-        return TdpDecision(newState, reasonParts.joinToString(", "))
+        return TdpDecision(newState, reasonParts.joinToString(", "), HoldReason.GPU_BOUND_CAPPING)
     }
 
     // ── State relaxing (CPU-bound path) ───────────────────────────────────────
@@ -378,7 +392,7 @@ object AutoTdpEngine {
             parkedPrimeCores = newParked,
             bigClusterCapKhz = relaxedCap,
         )
-        return TdpDecision(newState, reasonParts.joinToString(", "))
+        return TdpDecision(newState, reasonParts.joinToString(", "), HoldReason.CPU_BOUND_RELAXING)
     }
 
     // ── BATTERY_TARGET cap derivation ─────────────────────────────────────────
@@ -423,8 +437,15 @@ object AutoTdpEngine {
  * [target] is the full desired [TdpState] the daemon should write.
  * [reason] is a short human-readable explanation for the HUD/log — e.g.
  * "GPU-bound 92%, big/prime 18% → park cpu7, cap big 1804 MHz".
+ * [holdReason] is the machine-readable classification of this decision — the
+ * clean label the UI shows by default, with [reason] available on expand.
+ *
+ * [holdReason] defaults to [HoldReason.NO_TELEMETRY] so any decision constructed
+ * without explicitly setting it is honest about having no basis — but every
+ * branch in [AutoTdpEngine.decide] sets it explicitly.
  */
 data class TdpDecision(
     val target: TdpState,
     val reason: String,
+    val holdReason: HoldReason = HoldReason.NO_TELEMETRY,
 )

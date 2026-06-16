@@ -2,13 +2,12 @@ package io.github.mayusi.calibratesoc.data.autotdp
 
 import android.util.Log
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
-import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
+import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -45,6 +44,18 @@ class AutoTdpSampler @Inject constructor(
     private val samplerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var samplerJob: Job? = null
 
+    /**
+     * Real-game FPS source for the probe. Defaults to [RealFpsSupplier.NONE]
+     * (always null → [AutoTdpEffect.fpsDelta] stays null and the UI hides it).
+     *
+     * The data layer has no FPS source of its own (FPS lives in the overlay-layer
+     * GameFpsSampler), so this is settable: the HUD can bridge its real-FPS
+     * StateFlow in while the overlay is active. HONESTY: the supplier MUST return
+     * null for any non-real (refresh-rate fallback) FPS.
+     */
+    @Volatile
+    var realFpsSupplier: RealFpsSupplier = RealFpsSupplier.NONE
+
     /** Most recent savings result; null before first completed measurement. */
     var lastResult: SavingsResult? = null
         private set
@@ -59,10 +70,12 @@ class AutoTdpSampler @Inject constructor(
     fun runOnce(onResult: ((SavingsResult) -> Unit)? = null) {
         samplerJob?.cancel()
         samplerJob = samplerScope.launch {
-            val result = measure()
-            lastResult = result
-            controller.updateSavings(result)
-            onResult?.invoke(result)
+            val probe = measure()
+            lastResult = probe.savings
+            // Push savings + measured temp/fps deltas in one shot so the effect's
+            // MEASURED fields land atomically with the savings.
+            controller.updateProbeResult(probe)
+            onResult?.invoke(probe.savings)
         }
     }
 
@@ -73,43 +86,73 @@ class AutoTdpSampler @Inject constructor(
 
     // ── Core measurement ──────────────────────────────────────────────────────
 
-    private suspend fun measure(): SavingsResult {
-        Log.i(TAG, "Starting baseline sample (${SAMPLE_DURATION_S}s)")
-        val baselineMw = collectDrawSamples()
-        Log.i(TAG, "Baseline: ${baselineMw.size} samples, mean=${baselineMw.average().toLong()} mW")
+    /**
+     * Run the full baseline→tuned probe and compute savings + measured temp/fps
+     * deltas.
+     *
+     * BASELINE ORDERING (honest framing): the baseline window is the FIRST
+     * [SAMPLE_DURATION_S] seconds after [runOnce] is invoked. When the caller kicks
+     * the probe BEFORE the daemon starts writing (the preferred ordering, done in
+     * AutoTdpService.start), this is a genuine pre-cap baseline. When the daemon is
+     * already RUNNING, the baseline reflects early-session light load — still a real
+     * on-device measurement, never fabricated. The UI labels it "measured on your
+     * device, this session".
+     */
+    private suspend fun measure(): ProbeResult {
+        Log.i(TAG, "Starting baseline window (${SAMPLE_DURATION_S}s)")
+        val baseline = collectWindow()
+        Log.i(TAG, "Baseline: ${baseline.drawMilliW.size} draw samples")
 
         // Wait for daemon to be RUNNING (or give up after WAIT_FOR_DAEMON_MS).
         Log.i(TAG, "Waiting for AutoTDP daemon to be RUNNING…")
         val daemonStarted = waitForDaemonRunning()
         if (!daemonStarted) {
             Log.w(TAG, "Daemon not running after ${WAIT_FOR_DAEMON_MS}ms — returning not-enough-data")
-            return AutoTdpSavings.computeSavings(emptyList(), emptyList())
+            return ProbeResult(
+                savings = AutoTdpSavings.computeSavings(emptyList(), emptyList()),
+                tempDeltaC = null,
+                fpsDelta = null,
+            )
         }
 
         // Small settling delay so the daemon's first writes have taken effect.
         delay(SETTLE_DELAY_MS)
 
-        Log.i(TAG, "Starting tuned sample (${SAMPLE_DURATION_S}s)")
-        val tunedMw = collectDrawSamples()
-        Log.i(TAG, "Tuned: ${tunedMw.size} samples, mean=${tunedMw.average().toLong()} mW")
+        Log.i(TAG, "Starting tuned window (${SAMPLE_DURATION_S}s)")
+        val tuned = collectWindow()
+        Log.i(TAG, "Tuned: ${tuned.drawMilliW.size} draw samples")
 
-        return AutoTdpSavings.computeSavings(baselineMw, tunedMw)
+        val savings = AutoTdpSavings.computeSavings(baseline.drawMilliW, tuned.drawMilliW)
+        // Temp/fps deltas are honest-by-construction: null whenever either window
+        // lacked the corresponding measurement.
+        val tempDeltaC = AutoTdpProbe.tempDeltaC(baseline, tuned)
+        val fpsDelta = AutoTdpProbe.fpsDelta(baseline, tuned)
+
+        return ProbeResult(savings = savings, tempDeltaC = tempDeltaC, fpsDelta = fpsDelta)
     }
 
     /**
-     * Collects [batteryDrawMilliW] samples for approximately [SAMPLE_DURATION_S] seconds.
-     * Returns a list of valid (>0) mW readings. The list may be shorter if the
-     * daemon is killed or the scope is cancelled.
+     * Collects telemetry for approximately [SAMPLE_DURATION_S] seconds and reduces
+     * it (plus the matching real-FPS readings) into a [ProbeWindow] via the pure
+     * [AutoTdpProbe.aggregate]. The window may be shorter if the daemon is killed
+     * or the scope is cancelled.
      */
-    private suspend fun collectDrawSamples(): List<Long> {
+    private suspend fun collectWindow(): ProbeWindow {
         val sampleCount = (SAMPLE_DURATION_S * 1000L / MonitorService.DEFAULT_INTERVAL_MS).toInt()
             .coerceAtLeast(AutoTdpSavings.MIN_SAMPLES_FOR_REPORT + 1)
 
-        return monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS)
+        val samples = ArrayList<Telemetry>(sampleCount)
+        val fpsPerTick = ArrayList<Int?>(sampleCount)
+        monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS)
             .take(sampleCount)
             .toList()
-            .mapNotNull { it.batteryDrawMilliW }
-            .filter { it > 0 }
+            .forEach { sample ->
+                samples += sample
+                // Sample real FPS once per tick alongside the telemetry. Null when
+                // not a genuine measurement (honest hide downstream).
+                fpsPerTick += realFpsSupplier.currentRealFps()
+            }
+        return AutoTdpProbe.aggregate(samples, fpsPerTick)
     }
 
     /**

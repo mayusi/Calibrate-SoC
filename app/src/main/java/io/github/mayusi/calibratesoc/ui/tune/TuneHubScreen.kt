@@ -115,7 +115,7 @@ fun ArsenalTabRow(
     val bgColor   = Color(0xFF0C0C10)
     val inactiveText = Color(0xFF6B7280)
     val dividerColor = Color.White.copy(alpha = 0.06f)
-    val indicatorH = 3.dp
+    val indicatorH = 4.dp
 
     Column(
         modifier = modifier
@@ -135,7 +135,7 @@ fun ArsenalTabRow(
                         .weight(1f)
                         .clip(RoundedCornerShape(0.dp))
                         .clickable { onTabSelected(index) }
-                        .padding(vertical = 10.dp),
+                        .padding(vertical = 12.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(

@@ -69,6 +69,7 @@ class AutoTdpService : Service() {
     @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var tunableWriter: TunableWriter
     @Inject lateinit var controller: AutoTdpController
+    @Inject lateinit var sampler: AutoTdpSampler
     @Inject lateinit var writerRegistry: io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
     @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 
@@ -183,18 +184,35 @@ class AutoTdpService : Service() {
         val gpuRootPath = report.gpu?.rootPath
 
         Log.i(TAG, "Starting LIVE daemon: profile=${config.profile}, caps=$caps")
+        // sessionStartEpochMs marks the RUNNING transition — used for the heartbeat
+        // baseline and session-energy integration. Captured here (Dispatchers.IO).
+        val sessionStartEpochMs = System.currentTimeMillis()
         controller.updateState(
             AutoTdpRunState(
                 status = AutoTdpStatus.RUNNING,
                 liveAvailable = true,
+                sessionStartEpochMs = sessionStartEpochMs,
             )
         )
         updateNotification(status = "Running", detail = "")
 
+        // ── REVIVE THE SAMPLER (proof-of-effect keystone) ──────────────────────
+        // Kick a one-shot baseline→tuned probe. The sampler now waits for RUNNING
+        // (already true) then collects its baseline window. To keep that baseline
+        // HONEST (pre-cap), the control loop below holds at STOCK — applying NO
+        // writes — for BASELINE_GRACE_MS so the sampler's first window measures the
+        // device's stock draw. After the grace period the daemon begins tuning and
+        // the sampler's tuned window captures the effect. The result populates the
+        // MEASURED effect fields once it has enough samples; until then the UI hides
+        // them (it never shows a fabricated number).
+        sampler.runOnce()
+
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
+        val decisions = ArrayDeque<DecisionRecord>(MAX_DECISION_HISTORY + 1)
         val thermalKill = ThermalKillEvaluator()   // stateful: tracks consecutive over-threshold samples
+        val stockCeilingKhz = caps.bigClusterOppStepsKhz.lastOrNull() // top OPP = stock big ceiling
 
         try {
             monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS).collect { sample ->
@@ -224,15 +242,23 @@ class AutoTdpService : Service() {
                     current = currentState,
                 )
 
+                // ── Honest-baseline grace gate ─────────────────────────────────
+                // For the first BASELINE_GRACE_MS after RUNNING, hold at STOCK so the
+                // sampler's baseline window measures genuine pre-cap draw. We still
+                // run the engine (so the HUD shows what it WOULD do) but apply nothing.
+                val inBaselineGrace =
+                    (System.currentTimeMillis() - sessionStartEpochMs) < BASELINE_GRACE_MS
+                val effectiveTarget = if (inBaselineGrace) currentState else decision.target
+
                 // ── Apply delta ────────────────────────────────────────────────
                 // BUG E FIX (honest Applied): track at the tick level whether all ops
                 // succeeded. Declared outside the `if` block so displayReason can use it.
                 var allOpsSucceeded = true
 
-                if (decision.target != currentState) {
+                if (effectiveTarget != currentState) {
                     val ops = TdpStateTransition.delta(
                         from = currentState,
-                        to = decision.target,
+                        to = effectiveTarget,
                         bigPolicyId = caps.bigPolicyId,
                         gpuRootPath = gpuRootPath,
                     )
@@ -284,7 +310,7 @@ class AutoTdpService : Service() {
                     // If any op was skipped, currentState stays at the last fully-applied
                     // state so the HUD shows the ACTUAL written state, not the intent.
                     if (allOpsSucceeded) {
-                        currentState = decision.target
+                        currentState = effectiveTarget
                     }
                 }
 
@@ -297,16 +323,75 @@ class AutoTdpService : Service() {
                     decision.reason
                 }
                 Log.v(TAG, "decision: $displayReason")
+
+                // ── Proof-of-effect wiring ─────────────────────────────────────
+                // HEARTBEAT: record wall-clock of this applied tick.
+                val nowMs = System.currentTimeMillis()
+                // Carry the engine's HoldReason into run state (UI's clean label).
+                val holdReason = decision.holdReason
+                // Append a DecisionRecord (FIFO, bounded by MAX_DECISION_HISTORY).
+                decisions.addLast(
+                    DecisionRecord(
+                        epochMs = nowMs,
+                        holdReason = holdReason,
+                        bigCapKhz = currentState.bigClusterCapKhz,
+                        parkedCount = currentState.parkedPrimeCores.size,
+                        rawReason = displayReason,
+                    )
+                )
+                while (decisions.size > MAX_DECISION_HISTORY) decisions.removeFirst()
+
+                // Build the effect bundle. DERIVED fields (cap delta, parked cores,
+                // GPU floor) are ALWAYS populated from currentState + caps. MEASURED
+                // fields come from `savings` once the probe has enough data; the
+                // sampler also patches temp/fps in via updateProbeResult. We re-stamp
+                // the stock ceiling here because TdpState carries no ceiling itself.
+                val savings = controller.state.value.savings
+                val sessionElapsedMs = nowMs - sessionStartEpochMs
+                val effect = AutoTdpEffect.from(
+                    appliedState = currentState,
+                    caps = caps,
+                    savings = savings,
+                    sessionElapsedMs = sessionElapsedMs,
+                ).let {
+                    // Preserve measured temp/fps the sampler may have already patched
+                    // onto the prior effect (from() always nulls them).
+                    val prior = controller.state.value.effect
+                    if (prior != null && it.effectSource == EffectSource.MEASURED) {
+                        it.copy(tempDeltaC = prior.tempDeltaC, fpsDelta = prior.fpsDelta)
+                    } else {
+                        it
+                    }
+                }.let {
+                    // Defensive: ensure the stock ceiling reflects caps even if the
+                    // OPP table was somehow empty in from() (keeps capDelta honest).
+                    if (it.stockBigCeilingKhz == null && stockCeilingKhz != null) {
+                        val cap = it.bigCapKhz
+                        it.copy(
+                            stockBigCeilingKhz = stockCeilingKhz,
+                            capDeltaKhz = if (cap != null) stockCeilingKhz - cap else null,
+                        )
+                    } else {
+                        it
+                    }
+                }
+
                 controller.updateState(
                     controller.state.value.copy(
                         status = AutoTdpStatus.RUNNING,
                         lastReason = displayReason,
                         appliedState = currentState,
+                        holdReason = holdReason,
+                        lastAppliedEpochMs = nowMs,
+                        effect = effect,
+                        decisions = decisions.toList(),
                     )
                 )
                 updateNotification(status = "Running", detail = displayReason)
             }
         } finally {
+            // Stop the savings probe if it's still mid-cycle — the session is over.
+            sampler.cancel()
             // ── Revert all writes (CRITICAL) ───────────────────────────────────
             Log.i(TAG, "Reverting all AutoTDP writes via TunableWriter")
             val summary = tunableWriter.revertAll(report)
@@ -497,6 +582,14 @@ class AutoTdpService : Service() {
 
         /** Rolling telemetry window depth (matches design spec: ~4 samples). */
         private const val WINDOW_SIZE = 4
+
+        /**
+         * Honest-baseline grace period (ms): the daemon holds at STOCK (applies no
+         * writes) for this long after RUNNING so the sampler's baseline window
+         * measures genuine pre-cap draw. Matches [AutoTdpSampler.SAMPLE_DURATION_S]
+         * (20 s) so the baseline window completes before tuning begins.
+         */
+        private const val BASELINE_GRACE_MS = AutoTdpSampler.SAMPLE_DURATION_S * 1000L
 
         /**
          * Battery percentage below which the daemon stops. 5% is the same

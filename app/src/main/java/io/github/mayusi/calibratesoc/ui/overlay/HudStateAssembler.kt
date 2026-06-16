@@ -178,6 +178,12 @@ class HudStateAssembler @Inject constructor(
                 val running = autoState.status == AutoTdpStatus.RUNNING
                 val applied = autoState.appliedState
                 val savings = autoState.savings
+                val effect = autoState.effect
+                // capDelta MHz from the effect's DERIVED kHz delta (always honest).
+                val capDeltaMhz = effect?.capDeltaKhz?.let { it / 1000 }
+                // Session energy: effect carries mWh; HUD shows Wh. MEASURED-only —
+                // null until a completed probe backs it, so we never show a fake number.
+                val sessionWh = effect?.sessionEnergySavedMilliWh?.let { it / 1000.0 }
                 _state.value = _state.value.copy(
                     autoTdpStatus = autoState.status,
                     autoTdpRunning = running,
@@ -188,6 +194,11 @@ class HudStateAssembler @Inject constructor(
                     autoTdpSavingsMw = savings?.deltaMw?.toInt(),
                     autoTdpSavingsPct = savings?.deltaPct,
                     autoTdpSavingsReady = savings?.enoughData ?: false,
+                    autoTdpHoldReason = autoState.holdReason,
+                    autoTdpLastAppliedEpochMs = autoState.lastAppliedEpochMs,
+                    autoTdpCapDeltaMhz = capDeltaMhz,
+                    autoTdpSessionWh = sessionWh,
+                    autoTdpDecisions = autoState.decisions,
                 )
             }
         }

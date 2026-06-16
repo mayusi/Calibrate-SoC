@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,7 +40,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,10 +57,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpEffect
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
+import io.github.mayusi.calibratesoc.data.autotdp.DecisionRecord
+import io.github.mayusi.calibratesoc.data.autotdp.EffectSource
+import io.github.mayusi.calibratesoc.data.autotdp.HoldReason
 import io.github.mayusi.calibratesoc.data.autotdp.SavingsResult
 import io.github.mayusi.calibratesoc.data.efficiency.EstimateSource
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
@@ -77,6 +84,7 @@ import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
+import kotlinx.coroutines.delay
 
 /**
  * AutoTDP screen — Direction C Arsenal rebuild.
@@ -632,65 +640,9 @@ private fun LiveNowArsenalGrid(
 private fun RunningStatePanels(runState: AutoTdpRunState) {
     when (runState.status) {
         AutoTdpStatus.RUNNING -> {
-            val state = runState.appliedState
-
-            ArsenalPanel(accent = AccentBar.Blue, title = "Current kernel writes") {
-                if (state != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
-                        if (state.parkedPrimeCores.isNotEmpty()) {
-                            KvRow(
-                                label = "PARKED PRIME CORES",
-                                value = state.parkedPrimeCores.sorted().joinToString(", ") { "cpu$it" },
-                                explainer = "Offlined to shed thermal load and cut power draw.",
-                            )
-                        } else {
-                            KvRow(label = "PRIME CORES", value = "all online", explainer = "No parking — CPU-bound or below threshold.")
-                        }
-                        state.bigClusterCapKhz?.let { cap ->
-                            KvRow(label = "BIG CLUSTER CAP", value = "${cap / 1000} MHz", explainer = "Frequency ceiling. Efficiency knee or target.")
-                        }
-                        state.gpuFloorLevel?.let { lvl ->
-                            KvRow(
-                                label = "GPU MAX POWER LEVEL",
-                                value = "$lvl${if (lvl == 0) " (max perf)" else ""}",
-                                explainer = "0 = fastest. AutoTDP keeps GPU fast when CPU is parked.",
-                            )
-                        }
-                        if (state.governorOverrides.isNotEmpty()) {
-                            KvRow(
-                                label = "GOVERNOR OVERRIDES",
-                                value = state.governorOverrides.entries.joinToString(", ") { (p, g) -> "policy$p→$g" },
-                            )
-                        }
-                    }
-                }
-
-                // Decision reason — monospace
-                if (runState.lastReason.isNotBlank()) {
-                    Spacer(Modifier.height(Spacing.dense))
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
-                    Spacer(Modifier.height(Spacing.dense))
-                    Text(
-                        "DECISION",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AccentBar.Neutral,
-                        letterSpacing = 0.07.sp,
-                    )
-                    Spacer(Modifier.height(Spacing.dense))
-                    Text(
-                        runState.lastReason,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = Color(0xFFCCCCCC),
-                    )
-                }
-            }
-
-            // Savings block (shown when measuring OR ready)
-            Spacer(Modifier.height(Spacing.item))
-            ArsenalPanel(accent = AccentBar.Emerald, title = "Draw savings (measured this session)") {
-                DrawSavingsArsenalBlock(savings = runState.savings)
-            }
+            // Rich "proof it's working" stack. Owns a 1 s live clock so the
+            // heartbeat ("Xs ago") and pulse animate even between daemon ticks.
+            AutoTdpProofOfEffectPanels(runState = runState)
         }
 
         AutoTdpStatus.KILLED_BY_SAFETY -> {
@@ -739,76 +691,556 @@ private fun RunningStatePanels(runState: AutoTdpRunState) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  AutoTDP "proof it's working" panel suite (RUNNING only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The rich proof-of-effect stack shown while AutoTDP is RUNNING.
+ *
+ * Honesty-first: every measured row is hidden unless its backing field on
+ * [AutoTdpRunState] is non-null. DERIVED facts (what the tuner changed, why it
+ * is holding) render immediately; MEASURED facts (power/temp/fps/energy) appear
+ * only once the ~40 s A/B probe lands ([EffectSource.MEASURED] / enoughData).
+ *
+ * Sections, top-to-bottom:
+ *  1. WHAT IT CHANGED NOW    — derived applied-config facts.
+ *  2. WHY IT'S HOLDING       — clean hold-reason label + raw reason on expand.
+ *  3. EFFECT VS STOCK        — measured power/temp/fps proof, or honest "measuring".
+ *  4. SESSION SAVINGS        — integrated Wh, hidden until measured.
+ *  5. HEARTBEAT              — last-applied time-ago + live pulse.
+ *  6. DECISION HISTORY       — compact adapting-over-time timeline.
+ *
+ * Owns a 1 s clock so HEARTBEAT and the "time-ago" labels stay live between
+ * daemon ticks. The clock is read-only display state — no data mutation.
+ */
 @Composable
-private fun DrawSavingsArsenalBlock(savings: SavingsResult?) {
-    when {
-        savings == null -> {
+private fun AutoTdpProofOfEffectPanels(runState: AutoTdpRunState) {
+    // Live 1 s clock for relative-time + pulse. Seeded so the first frame is
+    // correct before the first delay elapses.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000L)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+
+    val effect = runState.effect
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.item)) {
+
+        // ── 1. WHAT IT CHANGED NOW ────────────────────────────────────────────
+        ArsenalPanel(accent = AccentBar.Blue, title = "What it changed now") {
+            WhatItChangedBlock(effect = effect, appliedState = runState.appliedState)
+        }
+
+        // ── 2. WHY IT'S HOLDING ───────────────────────────────────────────────
+        ArsenalPanel(
+            accent = holdReasonAccent(runState.holdReason),
+            title = "Why it's holding",
+        ) {
+            WhyHoldingBlock(holdReason = runState.holdReason, rawReason = runState.lastReason)
+        }
+
+        // ── 3. EFFECT VS STOCK (measured) ─────────────────────────────────────
+        ArsenalPanel(accent = AccentBar.Emerald, title = "Effect vs stock") {
+            EffectVsStockBlock(effect = effect, savings = runState.savings)
+        }
+
+        // ── 4. SESSION SAVINGS (hidden until measured) ────────────────────────
+        effect?.sessionEnergySavedMilliWh?.let { mwh ->
+            ArsenalPanel(accent = AccentBar.Emerald, title = "Session savings") {
+                SessionSavingsBlock(milliWh = mwh)
+            }
+        }
+
+        // ── 5. HEARTBEAT ──────────────────────────────────────────────────────
+        runState.lastAppliedEpochMs?.let { lastMs ->
+            ArsenalPanel(accent = AccentBar.Neutral) {
+                HeartbeatBlock(lastAppliedEpochMs = lastMs, nowMs = nowMs)
+            }
+        }
+
+        // ── 6. DECISION HISTORY ───────────────────────────────────────────────
+        if (runState.decisions.isNotEmpty()) {
+            ArsenalPanel(accent = AccentBar.Blue, title = "Decision history") {
+                DecisionHistoryBlock(decisions = runState.decisions, nowMs = nowMs)
+            }
+        }
+    }
+}
+
+// ── 1. WHAT IT CHANGED NOW ─────────────────────────────────────────────────
+
+@Composable
+private fun WhatItChangedBlock(
+    effect: AutoTdpEffect?,
+    appliedState: io.github.mayusi.calibratesoc.data.autotdp.TdpState?,
+) {
+    // Source the derived facts from the effect bundle when present (always
+    // populated once running); fall back to appliedState for the raw set.
+    val parked = effect?.parkedPrimeCores ?: appliedState?.parkedPrimeCores ?: emptySet()
+    val bigCapKhz = effect?.bigCapKhz ?: appliedState?.bigClusterCapKhz
+    val gpuFloor = effect?.gpuFloorLevel ?: appliedState?.gpuFloorLevel
+    val capDeltaKhz = effect?.capDeltaKhz
+    val stockCeilingKhz = effect?.stockBigCeilingKhz
+
+    val nothingApplied = parked.isEmpty() && bigCapKhz == null && gpuFloor == null
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        if (nothingApplied) {
+            // Honest: derived facts show no change in effect right now.
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+                StatusPill(text = "HOLDING AT STOCK", accent = AccentBar.Neutral)
+                Text(
+                    "No cap, no parked cores, GPU unconstrained — running at the device's stock ceiling this tick.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        } else {
+            // BIG CLUSTER CAP — derived, with delta vs stock ceiling when known.
+            if (bigCapKhz != null) {
+                val deltaText = if (capDeltaKhz != null && stockCeilingKhz != null) {
+                    "  (-${capDeltaKhz / 1000} MHz vs ${stockCeilingKhz / 1000} stock)"
+                } else ""
+                KvRow(
+                    label = "BIG CLUSTER CAP",
+                    value = "${bigCapKhz / 1000} MHz$deltaText",
+                    explainer = "Frequency ceiling held below stock to stay on the efficient V/F curve.",
+                )
+            }
+            // PARKED PRIME CORES — derived (count + which).
+            if (parked.isNotEmpty()) {
+                val cores = parked.sorted()
+                KvRow(
+                    label = "PARKED PRIME CORES",
+                    value = "${cores.size} (${cores.joinToString(", ") { "cpu$it" }})",
+                    explainer = "Offlined to shed power; budget redirected to GPU / cooler cores.",
+                )
+            }
+            // GPU LEVEL HELD — derived. 0 = max perf.
+            if (gpuFloor != null) {
+                KvRow(
+                    label = "GPU LEVEL HELD",
+                    value = "$gpuFloor${if (gpuFloor == 0) " (max perf)" else ""}",
+                    explainer = "0 = fastest. Kept low so the GPU stays fast while CPU is trimmed.",
+                )
+            }
+        }
+    }
+}
+
+// ── 2. WHY IT'S HOLDING ────────────────────────────────────────────────────
+
+@Composable
+private fun WhyHoldingBlock(holdReason: HoldReason, rawReason: String) {
+    var expanded by remember { mutableStateOf(false) }
+    val accent = holdReasonAccent(holdReason)
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+        ) {
+            StatusPill(text = holdReasonLabel(holdReason), accent = accent)
+            if (rawReason.isNotBlank()) {
+                Text(
+                    if (expanded) "Hide detail" else "Show detail",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AccentBar.Blue,
+                    modifier = Modifier.clickable { expanded = !expanded },
+                )
+            }
+        }
+        Text(
+            holdReasonExplainer(holdReason),
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFBBBBBB),
+        )
+        // Raw engine reason (with live %s) shown on expand — the unfiltered truth.
+        if (expanded && rawReason.isNotBlank()) {
+            Spacer(Modifier.height(Spacing.dense))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+            Spacer(Modifier.height(Spacing.dense))
             Text(
-                "Measuring baseline… sampling battery draw before AutoTDP enables (~20 s). Keep the same workload running.",
+                "RAW ENGINE REASON",
+                style = MaterialTheme.typography.labelSmall,
+                color = AccentBar.Neutral,
+                letterSpacing = 0.07.sp,
+            )
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                rawReason,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFFCCCCCC),
+            )
+        }
+    }
+}
+
+// ── 3. EFFECT VS STOCK (measured proof) ────────────────────────────────────
+
+@Composable
+private fun EffectVsStockBlock(effect: AutoTdpEffect?, savings: SavingsResult?) {
+    val measured = effect?.effectSource == EffectSource.MEASURED &&
+        savings != null && savings.enoughData
+
+    if (!measured) {
+        // HONEST measuring state — show progress, NEVER a fabricated number.
+        val haveSamples = savings != null && savings.sampleCount > 0
+        Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            Text(
+                "Measuring effect… first ~40 s of this run (20 s stock baseline, then 20 s tuned). " +
+                    "Keep the same workload running for an honest comparison.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF999999),
             )
+            if (haveSamples) {
+                StatBar(
+                    label = "Collecting samples",
+                    value = "${savings!!.sampleCount} / ${AutoTdpSavings.MIN_SAMPLES_FOR_REPORT}",
+                    fraction = savings.sampleCount.toFloat() / AutoTdpSavings.MIN_SAMPLES_FOR_REPORT,
+                    accent = AccentBar.Amber,
+                )
+            } else {
+                StatusPill(text = "PROBE IN PROGRESS", accent = AccentBar.Amber)
+            }
         }
-        !savings.enoughData -> {
-            StatBar(
-                label = "Measuring",
-                value = "${savings.sampleCount} / ${AutoTdpSavings.MIN_SAMPLES_FOR_REPORT}",
-                fraction = savings.sampleCount.toFloat() / AutoTdpSavings.MIN_SAMPLES_FOR_REPORT,
+        return
+    }
+
+    // Measured — render the proof. savings is guaranteed non-null here.
+    val s = savings!!
+    val saving = s.deltaMw
+    val pct = kotlin.math.abs(s.deltaPct)
+    val isSaving = saving > 0
+    val accent = if (isSaving) AccentBar.Emerald else AccentBar.Red
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        // Headline power saving (W + %).
+        val savingW = saving.toDouble() / 1000.0
+        Text(
+            if (isSaving) "Saving ${"%.2f".format(savingW)} W  /  ${"%.1f".format(pct)}%"
+            else "Using ${"%.2f".format(kotlin.math.abs(savingW))} W more  /  ${"%.1f".format(pct)}%",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            color = accent,
+        )
+
+        // Baseline vs tuned mW pair + delta.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+        ) {
+            MetricTile(
+                label = "STOCK BASELINE",
+                value = "${s.baselineMw}",
+                unit = "mW",
+                accent = AccentBar.Neutral,
+                modifier = Modifier.weight(1f),
+            )
+            MetricTile(
+                label = "TUNED",
+                value = "${s.tunedMw}",
+                unit = "mW",
                 accent = AccentBar.Emerald,
+                modifier = Modifier.weight(1f),
+            )
+            MetricTile(
+                label = "DELTA",
+                value = if (isSaving) "-$saving" else "+${-saving}",
+                unit = "mW",
+                accent = accent,
+                valueColor = accent,
+                modifier = Modifier.weight(1f),
             )
         }
-        else -> {
-            val saving = savings.deltaMw
-            val pct = kotlin.math.abs(savings.deltaPct)
-            val isSaving = saving > 0
-            val accent = if (isSaving) AccentBar.Emerald else AccentBar.Red
 
-            if (isSaving) {
-                Text(
-                    "Saving ~${saving} mW / ${"%.1f".format(pct)}%",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                    color = accent,
-                )
-                Spacer(Modifier.height(Spacing.dense))
-            }
-
+        // Temp + FPS deltas — each hidden when its measured field is null.
+        val tempDelta = effect?.tempDeltaC
+        val fpsDelta = effect?.fpsDelta
+        if (tempDelta != null || fpsDelta != null) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
             ) {
-                MetricTile(
-                    label = "BASELINE",
-                    value = "${savings.baselineMw}",
-                    unit = "mW",
-                    accent = AccentBar.Neutral,
-                    modifier = Modifier.weight(1f),
-                )
-                MetricTile(
-                    label = "WITH AUTOTDP",
-                    value = "${savings.tunedMw}",
-                    unit = "mW",
-                    accent = AccentBar.Emerald,
-                    modifier = Modifier.weight(1f),
-                )
-                MetricTile(
-                    label = "DELTA",
-                    value = if (isSaving) "-$saving" else "+${-saving}",
-                    unit = "mW",
-                    accent = accent,
-                    valueColor = accent,
-                    modifier = Modifier.weight(1f),
-                )
+                if (tempDelta != null) {
+                    val cooler = tempDelta > 0f
+                    MetricTile(
+                        label = "TEMP DELTA",
+                        value = (if (cooler) "-" else "+") + "%.1f".format(kotlin.math.abs(tempDelta)),
+                        unit = "°C",
+                        accent = AccentBar.Amber,
+                        valueColor = if (cooler) AccentBar.Emerald else AccentBar.Red,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                if (fpsDelta != null) {
+                    MetricTile(
+                        label = "FPS DELTA",
+                        value = if (fpsDelta >= 0) "+$fpsDelta" else "$fpsDelta",
+                        unit = "fps",
+                        accent = AccentBar.Purple,
+                        valueColor = if (fpsDelta >= 0) AccentBar.Emerald else AccentBar.Red,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                // Keep the row balanced when only one delta is present.
+                if (tempDelta == null || fpsDelta == null) {
+                    Spacer(Modifier.weight(1f))
+                }
             }
-            Spacer(Modifier.height(Spacing.dense))
+        }
+
+        // Confidence + provenance label — explicit about what this is.
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+            StatusPill(text = "MEASURED", accent = AccentBar.Emerald)
             Text(
-                "${savings.sampleCount} samples — measured on this device, this session.",
+                "${s.sampleCount}/${AutoTdpSavings.MIN_SAMPLES_FOR_REPORT}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF999999),
+            )
+        }
+        Text(
+            "Measured on your device this session — stock baseline (first 20 s) vs tuned.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF777777),
+        )
+    }
+}
+
+// ── 4. SESSION SAVINGS ─────────────────────────────────────────────────────
+
+@Composable
+private fun SessionSavingsBlock(milliWh: Double) {
+    val wh = milliWh / 1000.0
+    val display = if (wh < 0.1) "%.3f".format(wh) else "%.2f".format(wh)
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Text(
+            "≈ $display Wh saved this session",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            color = AccentBar.Emerald,
+        )
+        Text(
+            "Based on your measured baseline, integrated over the time AutoTDP has been running.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF777777),
+        )
+    }
+}
+
+// ── 5. HEARTBEAT ───────────────────────────────────────────────────────────
+
+@Composable
+private fun HeartbeatBlock(lastAppliedEpochMs: Long, nowMs: Long) {
+    val stale = isHeartbeatStale(lastAppliedEpochMs, nowMs)
+    val accent = if (stale) AccentBar.Amber else AccentBar.Emerald
+    val agoText = relativeTimeAgo(lastAppliedEpochMs, nowMs)
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+    ) {
+        // Live pulse dot — emerald when fresh, muted amber when stalled.
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(accent.copy(alpha = if (stale) 0.5f else 1f), RoundedCornerShape(4.dp)),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                if (stale) "AutoTDP heartbeat stalled" else "AutoTDP adjusted $agoText",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+                color = if (stale) AccentBar.Amber else Color.White,
+            )
+            Text(
+                if (stale) "Last applied $agoText — no fresh tick recently. It may be holding steady, or the loop is stuck."
+                else "The daemon is applying state on its tick — proof it's alive, not silently stuck.",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF777777),
             )
         }
+        StatusPill(text = if (stale) "STALLED" else "LIVE", accent = accent)
     }
+}
+
+// ── 6. DECISION HISTORY ────────────────────────────────────────────────────
+
+@Composable
+private fun DecisionHistoryBlock(decisions: List<DecisionRecord>, nowMs: Long) {
+    // Newest-first for the timeline; cap the rendered rows so a long ring
+    // doesn't dominate the screen (the data layer already bounds to ~20).
+    val ordered = remember(decisions) { decisions.asReversed() }
+    val shown = ordered.take(8)
+
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Text(
+            "Recent decisions (newest first) — proof AutoTDP is adapting, not frozen.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF777777),
+        )
+
+        // Cap-vs-time sparkline. Flat = holding steady (honest), not faked.
+        DecisionCapSparkline(decisions = decisions)
+
+        shown.forEachIndexed { index, d ->
+            if (index > 0) {
+                HorizontalDivider(color = Color.White.copy(alpha = 0.05f))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+            ) {
+                // Color tick keyed to the hold reason.
+                Box(
+                    modifier = Modifier
+                        .padding(top = 3.dp)
+                        .width(3.dp)
+                        .height(14.dp)
+                        .background(holdReasonAccent(d.holdReason), RoundedCornerShape(1.dp)),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        holdReasonLabel(d.holdReason),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = holdReasonAccent(d.holdReason),
+                        letterSpacing = 0.05.sp,
+                    )
+                    Text(
+                        buildString {
+                            append(if (d.bigCapKhz != null) "${d.bigCapKhz / 1000} MHz cap" else "uncapped")
+                            append(" · ")
+                            append(if (d.parkedCount > 0) "${d.parkedCount} parked" else "0 parked")
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFF999999),
+                    )
+                }
+                Text(
+                    relativeTimeAgo(d.epochMs, nowMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF777777),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A compact cap-vs-time sparkline drawn from the decision ring. Each bar is a
+ * decision's big-cluster cap as a fraction of the max cap seen in the window;
+ * uncapped decisions render as a full-height muted bar. A flat line is an
+ * HONEST signal that the tuner is holding steady — we never smooth or invent
+ * intermediate points.
+ */
+@Composable
+private fun DecisionCapSparkline(decisions: List<DecisionRecord>) {
+    // Need at least two points and at least one real cap to be meaningful.
+    val caps = decisions.map { it.bigCapKhz }
+    val maxCap = caps.filterNotNull().maxOrNull()
+    if (decisions.size < 2 || maxCap == null || maxCap <= 0) return
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(28.dp),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        decisions.forEach { d ->
+            val cap = d.bigCapKhz
+            // Uncapped → full height muted; capped → proportional emerald.
+            val fraction = if (cap == null) 1f else (cap.toFloat() / maxCap.toFloat()).coerceIn(0.06f, 1f)
+            val barColor = if (cap == null) AccentBar.Neutral.copy(alpha = 0.4f) else AccentBar.Emerald
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(fraction)
+                    .background(barColor, RoundedCornerShape(topStart = 1.dp, topEnd = 1.dp)),
+            )
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Pure helpers for the proof-of-effect panel (no Android — unit-testable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Clean, honest UI label for a [HoldReason]. */
+internal fun holdReasonLabel(reason: HoldReason): String = when (reason) {
+    HoldReason.CPU_BOUND_RELAXING -> "CPU-bound — relaxing"
+    HoldReason.GPU_BOUND_CAPPING -> "GPU-bound — capping"
+    HoldReason.BATTERY_TARGET_HOLDING -> "Battery target — holding"
+    // Mandatory honesty distinction: load-blind is NOT idle.
+    HoldReason.LOAD_BLIND_HOLDING -> "CPU load unreadable — holding"
+    HoldReason.IDLE_HOLDING -> "Lightly loaded — holding"
+    HoldReason.NO_TELEMETRY -> "No telemetry — holding"
+}
+
+/** One-line plain-language explainer for a [HoldReason]. */
+internal fun holdReasonExplainer(reason: HoldReason): String = when (reason) {
+    HoldReason.CPU_BOUND_RELAXING ->
+        "A big/prime core was saturated, so AutoTDP relaxed — unparked a core or stepped the cap up. The CPU is the bottleneck."
+    HoldReason.GPU_BOUND_CAPPING ->
+        "The workload was GPU-bound across the window, so AutoTDP tightened — parked a prime core or stepped the cap down to redirect power to the GPU."
+    HoldReason.BATTERY_TARGET_HOLDING ->
+        "Holding the proportional cap derived from your battery-life target, even though neither saturation nor GPU-bound fired."
+    HoldReason.LOAD_BLIND_HOLDING ->
+        "CPU load is unreadable on this device (no /proc/stat or freq proxy this sample). The CPU could be busy — we can't measure it, so we hold rather than guess. This is NOT idle."
+    HoldReason.IDLE_HOLDING ->
+        "Load IS readable and is below the saturation threshold, and the workload is not GPU-bound. Genuinely lightly loaded, so nothing to do."
+    HoldReason.NO_TELEMETRY ->
+        "No telemetry was available this tick (empty window). AutoTDP made no real decision."
+}
+
+/** Accent color keyed to a [HoldReason] — emerald=active relax, amber=caution/blind. */
+internal fun holdReasonAccent(reason: HoldReason): Color = when (reason) {
+    HoldReason.CPU_BOUND_RELAXING -> AccentBar.Emerald
+    HoldReason.GPU_BOUND_CAPPING -> AccentBar.Emerald
+    HoldReason.BATTERY_TARGET_HOLDING -> AccentBar.Amber
+    HoldReason.LOAD_BLIND_HOLDING -> AccentBar.Amber
+    HoldReason.IDLE_HOLDING -> AccentBar.Neutral
+    HoldReason.NO_TELEMETRY -> AccentBar.Neutral
+}
+
+/** Heartbeat staleness threshold — daemon ticks ~1 Hz, so >3 s is stalled. */
+internal const val HEARTBEAT_STALE_MS = 3_000L
+
+/** True when the last-applied heartbeat is older than [HEARTBEAT_STALE_MS]. */
+internal fun isHeartbeatStale(
+    lastAppliedEpochMs: Long,
+    nowMs: Long,
+    thresholdMs: Long = HEARTBEAT_STALE_MS,
+): Boolean = (nowMs - lastAppliedEpochMs) > thresholdMs
+
+/**
+ * Compact relative-time label: "just now" (<1 s), "Ns ago" (<60 s),
+ * "Nm ago" (<60 min), else "Nh ago". A future/negative delta clamps to
+ * "just now" so a clock skew never prints a nonsense value.
+ */
+internal fun relativeTimeAgo(epochMs: Long, nowMs: Long): String {
+    val deltaMs = nowMs - epochMs
+    if (deltaMs < 1_000L) return "just now"
+    val seconds = deltaMs / 1_000L
+    if (seconds < 60L) return "${seconds}s ago"
+    val minutes = seconds / 60L
+    if (minutes < 60L) return "${minutes}m ago"
+    val hours = minutes / 60L
+    return "${hours}h ago"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
