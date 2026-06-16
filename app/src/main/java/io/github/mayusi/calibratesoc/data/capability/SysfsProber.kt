@@ -24,7 +24,35 @@ import javax.inject.Singleton
 @Singleton
 class SysfsProber @Inject constructor(
     private val fs: FileSystem,
+    /**
+     * Privileged-read fallback for nodes the app UID cannot read directly. Null in unit
+     * tests (and on the no-PServer path) — when null we behave exactly as before (Okio
+     * read only). Hilt always injects the real [PrivilegedSysfsReader]; the default keeps
+     * the `SysfsProber(fs)` test-construction site compiling unchanged.
+     *
+     * Used ONLY for the two cross-device-broken node families (uclamp + GPU devfreq
+     * min/max) where `adb shell cat` / PServer-root succeed but the app's own `open()`
+     * gets EACCES. See [readNodeWithPrivilegedFallback] and [PrivilegedSysfsReader].
+     */
+    private val privilegedReader: PrivilegedSysfsReader? = null,
 ) {
+
+    /**
+     * Read a node, preferring the cheap direct Okio read and falling back to a PServer
+     * root `cat` ONLY when the direct read returned null AND a privileged reader is
+     * available. This is the cross-device fix for nodes that are app-UID-SELinux-denied
+     * yet root-readable (Odin 3 uclamp + kgsl devfreq). When neither path yields a value
+     * the result stays null (honest "unreadable").
+     *
+     * Scoped deliberately to the few probes that need it — we do NOT route every sysfs
+     * read through PServer (that would add IPC to dozens of always-app-readable nodes and
+     * mask genuine absences). Only [probeSchedBoostInterface]/uclamp and [probeAdreno]'s
+     * devfreq bounds call this.
+     */
+    private fun readNodeWithPrivilegedFallback(p: Path): String? {
+        readStringOrNull(p)?.let { return it }
+        return privilegedReader?.catOrNull(p.toString())?.trim()?.ifBlank { null }
+    }
 
     // --- CPU policies ----------------------------------------------------
 
@@ -182,17 +210,42 @@ class SysfsProber @Inject constructor(
         // min_freq / max_freq can be SELinux-denied per-file (Thor blocks
         // min_freq but allows max_freq). Fall back to the OPP table bounds
         // so the GPU card shows a sane min/max instead of 0.
+        // Read the raw devfreq bounds FIRST (before the OPP fallback) so we can
+        // tell whether the live min/max nodes are genuinely readable — this is what
+        // lets the GPU devfreq lever populate on devices where the OPP table and
+        // num_pwrlevels are denied but min_freq/max_freq are not (the Odin 3 case).
+        //
+        // CROSS-DEVICE FIX (Odin 3): on this device `cat /sys/class/kgsl/kgsl-3d0/
+        // devfreq/min_freq` returns 160000000 from `adb shell` / PServer-root, but the
+        // app's own open() is SELinux-denied (EACCES) — so the plain Okio read below
+        // returns null and the whole devfreq envelope came back null at runtime. We read
+        // these two bounds with the PServer privileged fallback so a root-readable node
+        // populates the lever. On a device where min/max are unreadable even to PServer
+        // (RP6), the fallback also returns null and we honestly keep the null.
+        val rawMin = readLongWithPrivilegedFallback(devfreq / "min_freq")
+        val rawMax = readLongWithPrivilegedFallback(devfreq / "max_freq")
         val oppMin = freqs.minOrNull() ?: 0L
         val oppMax = freqs.maxOrNull() ?: 0L
-        val curMin = readLongOrNull(devfreq / "min_freq") ?: oppMin
-        val curMax = readLongOrNull(devfreq / "max_freq") ?: oppMax
+        val curMin = rawMin ?: oppMin
+        val curMax = rawMax ?: oppMax
 
         val numLevels = readIntOrNull(root / "num_pwrlevels")
         val pwrRange = if (numLevels != null && numLevels > 0) {
             LevelRange(0, numLevels - 1)
         } else null
 
-        if (freqs.isEmpty() && pwrRange == null) return null
+        // The kgsl root EXISTS (checked above). Return a probe when we have ANY usable
+        // signal:
+        //   - the OPP frequency table (best — feeds the discrete devfreq steps), OR
+        //   - the power-level range (num_pwrlevels), OR
+        //   - a readable live devfreq min/max range (rawMin < rawMax).
+        // The last clause is the cross-device fix: on the Odin 3 the OPP table and
+        // num_pwrlevels are SELinux-denied to the app, but devfreq/min_freq=160 MHz and
+        // max_freq=1100 MHz ARE app-readable. Without this clause probeAdreno returned
+        // null there, so gpuRootPath/gpuDevfreq* all came back null and the GPU devfreq
+        // lever could never engage even though the nodes were readable.
+        val hasLiveRange = rawMin != null && rawMax != null && rawMin < rawMax
+        if (freqs.isEmpty() && pwrRange == null && !hasLiveRange) return null
 
         return GpuProbe(
             family = GpuFamily.ADRENO,
@@ -544,6 +597,128 @@ class SysfsProber @Inject constructor(
             }
     }
 
+    // --- Hot-path Wave-2 telemetry reads (cached device lists) ----------------
+
+    /**
+     * Cached cur_state file paths for the THERMAL-RELEVANT cooling devices, built once.
+     * The Odin 3 has 39 cooling devices; enumerating them every 1 Hz tick would be
+     * wasteful, so we cache the path list (same pattern as the thermal-zone cache) and
+     * re-read only the cur_state files on the hot path. A 30 s TTL refreshes the list
+     * occasionally.
+     *
+     * CRITICAL FILTER (cross-device bug fix): only CPU/GPU/SoC THERMAL THROTTLE devices
+     * are cached here. Non-thermal cooling devices register in /sys/class/thermal too —
+     * the screen backlight (Odin `panel0-backlight` cur=262/max=262), the battery-charge
+     * limiter, audio (`wsa*`), LEDs, etc. — and many sit pinned at a non-zero cur_state
+     * during normal use. Counting THOSE as "the kernel is throttling NOW" made the
+     * engine's thermal pre-empt arm 3 fire every tick at idle and tighten forever. We
+     * include ONLY devices whose `type` is a genuine perf throttle (see
+     * [isThermalThrottleCooling]); everything else is excluded.
+     */
+    @Volatile private var coolingCurStateCache: List<Path>? = null
+    @Volatile private var coolingCurStateCacheBuiltAt: Long = 0L
+
+    private fun coolingCurStatePaths(): List<Path> {
+        val now = System.currentTimeMillis()
+        val cached = coolingCurStateCache
+        if (cached != null && (now - coolingCurStateCacheBuiltAt) < THERMAL_ZONE_CACHE_TTL_MS) {
+            return cached
+        }
+        val root = "/sys/class/thermal".toPath()
+        val fresh = listOrEmpty(root)
+            .filter { it.name.startsWith("cooling_device") }
+            // Read each device's `type` once and keep ONLY real CPU/GPU thermal
+            // throttles. Non-thermal devices (backlight, battery, audio, LED, charger)
+            // are dropped so a pinned-high backlight can never masquerade as throttling.
+            .filter { dir -> isThermalThrottleCooling(readStringOrNull(dir / "type").orEmpty()) }
+            .map { it / "cur_state" }
+        coolingCurStateCache = fresh
+        coolingCurStateCacheBuiltAt = now
+        return fresh
+    }
+
+    /**
+     * MAX cur_state across the THERMAL-RELEVANT cooling devices, read on the hot path.
+     * A value > 0 means a CPU/GPU thermal throttle is actively engaged NOW — the AutoTDP
+     * engine's thermal pre-empt arm 3 reacts to it. Returns null only when NO relevant
+     * cooling device's cur_state could be read (so the engine falls back to die-temp
+     * signals rather than treating an unreadable node as "not throttling").
+     *
+     * The device list is type-filtered in [coolingCurStatePaths] so non-thermal cooling
+     * devices (backlight/battery/audio/LED/charger) can never inflate this — that was
+     * the constant-tighten bug on both the Odin 3 and the RP6. cur_state is app-readable
+     * on these devices (no root needed); when a future firmware SELinux-blocks it, the
+     * per-file read returns null and we degrade honestly.
+     */
+    fun readMaxCoolingCurState(): Int? {
+        val paths = coolingCurStatePaths()
+        if (paths.isEmpty()) return null
+        var max: Int? = null
+        for (p in paths) {
+            val v = readIntOrNull(p) ?: continue
+            if (max == null || v > max!!) max = v
+        }
+        return max
+    }
+
+    /**
+     * Classify a cooling_device `type` string as a genuine CPU/GPU thermal THROTTLE
+     * (true) vs a non-thermal device that merely registers under /sys/class/thermal
+     * (false). Only `true` types contribute to the "kernel throttling NOW" pre-empt
+     * signal.
+     *
+     * INCLUDE — real perf throttles (LIVE Odin 3 / RP6 types):
+     *   `cpu-hotplug*`, `thermal-cpufreq*`, `cpufreq*`, `cpu-isolate*`, `cpu-idle*`,
+     *   `gpu*` (e.g. `thermal-devfreq-gpu`), `tsens*`, `soc*`, `mdss*`/`isp*` (SoC
+     *   compute throttles), and anything containing `cpu`/`gpu`/`devfreq`/`thermal`.
+     *
+     * EXCLUDE — never a perf throttle, even when pinned high:
+     *   `panel*`/`*backlight*` (the Odin `panel0-backlight` cur=262/max=262 bug),
+     *   `battery`/`charge*`/`charger*` (charge-current limiters),
+     *   `wsa*`/`*audio*`/`spk*` (speaker amps), `led*`, `*haptic*`/`vibrator*`,
+     *   `*-blcd*`. Excludes win over includes (a `*backlight*` never counts).
+     *
+     * DEFAULT for an unknown/blank type: EXCLUDE (false). Honesty + safety: an
+     * unrecognised device must not be allowed to force a permanent tighten. The
+     * recognised throttle families above cover the real CPU/GPU throttles on every
+     * device we have evidence for; a genuinely new throttle name can be added when
+     * a device surfaces it.
+     */
+    internal fun isThermalThrottleCooling(type: String): Boolean {
+        val t = type.lowercase().trim()
+        if (t.isBlank()) return false
+
+        // ── DENY first — a non-thermal device pinned high must never count. ──────
+        val deny = listOf(
+            "backlight", "panel", "blcd",
+            "battery", "charge", "charger",
+            "wsa", "audio", "spk", "speaker",
+            "led", "haptic", "vibrator", "vib-",
+        )
+        if (deny.any { it in t }) return false
+
+        // ── ALLOW — genuine CPU/GPU/SoC perf throttles. ──────────────────────────
+        val allow = listOf(
+            "cpu", "gpu", "cpufreq", "devfreq",
+            "hotplug", "isolate", "cpu-idle", "cluster",
+            "tsens", "thermal", "soc", "mdss", "isp", "cdsp",
+        )
+        return allow.any { it in t }
+    }
+
+    /**
+     * GPU die temperature in milli-°C from the Adreno node (e.g.
+     * /sys/class/kgsl/kgsl-3d0/temp), or null when no GPU root is known / the node is
+     * unreadable. App-readable on the Odin 3 (observed value 37800 = 37.8°C). Lets the
+     * engine relax the GPU before the skin sensor reacts.
+     *
+     * @param gpuRootPath the GPU sysfs root from the [GpuProbe], or null.
+     */
+    fun readGpuDieTempMilliC(gpuRootPath: String?): Int? {
+        if (gpuRootPath == null) return null
+        return readIntOrNull("$gpuRootPath/temp".toPath())
+    }
+
     // --- Bus / DDR devfreq ---------------------------------------------------
 
     /**
@@ -636,14 +811,43 @@ class SysfsProber @Inject constructor(
      */
     fun probeSchedBoostInterface(): SchedBoostInterface {
         val stuneRoot = "/dev/stune".toPath()
-        val uclampRoot = "/dev/cpuctl".toPath()
+        val uclampMin = "/dev/cpuctl".toPath() / "top-app" / "cpu.uclamp.min"
         return when {
             fs.exists(stuneRoot) -> SchedBoostInterface.STUNE
-            // uclamp presence checked by looking for the cpu.uclamp.min file
-            // in a well-known slice rather than just the cpuctl dir existing.
-            fs.exists(uclampRoot / "top-app" / "cpu.uclamp.min") -> SchedBoostInterface.UCLAMP
+            // uclamp presence: detect by actually READING the well-known slice's
+            // cpu.uclamp.min, NOT by fs.exists().
+            //
+            // CROSS-DEVICE BUG FIX: /dev/cpuctl is a cgroup mount and cpu.uclamp.min is
+            // a cgroup pseudo-file. On the Odin 3 AND the RP6, `cat
+            // /dev/cpuctl/top-app/cpu.uclamp.min` returns "0.00" (the node EXISTS and is
+            // app-readable), yet Okio's fs.exists() — which stats the path — reports it
+            // absent on cgroupfs, so uclampAvailable came back false on both devices and
+            // the UCLAMP lever could never engage. A successful read is the honest,
+            // authoritative presence check: if we can read a value (even the float
+            // "0.00"), the interface is genuinely usable.
+            isUclampNodeReadable(uclampMin) -> SchedBoostInterface.UCLAMP
             else -> SchedBoostInterface.NONE
         }
+    }
+
+    /**
+     * True when the uclamp.min node yields a readable value, accepting the kernel's
+     * FLOAT format. cgroup `cpu.uclamp.min` is printed as a percentage with two
+     * decimals (e.g. "0.00", "100.00") — NOT a bare integer — so an integer-only parse
+     * would reject the live value and wrongly conclude the interface is absent. We
+     * accept any non-blank numeric content (Int OR Double); a blank/parse-failed read
+     * means the node is not genuinely present/readable.
+     */
+    private fun isUclampNodeReadable(uclampMinPath: Path): Boolean {
+        // CROSS-DEVICE FIX (Odin 3): `cat /dev/cpuctl/top-app/cpu.uclamp.min` returns
+        // "0.00" from `adb shell` / PServer-root, but the app's own open() is
+        // SELinux-denied on cgroupfs → the direct Okio read returns null and uclamp came
+        // back NONE at runtime. Read with the PServer privileged fallback so a
+        // root-readable slice is honestly detected as present. When the node is unreadable
+        // to BOTH the app and PServer the fallback returns null and we report absent.
+        val raw = readNodeWithPrivilegedFallback(uclampMinPath) ?: return false
+        // Accept "0", "0.00", "100.00", etc. Reject non-numeric noise.
+        return raw.toIntOrNull() != null || raw.toDoubleOrNull() != null
     }
 
     fun probeSchedBoostValues(
@@ -661,10 +865,17 @@ class SysfsProber @Inject constructor(
                     SchedBoostProbe(slice = slice, boostOrUclampMin = boost, preferIdleOrUclampMax = preferIdle)
                 }
                 SchedBoostInterface.UCLAMP -> {
+                    // Do NOT gate on fs.exists(dir): /dev/cpuctl is cgroupfs where a
+                    // stat can fail even when the node is readable (same root cause as
+                    // probeSchedBoostInterface). Read the values directly; a slice with
+                    // no readable cpu.uclamp.min is dropped honestly.
                     val dir = "/dev/cpuctl/$slice".toPath()
-                    if (!fs.exists(dir)) return@mapNotNull null
-                    val uclampMin = readIntOrNull(dir / "cpu.uclamp.min")
-                    val uclampMax = readIntOrNull(dir / "cpu.uclamp.max")
+                    // cgroup cpu.uclamp.{min,max} are FLOAT percentages ("0.00".."100.00").
+                    // readUclampPercentOrNull accepts the float and rounds to an Int %;
+                    // an integer-only read would reject "0.00" and lose the value.
+                    val uclampMin = readUclampPercentOrNull(dir / "cpu.uclamp.min")
+                    val uclampMax = readUclampPercentOrNull(dir / "cpu.uclamp.max")
+                    if (uclampMin == null && uclampMax == null) return@mapNotNull null
                     SchedBoostProbe(slice = slice, boostOrUclampMin = uclampMin, preferIdleOrUclampMax = uclampMax)
                 }
                 SchedBoostInterface.NONE -> null
@@ -691,13 +902,45 @@ class SysfsProber @Inject constructor(
     }
 
     private fun readStringOrNull(p: Path): String? = try {
-        if (!fs.exists(p)) null else fs.read(p) { readUtf8() }.trim().ifBlank { null }
+        // Read DIRECTLY rather than gating on fs.exists() first. On real devices some
+        // pseudo-filesystems — notably cgroupfs at /dev/cpuctl (uclamp) — let an app
+        // OPEN+READ a node while a stat()/exists() probe of the same path reports it
+        // absent. Gating on exists() therefore made readable cgroup nodes (e.g.
+        // cpu.uclamp.min == "0.00") look missing. Opening straight away and treating a
+        // FileNotFoundException (a subtype of IOException) as "absent" is both more
+        // robust here and equivalent on FakeFileSystem, where a missing path throws
+        // FileNotFoundException too.
+        fs.read(p) { readUtf8() }.trim().ifBlank { null }
     } catch (_: IOException) {
         null
     }
 
     private fun readIntOrNull(p: Path): Int? = readStringOrNull(p)?.toIntOrNull()
     private fun readLongOrNull(p: Path): Long? = readStringOrNull(p)?.toLongOrNull()
+
+    /**
+     * Long read with the PServer privileged fallback (see [readNodeWithPrivilegedFallback]).
+     * Used for the GPU devfreq min/max bounds, which are root-readable but app-UID-denied
+     * on the Odin 3. Falls back to plain Okio (and honest null) everywhere else.
+     */
+    private fun readLongWithPrivilegedFallback(p: Path): Long? =
+        readNodeWithPrivilegedFallback(p)?.toLongOrNull()
+
+    /**
+     * Read a cgroup `cpu.uclamp.{min,max}` value, which the kernel prints as a FLOAT
+     * percentage (e.g. "0.00", "37.50", "100.00") rather than a bare integer. Returns
+     * the rounded integer percent, or null when the node is unreadable / non-numeric.
+     * Accepts a plain integer too (defensive — some kernels/back-ports print "0").
+     */
+    private fun readUclampPercentOrNull(p: Path): Int? {
+        // Uses the privileged fallback for the same reason as [isUclampNodeReadable]: the
+        // cgroup uclamp slices are root-readable but app-UID-denied on the Odin 3. Keeps
+        // schedBoostValues consistent with schedBoostInterface == UCLAMP (otherwise the
+        // interface would report present but every per-slice value would be null).
+        val raw = readNodeWithPrivilegedFallback(p) ?: return null
+        raw.toIntOrNull()?.let { return it }
+        return raw.toDoubleOrNull()?.let { Math.round(it).toInt() }
+    }
 
     private fun parseSpaceSeparatedInts(p: Path): List<Int> =
         readStringOrNull(p)?.split(Regex("\\s+"))?.mapNotNull { it.toIntOrNull() }?.distinct()?.sorted() ?: emptyList()

@@ -276,6 +276,38 @@
         </service>
 
         <!--
+          Game Boost LIVE daemon (WAVE 3a). Brute-pins every cluster + GPU + bus to
+          the ceiling for raw FPS, time-boxed and thermally guarded; reverts all
+          writes on stop / timeout / thermal-trip via TunableWriter's snapshot
+          journal. SPECIAL_USE — max-performance CPU & GPU pinning, no AOSP category
+          covers this. Mutually exclusive with AutoTDP (both write clocks).
+        -->
+        <service
+            android:name=".data.boost.GameBoostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="max-performance CPU and GPU pin daemon" />
+        </service>
+
+        <!--
+          Predictive Throttle Guard LIVE daemon (WAVE 3a). Feeds telemetry into the
+          PredictiveThrottleGuard forecaster and pre-emptively caps the big cluster a
+          little before the kernel's throttle cliff so FPS degrades smoothly; reverts
+          the cap when the forecast clears and on stop. Auto-suppressed while AutoTDP
+          or Game Boost owns the clocks. SPECIAL_USE — thermal pre-empt tuning.
+        -->
+        <service
+            android:name=".data.thermal.ThrottleGuardService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="predictive thermal throttle guard daemon" />
+        </service>
+
+        <!--
           Quick Settings tile to toggle the HUD without opening the app.
           The user has to drag this into their tile tray via Edit tiles
           once — Android won't auto-add system tiles to the active set.

@@ -544,7 +544,7 @@ private fun WelcomeStep(onNext: () -> Unit, onSkipAll: () -> Unit) {
             )
             Text(
                 "Universal handheld tuner. Real-time monitor, benchmark, " +
-                    "CPU/GPU presets, in-game HUD, hardware inspector.",
+                    "CPU/GPU tunes, in-game HUD, hardware inspector.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -633,7 +633,7 @@ private fun AllDoneStep(
                         )
                         Text(
                             "Your device supports instant ± CPU/GPU clock changes straight from the HUD, " +
-                                "AutoTDP, and vendor preset tuning. This one-time ~2-minute setup is needed " +
+                                "AutoTDP, and vendor tuning. This one-time ~2-minute setup is needed " +
                                 "to use those features.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -811,7 +811,7 @@ private fun GrantsChecklist(grants: AdvancedPermissionsScript.Grants) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             GrantRow(if (grants.dump) GrantState.HELD else GrantState.PENDING, "FPS / gfxinfo (DUMP)")
             GrantRow(if (grants.usageStats) GrantState.HELD else GrantState.PENDING, "Foreground app (Usage access)")
-            GrantRow(if (grants.writeSecureSettings) GrantState.HELD else GrantState.PENDING, "Vendor preset keys (Secure settings)")
+            GrantRow(if (grants.writeSecureSettings) GrantState.HELD else GrantState.PENDING, "Vendor tune keys (Secure settings)")
             // Direct sysfs writes: if it's live, great. If it's NOT live but the
             // script clearly ran (DUMP came through), this device's kernel keeps
             // the CPU scaling_max_freq nodes read-only (verified on stock
@@ -860,7 +860,7 @@ private fun AdvancedAskStep(
                 if (advancedApplicable) "Advanced unlock (required for live tuning)" else "Advanced unlock (optional)",
             )
             Text(
-                "Turn this on and you get real in-game FPS, vendor preset tuning without Shizuku, " +
+                "Turn this on and you get real in-game FPS, vendor tuning without Shizuku, " +
                     "and — on devices with a custom kernel — instant ± clock changes right from the HUD. " +
                     "On stock handhelds clock tuning still works through the one-tap script.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -1138,7 +1138,7 @@ private fun AdvancedDoneStep(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 scriptGrantsLanded -> Text(
-                    "You're unlocked. Real in-game FPS and vendor preset tuning are on. " +
+                    "You're unlocked. Real in-game FPS and vendor tuning are on. " +
                         "Instant in-app ± clocks need a custom kernel on this device — but clock " +
                         "tuning still works through the one-tap script path. Nothing more to do.",
                     style = MaterialTheme.typography.bodyMedium,

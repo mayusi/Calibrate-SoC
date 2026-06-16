@@ -51,6 +51,7 @@ class MonitorService @Inject constructor(
     private val meminfo: MeminfoSampler,
     private val gpuLoad: GpuLoadSampler,
     private val battery: BatterySampler,
+    private val gameFpsSampler: io.github.mayusi.calibratesoc.ui.overlay.GameFpsSampler,
 ) {
 
     fun telemetry(intervalMs: Long = DEFAULT_INTERVAL_MS): Flow<Telemetry> = flow {
@@ -79,7 +80,11 @@ class MonitorService @Inject constructor(
             // must not be reordered relative to itself, but running it in parallel
             // with the other samplers is safe — it reads /proc/stat independently.
             // BatterySampler uses Android binder, not sysfs, and is independent.
-            val (freqs, cpuReading, mem, gpu, batt, zones) = coroutineScope {
+            // Resolve the GPU sysfs root for the die-temp read (Wave 2). Re-read each
+            // tick for the same reason gpuProbe is re-read — the report arrives async.
+            val gpuRootPath: String? = gpuProbe?.rootPath
+
+            val (freqs, cpuReading, mem, gpu, batt, zones, extras) = coroutineScope {
                 val dFreqs = async { perCoreFreq.sample() }
                 val dLoads = async { cpuLoadSelector.sample() }
                 val dMem   = async { meminfo.sample() }
@@ -91,6 +96,15 @@ class MonitorService @Inject constructor(
                         ZoneTemp(zoneId = it.id, label = it.type, tempMilliC = it.currentTempMilliC)
                     }
                 }
+                // ── Wave 2 hot-path extras: GPU die temp + max cooling cur_state ──
+                // Both reads use SysfsProber's cached device lists so the 39 cooling
+                // devices are enumerated once, not per tick.
+                val dExtras = async {
+                    Wave2Extras(
+                        gpuDieTempMilliC = sysfsProber.readGpuDieTempMilliC(gpuRootPath),
+                        coolingMaxState  = sysfsProber.readMaxCoolingCurState(),
+                    )
+                }
                 SamplerResults(
                     freqs      = dFreqs.await(),
                     cpuReading = dLoads.await(),
@@ -98,8 +112,18 @@ class MonitorService @Inject constructor(
                     gpu        = dGpu.await(),
                     batt       = dBatt.await(),
                     zones      = dZones.await(),
+                    extras     = dExtras.await(),
                 )
             }
+
+            // ── Foreground pkg + real FPS (Wave 2) ───────────────────────────────
+            // Read from GameFpsSampler's StateFlows (populated when the HUD/overlay
+            // poller is active). Cheap non-blocking .value reads. When the sampler is
+            // idle these are null/false and the engine falls back to package-less
+            // classification + FPS-null behaviour (honest absence).
+            val fgPkg = gameFpsSampler.foregroundPkg.value
+            val realFps = gameFpsSampler.fps.value
+            val realFpsIsReal = gameFpsSampler.isRealFps.value
 
             emit(
                 Telemetry(
@@ -115,7 +139,16 @@ class MonitorService @Inject constructor(
                     batteryTempDeciC   = batt.temperatureDeciC,
                     batteryCurrentUa   = batt.currentUa,
                     batteryVoltageUv   = batt.voltageUv,
-                    fanRpm             = null, // populated in Phase 4 once fan adapter writers land
+                    // fanRpm: only the generic hwmon fan exposes RPM; the Odin's vendor
+                    // fan does not, so this stays null there (honest absence) and is
+                    // populated only when a hwmon fan1_input was probed.
+                    fanRpm             = capabilityProbe.report.value?.fan?.currentRpm,
+                    // ── Wave 2 signals the Smart engine consumes ──────────────────
+                    foregroundPackage  = fgPkg,
+                    gpuDieTempMilliC   = extras.gpuDieTempMilliC,
+                    coolingDeviceMaxState = extras.coolingMaxState,
+                    realFpsX10         = if (realFpsIsReal && realFps != null) realFps * 10 else null,
+                    isRealFps          = realFpsIsReal && realFps != null,
                 ),
             )
 
@@ -131,6 +164,13 @@ class MonitorService @Inject constructor(
         val gpu: GpuLoadSampler.Result,
         val batt: BatterySampler.Sample,
         val zones: List<ZoneTemp>,
+        val extras: Wave2Extras,
+    )
+
+    /** Hot-path Wave-2 reads bundled so they can run in one concurrent async. */
+    private data class Wave2Extras(
+        val gpuDieTempMilliC: Int?,
+        val coolingMaxState: Int?,
     )
 
     companion object {

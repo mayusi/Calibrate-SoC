@@ -11,6 +11,7 @@ import io.github.mayusi.calibratesoc.data.capability.GpuProbe
 import io.github.mayusi.calibratesoc.data.capability.LevelRange
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.capability.RootKind
+import io.github.mayusi.calibratesoc.data.capability.SchedBoostInterface
 import io.github.mayusi.calibratesoc.data.capability.ShizukuStatus
 import io.github.mayusi.calibratesoc.data.capability.SoCIdentity
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
@@ -260,6 +261,79 @@ class TdpCapsTest {
 
         assertThat(caps.gpuMinLevel).isNull()
         assertThat(caps.gpuMaxLevel).isNull()
+    }
+
+    // ─── GPU devfreq envelope (cross-device bug 3) ────────────────────────────
+    //
+    // On the Odin 3 the OPP table is SELinux-denied but devfreq/min_freq=160 MHz and
+    // max_freq=1100 MHz ARE readable. SysfsProber.probeAdreno now returns a GpuProbe
+    // with an EMPTY availableFreqsHz but currentMin/MaxHz set; TdpCaps.from must
+    // populate the devfreq floor/ceil + rootPath from those live bounds (the steps
+    // list stays empty honestly, so the devfreq STEP lever is skipped — but the
+    // envelope is present so gpuRootPath is no longer null).
+
+    @Test
+    fun `gpu devfreq envelope populates from live min and max when OPP table is empty`() {
+        val base = reportWith(
+            policies = listOf(policy(0, listOf(500, 2000), onlineCores = listOf(0, 1, 2, 3))),
+            gpuMinLevel = 0,
+            gpuMaxLevel = 6,
+        )
+        // Replace the GPU with the Odin-shaped probe: empty OPP table, live bounds set.
+        val report = base.copy(
+            gpu = GpuProbe(
+                family = GpuFamily.ADRENO,
+                rootPath = "/sys/class/kgsl/kgsl-3d0",
+                availableFreqsHz = emptyList(), // OPP table denied
+                availableGovernors = emptyList(),
+                currentMinHz = 160_000_000L,
+                currentMaxHz = 1_100_000_000L,
+                currentGovernor = "msm-adreno-tz",
+                powerLevelRange = null,
+            ),
+        )
+        val caps = TdpCaps.from(report)
+
+        assertThat(caps.gpuRootPath).isEqualTo("/sys/class/kgsl/kgsl-3d0")
+        assertThat(caps.gpuDevfreqFloorHz).isEqualTo(160_000_000L)
+        assertThat(caps.gpuDevfreqCeilHz).isEqualTo(1_100_000_000L)
+        // No OPP table → no discrete steps (the STEP lever is honestly skipped).
+        assertThat(caps.gpuDevfreqStepsHz).isEmpty()
+    }
+
+    // ─── uclamp availability (cross-device bug 2) ─────────────────────────────
+
+    @Test
+    fun `uclampAvailable is true when schedBoostInterface is UCLAMP`() {
+        // SysfsProber now reports UCLAMP from a readable cpu.uclamp.min (incl. "0.00").
+        // TdpCaps must surface that as uclampAvailable so the UCLAMP lever can engage.
+        val report = reportWith(
+            policies = listOf(policy(0, listOf(500, 2000), onlineCores = listOf(0, 1, 2, 3))),
+        ).copy(schedBoostInterface = SchedBoostInterface.UCLAMP)
+        assertThat(TdpCaps.from(report).uclampAvailable).isTrue()
+    }
+
+    @Test
+    fun `uclampAvailable is false when schedBoostInterface is NONE`() {
+        val report = reportWith(
+            policies = listOf(policy(0, listOf(500, 2000), onlineCores = listOf(0, 1, 2, 3))),
+        ).copy(schedBoostInterface = SchedBoostInterface.NONE)
+        assertThat(TdpCaps.from(report).uclampAvailable).isFalse()
+    }
+
+    @Test
+    fun `gpu devfreq envelope and root are null when the GPU was not probed`() {
+        val report = reportWith(
+            policies = listOf(policy(0, listOf(500, 2000), onlineCores = listOf(0, 1, 2, 3))),
+            gpuMinLevel = null, // → gpu == null in reportWith
+            gpuMaxLevel = null,
+        )
+        val caps = TdpCaps.from(report)
+
+        assertThat(caps.gpuRootPath).isNull()
+        assertThat(caps.gpuDevfreqFloorHz).isNull()
+        assertThat(caps.gpuDevfreqCeilHz).isNull()
+        assertThat(caps.gpuDevfreqStepsHz).isEmpty()
     }
 
     // ─── Min-online-core floor ────────────────────────────────────────────────

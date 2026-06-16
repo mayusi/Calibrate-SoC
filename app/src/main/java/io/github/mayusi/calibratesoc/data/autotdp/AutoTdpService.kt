@@ -72,6 +72,19 @@ class AutoTdpService : Service() {
     @Inject lateinit var sampler: AutoTdpSampler
     @Inject lateinit var writerRegistry: io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
     @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+    @Inject lateinit var deviceAdapterRegistry: io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
+
+    /**
+     * WAVE 3a: clock-ownership arbiter. AutoTDP and Game Boost both write the
+     * big-cluster clocks, so they are MUTUALLY EXCLUSIVE — acquiring GAME_BOOST or
+     * AUTO_TDP stops the other. Acquiring also suppresses the Predictive Throttle
+     * Guard (it stands down while an exclusive owner manages thermals). See
+     * [io.github.mayusi.calibratesoc.data.boost.BoostArbiter].
+     */
+    @Inject lateinit var arbiter: io.github.mayusi.calibratesoc.data.boost.BoostArbiter
+
+    /** Used to stop Game Boost cleanly when AutoTDP starts while Boost owns clocks. */
+    @Inject lateinit var gameBoostController: io.github.mayusi.calibratesoc.data.boost.GameBoostController
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
@@ -88,10 +101,10 @@ class AutoTdpService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val profileOrdinal = intent.getIntExtra(EXTRA_PROFILE_ORDINAL, AutoTdpProfile.BALANCED.ordinal)
-                val targetMw = intent.getLongExtra(EXTRA_TARGET_MW, -1L).let { if (it < 0) null else it }
-                val profile = AutoTdpProfile.entries.getOrElse(profileOrdinal) { AutoTdpProfile.BALANCED }
-                val config = AutoTdpProfileConfig(profile = profile, targetMilliWatts = targetMw)
+                // Rebuild the config (profile + watts + Smart goal) from the intent
+                // extras. EXTRA_GOAL (when present) is what carries the 5-mode goal /
+                // AUTO through to the engine's goalOverride. See configFromStartIntent.
+                val config = configFromStartIntent(intent)
                 startDaemon(config)
             }
             ACTION_STOP -> {
@@ -179,9 +192,36 @@ class AutoTdpService : Service() {
             return
         }
 
+        // ── MUTUAL EXCLUSION (WAVE 3a): claim clock ownership ─────────────────────
+        // AutoTDP and Game Boost both write big-cluster clocks. Claim AUTO_TDP; if
+        // Game Boost owned the clocks, stop it cleanly first (it reverts its own
+        // writes via its own journal) so the two never write concurrently. Acquiring
+        // also suppresses the Predictive Throttle Guard for the duration.
+        val acquire = arbiter.acquire(
+            io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.AUTO_TDP
+        )
+        if (acquire.mustStopPreviousOwner ==
+            io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.GAME_BOOST
+        ) {
+            Log.i(TAG, "AutoTDP stopping Game Boost before tuning (mutual exclusion)")
+            gameBoostController.stop()
+            io.github.mayusi.calibratesoc.data.boost.GameBoostService.stop(this@AutoTdpService)
+            // Let Game Boost revert before we start writing (revert vs write must not race).
+            delay(ARBITER_SETTLE_MS)
+        }
+
         // ── Step 3: build device caps ──────────────────────────────────────────
         val caps = TdpCaps.from(report)
         val gpuRootPath = report.gpu?.rootPath
+
+        // Resolve the vendor fan_mode Settings.System key from the device adapter
+        // (AYN/Retroid expose it as `fan_mode`). Null when this device has no
+        // controllable fan key — in which case the fan governor's writes are
+        // honestly skipped by TdpStateTransition.delta. We never invent a key.
+        val fanModeKey: String? = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+            ?.fanAdapter
+            ?.takeIf { it.kind == io.github.mayusi.calibratesoc.data.devicedb.FanAdapterKind.SETTINGS_KEY }
+            ?.target
 
         Log.i(TAG, "Starting LIVE daemon: profile=${config.profile}, caps=$caps")
         // sessionStartEpochMs marks the RUNNING transition — used for the heartbeat
@@ -214,6 +254,22 @@ class AutoTdpService : Service() {
         val thermalKill = ThermalKillEvaluator()   // stateful: tracks consecutive over-threshold samples
         val stockCeilingKhz = caps.bigClusterOppStepsKhz.lastOrNull() // top OPP = stock big ceiling
 
+        // ── WAVE 4a: persist the controller state ACROSS ticks (THE critical fix) ──
+        // Wave 1 made AutoTdpEngine.decide() RETURN its carried ControllerState (the
+        // EWMA accumulators, cool-down quietTicks, direction-episode confirm counters,
+        // the active lever, the fan governor state, and the context-classifier state).
+        // The daemon MUST thread it back in each tick — otherwise every tick decides
+        // from ControllerState.INITIAL and gpuEwma / dTempSlopeEwma / quietTicks /
+        // classifier hysteresis / activeLever all RESET every second, defeating the
+        // entire tightened control spec (no smoothing, no oscillation protection, no
+        // classifier hysteresis). We hold it here OUTSIDE the collect{} loop, pass it
+        // INTO decide(), and reassign it from the returned decision AFTER each tick.
+        //
+        // INITIAL is the per-session reset: this runs once per (re)start, so a new
+        // session always begins from a clean state (no stale EWMA leaking across
+        // start/stop cycles).
+        var controllerState = ControllerState.INITIAL
+
         try {
             monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS).collect { sample ->
                 // Roll the window.
@@ -235,12 +291,23 @@ class AutoTdpService : Service() {
                 }
 
                 // ── Engine decision ────────────────────────────────────────────
+                // Thread the PERSISTED controllerState in, and pass the Smart goal as
+                // goalOverride so the new 5-mode goal / AUTO actually reaches the
+                // engine. config.goal == null ⇒ goalOverride == null ⇒ decide() maps
+                // the legacy profile internally (today's behaviour, unchanged).
                 val decision = AutoTdpEngine.decide(
                     window = window.toList(),
                     config = config,
                     caps = caps,
                     current = currentState,
+                    controllerState = controllerState,
+                    goalOverride = config.goal,
                 )
+                // PERSIST: carry the engine's threaded state into the NEXT tick. This
+                // single reassignment is what keeps EWMA smoothing, the cross-actuator
+                // cool-down, the direction-episode confirm counters, the active lever,
+                // the fan governor, and the classifier hysteresis ALIVE across ticks.
+                controllerState = decision.controllerState
 
                 // ── Honest-baseline grace gate ─────────────────────────────────
                 // For the first BASELINE_GRACE_MS after RUNNING, hold at STOCK so the
@@ -261,6 +328,7 @@ class AutoTdpService : Service() {
                         to = effectiveTarget,
                         bigPolicyId = caps.bigPolicyId,
                         gpuRootPath = gpuRootPath,
+                        fanModeKey = fanModeKey,
                     )
 
                     for (op in ops) {
@@ -376,6 +444,17 @@ class AutoTdpService : Service() {
                     }
                 }
 
+                // ── WAVE 4a: expose goal + detected context (read-only HUD state) ──
+                // activeGoal: the goal the daemon is RUNNING. Only meaningful on the
+                // Smart path (config.goal != null) — there it is the CONCRETE goal the
+                // engine resolved (AUTO → the classifier's choice via decision.resolvedGoal).
+                // On the pure legacy-profile path we expose null (no Smart goal picked).
+                // detectedContext: the classifier's COMMITTED belief (classifier.stable)
+                // — the DETECTED honesty tier. It is a belief, never a measurement; we
+                // always surface it (the classifier runs every tick regardless of path).
+                val activeGoal = if (config.goal != null) decision.resolvedGoal else null
+                val detectedContext = controllerState.classifier.stable
+
                 controller.updateState(
                     controller.state.value.copy(
                         status = AutoTdpStatus.RUNNING,
@@ -385,6 +464,8 @@ class AutoTdpService : Service() {
                         lastAppliedEpochMs = nowMs,
                         effect = effect,
                         decisions = decisions.toList(),
+                        activeGoal = activeGoal,
+                        detectedContext = detectedContext,
                     )
                 )
                 updateNotification(status = "Running", detail = displayReason)
@@ -396,6 +477,9 @@ class AutoTdpService : Service() {
             Log.i(TAG, "Reverting all AutoTDP writes via TunableWriter")
             val summary = tunableWriter.revertAll(report)
             Log.i(TAG, "Revert complete: ok=${summary.ok} failed=${summary.failed}")
+            // ── WAVE 3a: release clock ownership (un-suppresses the throttle guard). ──
+            // No-op if a later owner (Game Boost) already took over — release() checks.
+            arbiter.release(io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.AUTO_TDP)
             // Update notification if service is still technically alive
             updateNotification(status = "Stopped", detail = "All writes reverted")
         }
@@ -610,6 +694,13 @@ class AutoTdpService : Service() {
          */
         private const val WRITE_RETRY_DELAY_MS = 50L
 
+        /**
+         * WAVE 3a: settle time after stopping the other clock owner (Game Boost)
+         * before AutoTDP begins writing, so the other's revert and our writes do not
+         * interleave. Both route through TunableWriter; 250 ms is ample.
+         */
+        private const val ARBITER_SETTLE_MS = 250L
+
         // Intent actions
         const val ACTION_START = "io.github.mayusi.calibratesoc.AUTOTDP_START"
         const val ACTION_STOP  = "io.github.mayusi.calibratesoc.AUTOTDP_STOP"
@@ -618,12 +709,50 @@ class AutoTdpService : Service() {
         const val EXTRA_PROFILE_ORDINAL = "profile_ordinal"
         const val EXTRA_TARGET_MW       = "target_mw"
 
-        fun start(context: Context, config: AutoTdpProfileConfig) {
-            val intent = Intent(context, AutoTdpService::class.java).apply {
+        /**
+         * WAVE 4a: the active Smart [GoalProfile] name, or absent when running the
+         * legacy profile path. Carried as a String (the enum NAME) so the goal — incl.
+         * AUTO and the 5 modes the old [AutoTdpProfile] ordinal cannot express —
+         * survives the intent round-trip. Rebuilt in [configFromStartIntent]. Absent ⇒
+         * config.goal == null ⇒ daemon uses the legacy [EXTRA_PROFILE_ORDINAL] mapping.
+         */
+        const val EXTRA_GOAL = "goal_name"
+
+        /**
+         * Build the ACTION_START intent for [config] (pure — no service-start side
+         * effect). Extracted so the goal/profile/watts round-trip is unit-testable
+         * without an Android service runtime.
+         *
+         * EXTRA_PROFILE_ORDINAL is ALWAYS written (back-compat + the watts-ceiling
+         * path). EXTRA_GOAL is written only when [AutoTdpProfileConfig.goal] is set;
+         * its presence is what makes the Smart engine reachable.
+         */
+        fun buildStartIntent(context: Context, config: AutoTdpProfileConfig): Intent =
+            Intent(context, AutoTdpService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_PROFILE_ORDINAL, config.profile.ordinal)
                 config.targetMilliWatts?.let { putExtra(EXTRA_TARGET_MW, it) }
+                config.goal?.let { putExtra(EXTRA_GOAL, it.name) }
             }
+
+        /**
+         * Rebuild the [AutoTdpProfileConfig] from an ACTION_START intent (pure inverse
+         * of [buildStartIntent]). Unknown/absent extras degrade to the safe legacy
+         * default (BALANCED, no goal). An unparseable EXTRA_GOAL name is dropped (goal
+         * == null) rather than crashing — the daemon then runs the legacy profile.
+         */
+        fun configFromStartIntent(intent: Intent): AutoTdpProfileConfig {
+            val profileOrdinal = intent.getIntExtra(EXTRA_PROFILE_ORDINAL, AutoTdpProfile.BALANCED.ordinal)
+            val profile = AutoTdpProfile.entries.getOrElse(profileOrdinal) { AutoTdpProfile.BALANCED }
+            val targetMw = intent.getLongExtra(EXTRA_TARGET_MW, -1L).let { if (it < 0) null else it }
+            val goal = intent.getStringExtra(EXTRA_GOAL)?.let { name ->
+                GoalProfile.entries.firstOrNull { it.name == name }
+            }
+            return AutoTdpProfileConfig(profile = profile, targetMilliWatts = targetMw, goal = goal)
+        }
+
+        fun start(context: Context, config: AutoTdpProfileConfig) {
+            val intent = buildStartIntent(context, config)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

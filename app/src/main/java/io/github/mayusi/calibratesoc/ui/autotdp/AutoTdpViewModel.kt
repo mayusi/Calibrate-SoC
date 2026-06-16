@@ -13,6 +13,7 @@ import io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget
 import io.github.mayusi.calibratesoc.data.autotdp.CurvePoint
 import io.github.mayusi.calibratesoc.data.autotdp.CurveResult
 import io.github.mayusi.calibratesoc.data.autotdp.EfficiencyCurveSweep
+import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
 import io.github.mayusi.calibratesoc.data.autotdp.IdleChargeTrigger
 import io.github.mayusi.calibratesoc.data.autotdp.PerAppEfficiencyMap
 import io.github.mayusi.calibratesoc.data.autotdp.SweepProgress
@@ -340,7 +341,11 @@ class AutoTdpViewModel @Inject constructor(
      * and only proceed to `controller.start` when a usable report arrives.
      * If the refresh still yields no CPU policies we surface an error notice.
      */
-    fun setManualEnabled(on: Boolean) {
+    fun setManualEnabled(
+        on: Boolean,
+        goal: GoalProfile? = null,
+        targetMilliWatts: Long? = null,
+    ) {
         if (!on) {
             _manuallyOn.value = false
             _startingUp.value = false
@@ -355,7 +360,7 @@ class AutoTdpViewModel @Inject constructor(
             _manuallyOn.value = true
             _startError.value = null
             val caps = TdpCaps.from(cached)
-            val config = buildConfig(caps)
+            val config = buildConfig(caps, goal, targetMilliWatts)
             controller.start(config)
             return
         }
@@ -378,7 +383,7 @@ class AutoTdpViewModel @Inject constructor(
                         "Check that the capability report is not empty."
                     return@launch
                 }
-                val config = buildConfig(caps)
+                val config = buildConfig(caps, goal, targetMilliWatts)
                 controller.start(config)
             } catch (t: Throwable) {
                 _manuallyOn.value = false
@@ -406,9 +411,10 @@ class AutoTdpViewModel @Inject constructor(
 
     fun setTargetHours(hours: Double) {
         _targetHours.value = hours
-        if (_selectedProfile.value == AutoTdpProfile.BATTERY_TARGET) {
-            computeBatteryTarget()
-        }
+        // Always recompute the preview: the input is now surfaced by the Battery-Saver
+        // GOAL MODE (see AutoTdpScreen), not the removed legacy BATTERY_TARGET profile,
+        // so we no longer gate the recompute on _selectedProfile.
+        computeBatteryTarget()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -616,16 +622,45 @@ class AutoTdpViewModel @Inject constructor(
         )
     }
 
-    private fun buildConfig(caps: TdpCaps): AutoTdpProfileConfig {
+    /**
+     * Build the daemon start config.
+     *
+     * Smart path (Wave 4b wiring fix): when [goal] is non-null, the user picked a GOAL
+     * MODE chip, so build the config via [AutoTdpProfileConfig.forGoal] — that carries
+     * the 5-mode [GoalProfile] (incl. AUTO) end-to-end to the engine's `goalOverride`,
+     * which is the ONLY path that reaches the Smart band controller / AUTO classifier.
+     * (Before this, START always built a legacy profile config, so the daemon ran
+     * BALANCED regardless of the selected goal.)
+     *
+     * The watts ceiling is honoured for any goal that carries a hard power ceiling
+     * ([GoalProfile.hasHardPowerCeiling], i.e. BATTERY_SAVER): we pass through the
+     * explicit [targetMilliWatts] when supplied, else derive one from the battery-target
+     * preview the same way the legacy BATTERY_TARGET path did.
+     *
+     * Legacy path: when [goal] is null we fall back to the old profile-driven config
+     * (kept for any caller that has not migrated, e.g. trigger-driven starts).
+     */
+    private fun buildConfig(
+        caps: TdpCaps,
+        goal: GoalProfile? = null,
+        targetMilliWatts: Long? = null,
+    ): AutoTdpProfileConfig {
+        // Derive a watts budget from the battery-target preview (legacy behaviour).
+        val derivedBudgetMw: Long? = _batteryTargetResult.value?.mappedCapKhz?.let { capKhz ->
+            val fraction = capKhz.toDouble() / (caps.bigClusterOppStepsKhz.maxOrNull() ?: 1).toDouble()
+            val currentDraw = latestTelemetry?.batteryDrawMilliW ?: 5000L
+            (fraction * currentDraw).toLong()
+        }
+
+        if (goal != null) {
+            // Only goals with a hard power ceiling consume a watts budget.
+            val budget = if (goal.hasHardPowerCeiling) (targetMilliWatts ?: derivedBudgetMw) else null
+            return AutoTdpProfileConfig.forGoal(goal, budget)
+        }
+
+        // Legacy profile-driven path (no Smart goal selected).
         val profile = _selectedProfile.value
-        val targetMw = if (profile == AutoTdpProfile.BATTERY_TARGET) {
-            _batteryTargetResult.value?.mappedCapKhz?.let { capKhz ->
-                // Translate OPP cap back to a mW budget estimate
-                val fraction = capKhz.toDouble() / (caps.bigClusterOppStepsKhz.maxOrNull() ?: 1).toDouble()
-                val currentDraw = latestTelemetry?.batteryDrawMilliW ?: 5000L
-                (fraction * currentDraw).toLong()
-            }
-        } else null
+        val targetMw = if (profile == AutoTdpProfile.BATTERY_TARGET) derivedBudgetMw else null
         return AutoTdpProfileConfig(profile = profile, targetMilliWatts = targetMw)
     }
 

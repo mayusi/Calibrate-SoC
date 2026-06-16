@@ -33,6 +33,46 @@ data class Telemetry(
     val batteryCurrentUa: Long?,
     val batteryVoltageUv: Long?,
     val fanRpm: Int?,
+    // ── Smart-AutoTDP Wave 1 seams (all optional; populated by later waves) ──────
+    //
+    // These fields default to null/absent so every existing caller (the monitor,
+    // tests, benchmarks) constructs Telemetry exactly as before. The Smart AutoTDP
+    // band controller consumes them when present and falls back to the legacy
+    // [zoneTempsMilliC] / package-less behaviour when they are absent. Wave 2 wires
+    // the real probes (GPU die temp, cooling-device state) into these slots without
+    // any further engine change.
+    //
+    /**
+     * Foreground app package name (the classifier ANCHOR). Null when unknown.
+     * Supplied by the daemon from [ForegroundAppWatcher]; the pure engine never
+     * reaches for Android context to obtain it.
+     */
+    val foregroundPackage: String? = null,
+    /**
+     * GPU die temperature in milli-°C (e.g. kgsl-3d0/temp). Null when not yet
+     * probed. When present the thermal pre-empt path prefers this over the skin
+     * zones; when absent it falls back to the hottest [zoneTempsMilliC] entry.
+     * WAVE 2 populates this.
+     */
+    val gpuDieTempMilliC: Int? = null,
+    /**
+     * Maximum cooling_device cur_state observed this tick (across all cooling
+     * devices). A value greater than 0 means the kernel is actively throttling NOW
+     * (immediate-tighten signal). Null when not probed. WAVE 2 populates this.
+     */
+    val coolingDeviceMaxState: Int? = null,
+    /**
+     * Real measured frame-rate × 10 (e.g. 599 = 59.9 fps), or null when no real FPS
+     * source is available (the common case). Used ONLY as a don't-tighten-below-
+     * playable floor, NEVER for classification. Carried × 10 to avoid a float.
+     */
+    val realFpsX10: Int? = null,
+    /**
+     * True only when [realFpsX10] came from a genuine SurfaceFlinger/vsync source.
+     * The engine reads FPS exclusively when this is true (honesty: never act on a
+     * fabricated frame-rate). WAVE 2+ sets this; defaults false.
+     */
+    val isRealFps: Boolean = false,
 )
 
 data class ZoneTemp(

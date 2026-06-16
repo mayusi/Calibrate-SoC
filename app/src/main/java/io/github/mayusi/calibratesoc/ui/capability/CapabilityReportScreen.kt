@@ -182,7 +182,7 @@ private fun AdapterCard(adapter: DeviceAdapter) = SectionCard("Matched device ad
     LabelValue("Display name", adapter.displayName)
     LabelValue("Vendor app", adapter.vendorAppPackage ?: "(none)")
     LabelValue(
-        "Perf preset adapter",
+        "Performance tuning adapter",
         adapter.perfPresetAdapter?.let { "${it.kind} -> ${it.target}" } ?: "(none)",
     )
     LabelValue(
@@ -250,7 +250,7 @@ private fun FanCard(fan: FanProbe) = SectionCard("Fan") {
     LabelValue("Control path", fan.controlPath)
     LabelValue("Curve support", fan.supportsCurve.toString())
     LabelValue(
-        "Presets",
+        "Fan modes",
         fan.availablePresets.joinToString(", ").ifBlank { "—" },
     )
     LabelValue("Current RPM", fan.currentRpm?.toString() ?: "—")

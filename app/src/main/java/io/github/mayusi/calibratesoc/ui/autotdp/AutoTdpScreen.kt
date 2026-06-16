@@ -59,6 +59,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpEffect
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
+import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
@@ -108,10 +109,13 @@ import kotlinx.coroutines.delay
 fun AutoTdpScreen(
     onBack: () -> Unit = {},
     viewModel: AutoTdpViewModel = hiltViewModel(),
+    smartVm: SmartAutoTdpViewModel = hiltViewModel(),
 ) {
     val rung by viewModel.rung.collectAsStateWithLifecycle()
     val runState by viewModel.runState.collectAsStateWithLifecycle()
-    val selectedProfile by viewModel.selectedProfile.collectAsStateWithLifecycle()
+    // NOTE: the legacy top-level `selectedProfile` collection was removed with the
+    // legacy PROFILE picker (Wave 4b). The Per-App dialog keeps its OWN local profile
+    // state; the main screen drives everything off `smartSelectedGoal`.
     val targetHours by viewModel.targetHours.collectAsStateWithLifecycle()
     val batteryTargetResult by viewModel.batteryTargetResult.collectAsStateWithLifecycle()
     val sweepProgress by viewModel.sweepProgress.collectAsStateWithLifecycle()
@@ -127,6 +131,12 @@ fun AutoTdpScreen(
     val liveSnapshot by viewModel.liveSnapshot.collectAsStateWithLifecycle()
     val efficiencyPlan by viewModel.efficiencyPlan.collectAsStateWithLifecycle()
     val undervoltCapability by viewModel.undervoltCapability.collectAsStateWithLifecycle()
+
+    // Smart goal picker state (Wave 4b)
+    val smartSelectedGoal by smartVm.selectedGoal.collectAsStateWithLifecycle()
+    val smartActiveGoal by smartVm.activeGoal.collectAsStateWithLifecycle()
+    val smartDetectedContext by smartVm.detectedContext.collectAsStateWithLifecycle()
+    val smartIsRunning by smartVm.isRunning.collectAsStateWithLifecycle()
 
     var showPerAppDialog by remember { mutableStateOf(false) }
 
@@ -172,7 +182,16 @@ fun AutoTdpScreen(
                 isOn = manuallyOn,
                 startingUp = startingUp,
                 runState = runState,
-                onToggle = { viewModel.setManualEnabled(it) },
+                // WAVE 4b WIRING FIX: START now starts with the selected GOAL MODE.
+                // Previously this called setManualEnabled(it) with no goal, so the
+                // daemon always ran the legacy BALANCED profile regardless of which
+                // GOAL chip was picked. We pass smartSelectedGoal through so the goal
+                // (incl. AUTO) reaches AutoTdpController.start(goal) → the engine's
+                // goalOverride. The watts ceiling (BATTERY_SAVER only) is derived
+                // inside the VM from the battery-target preview, so we pass null here.
+                onToggle = { turnOn ->
+                    viewModel.setManualEnabled(turnOn, smartSelectedGoal, targetMilliWatts = null)
+                },
                 onGenerateScript = { viewModel.generateEfficiencyScript() },
             )
         }
@@ -199,22 +218,29 @@ fun AutoTdpScreen(
         // ── 4. Rung disclosure ─────────────────────────────────────────────────
         item { ArsenalRungBanner(rung = rung, runState = runState) }
 
-        // ── 5. Profile segmented control ───────────────────────────────────────
+        // ── 5. Goal mode picker (Wave 4b) — the ONLY control surface now ───────
+        // The legacy 3-way PROFILE segmented control (Efficiency/Balanced/Battery)
+        // was REMOVED: it was superseded by the 5-mode GOAL MODE picker and the two
+        // side-by-side pickers were confusing/redundant. The goal modes subsume the
+        // old profiles (BALANCED_SMART ≈ Balanced, COOL_QUIET ≈ Efficiency,
+        // BATTERY_SAVER ≈ Battery-target), and START now uses the selected GOAL, so
+        // the legacy picker had no remaining purpose.
         item {
-            ArsenalPanel(
-                accent = AccentBar.Blue,
-                title = "Profile",
-            ) {
-                ArsenalProfilePicker(
-                    selected = selectedProfile,
-                    onSelected = { viewModel.selectProfile(it) },
-                    excludeBatteryTarget = rung == AutoTdpRung.SCRIPT,
-                )
-            }
+            GoalPickerPanel(
+                selectedGoal = smartSelectedGoal,
+                activeGoal = smartActiveGoal,
+                detectedContext = smartDetectedContext,
+                isRunning = smartIsRunning,
+                onSelectGoal = { smartVm.selectGoal(it) },
+            )
         }
 
-        // ── 6. Battery target input (when selected) ────────────────────────────
-        if (selectedProfile == AutoTdpProfile.BATTERY_TARGET) {
+        // ── 6. Battery target input (reachable under the Battery-Saver GOAL) ────
+        // The watts/hours ceiling input is kept reachable, now gated on the GOAL MODE
+        // (BATTERY_SAVER carries the hard power ceiling) instead of the removed legacy
+        // BATTERY_TARGET profile. The VM derives the watts budget from this preview
+        // when starting a BATTERY_SAVER goal.
+        if (smartSelectedGoal == GoalProfile.BATTERY_SAVER) {
             item {
                 BatteryTargetArsenalCard(
                     targetHours = targetHours,

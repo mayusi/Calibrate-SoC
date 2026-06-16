@@ -35,7 +35,7 @@ import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
  * Tune Hub — Direction-C tabbed surface.
  *
  * Hosts four first-class sub-surfaces via an Arsenal segmented control:
- *   0  PRESETS   — CPU/GPU sliders + community presets (existing TuneScreen)
+ *   0  TUNES     — CPU/GPU sliders + tunes (existing TuneScreen)
  *   1  ADVANCED  — governor tunables, custom sysfs (existing AdvancedTuningScreen)
  *   2  AUTO TDP  — dynamic power management (existing AutoTdpScreen)
  *   3  PROFILES  — saved tunes + per-app overrides (existing ProfilesScreen)
@@ -54,7 +54,7 @@ fun TuneHubScreen(
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(initialTab) }
 
-    val tabs = listOf("PRESETS", "ADVANCED", "AUTO TDP", "PROFILES")
+    val tabs = listOf("TUNES", "ADVANCED", "AUTO TDP", "PROFILES")
 
     Column(modifier = Modifier.fillMaxSize()) {
         // ── Arsenal Segmented Tab Control ──────────────────────────────────

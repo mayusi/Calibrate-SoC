@@ -172,6 +172,16 @@ fun AdvancedTuningScreen(
             )
         }
 
+        // ── 1b. Throttle Guard (Wave 4b) — predictive pre-emptive cap via new controller ──
+        item {
+            io.github.mayusi.calibratesoc.ui.thermal.ThrottleGuardPanel()
+        }
+
+        // ── 1c. Game Boost (Wave 4b) ────────────────────────────────────────────
+        item {
+            io.github.mayusi.calibratesoc.ui.boost.GameBoostCard()
+        }
+
         // ── 2. Fan curve (only if device has a controllable fan) ────────────────
         fanCurveModel?.let { fan ->
             if (fan.isActive) {

@@ -57,6 +57,15 @@ class CapabilityProbe @Inject constructor(
         val (hasRoot, rootKind) = rootProbe.probe()
         val shizuku = shizukuProbe.probe()
         val cpuPolicies = sysfsProber.probeCpuPolicies()
+
+        // Warm PServer transactability BEFORE the GPU / uclamp probes so their
+        // privileged-read fallback (SysfsProber.readNodeWithPrivilegedFallback →
+        // PrivilegedSysfsReader) hits a populated cache on its first use. The probes
+        // self-warm too, but warming here keeps the read path deterministic and lets the
+        // diagnostic below report against a settled cache. On non-AYN devices binder() is
+        // null so this returns false with no IPC.
+        val pserverSysfsLive = pServerWriter.isTransactable()
+
         val gpu = sysfsProber.probeGpu(soc.gpuFamily)
         val thermal = sysfsProber.probeThermalZones()
         val fan = sysfsProber.probeGenericPwmFan()
@@ -87,13 +96,10 @@ class CapabilityProbe @Inject constructor(
         // so the UI lights up automatically after the user runs the script.
         val sysfsDirectlyWritable = advancedPermissionsScript.grantsCurrentlyHeld().sysfsWritable
 
-        // PServer-LIVE tier: warms the PServerWriter.transactableCache so that
-        // WriterRegistry.writerFor() can call transactableNow() synchronously.
-        // On non-AYN devices, binder() returns null immediately (no IPC cost).
-        // On AYN devices, this is the REAL probe — one transact("true") — that
-        // determines whether the whitelist step has been run. Result is memoised
-        // for the session; false before the whitelist add, true after.
-        val pserverSysfsLive = pServerWriter.isTransactable()
+        // pserverSysfsLive was warmed above (before the GPU/uclamp probes). The cache is
+        // memoised for the session — false before the whitelist add, true after.
+        // (uclamp + GPU-devfreq probe reads route through the PServer-root fallback when
+        // the app-UID read is SELinux-denied — verified live on Odin 3 + Retroid Pocket 6.)
 
         val tier = when {
             hasRoot && rootOptIn -> PrivilegeTier.ROOT

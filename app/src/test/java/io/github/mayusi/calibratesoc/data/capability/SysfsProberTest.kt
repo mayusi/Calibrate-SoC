@@ -112,6 +112,43 @@ class SysfsProberTest {
         assertThat(gpu.powerLevelRange).isEqualTo(LevelRange(0, 2))
     }
 
+    @Test
+    fun `probeGpu builds an Adreno probe from devfreq min and max when the OPP table is denied (Odin bug 3)`() {
+        // Live evidence (Odin 3): /sys/class/kgsl/kgsl-3d0 EXISTS and devfreq/min_freq +
+        // max_freq are app-readable (160 MHz .. 1100 MHz), but the OPP frequency table
+        // (gpu_available_frequencies / devfreq/available_frequencies / freq_table_mhz)
+        // AND num_pwrlevels are SELinux-denied to the app. Before the fix probeAdreno
+        // returned null → gpuRootPath / gpuDevfreq* all came back null even though the
+        // bounds were readable. Now it must return a probe carrying the live range.
+        val root = "/sys/class/kgsl/kgsl-3d0".toPath()
+        val devfreq = root / "devfreq"
+        write(devfreq / "min_freq", "160000000")
+        write(devfreq / "max_freq", "1100000000")
+        // NOTE: deliberately NO gpu_available_frequencies, NO available_frequencies,
+        // NO freq_table_mhz, NO num_pwrlevels (all denied on the Odin).
+
+        val gpu = prober.probeGpu(GpuFamily.ADRENO)
+
+        assertThat(gpu).isNotNull()
+        assertThat(gpu!!.family).isEqualTo(GpuFamily.ADRENO)
+        assertThat(gpu.rootPath).isEqualTo("/sys/class/kgsl/kgsl-3d0")
+        assertThat(gpu.currentMinHz).isEqualTo(160_000_000L)
+        assertThat(gpu.currentMaxHz).isEqualTo(1_100_000_000L)
+        // No OPP table → empty steps list (honest), but the envelope bounds are present.
+        assertThat(gpu.availableFreqsHz).isEmpty()
+        assertThat(gpu.powerLevelRange).isNull()
+    }
+
+    @Test
+    fun `probeGpu still returns null when the kgsl root exists but nothing is readable`() {
+        // Root present but NO freqs, NO num_pwrlevels, NO usable min less-than max range.
+        // (min == max is not a usable range → honest null, no fake lever.)
+        val devfreq = "/sys/class/kgsl/kgsl-3d0/devfreq".toPath()
+        write(devfreq / "min_freq", "300000000")
+        write(devfreq / "max_freq", "300000000") // equal → not a range
+        assertThat(prober.probeGpu(GpuFamily.ADRENO)).isNull()
+    }
+
     // --- Thermal --------------------------------------------------------
 
     @Test
@@ -293,6 +330,96 @@ class SysfsProberTest {
         assertThat(prober.probeCoolingDevices()).isEmpty()
     }
 
+    // --- readMaxCoolingCurState: THERMAL-RELEVANT filter (cross-device bug 1) ----
+    //
+    // Live evidence: on a cool, idle Odin 3 AND RP6 the thermal pre-empt fired EVERY
+    // tick because readMaxCoolingCurState counted NON-thermal cooling devices that sit
+    // pinned high — the Odin `panel0-backlight` (cur=262/max=262), an RP6 device at
+    // cur=255, etc. The fix restricts the read to genuine CPU/GPU thermal throttles.
+
+    @Test
+    fun `readMaxCoolingCurState ignores the pinned-high panel backlight (Odin bug)`() {
+        // The REAL Odin 3 backlight: type=panel0-backlight, cur=262, max=262.
+        write("/sys/class/thermal/cooling_device35/type".toPath(), "panel0-backlight")
+        write("/sys/class/thermal/cooling_device35/max_state".toPath(), "262")
+        write("/sys/class/thermal/cooling_device35/cur_state".toPath(), "262")
+        // The REAL thermal throttles, all at 0 on a cool idle device.
+        write("/sys/class/thermal/cooling_device1/type".toPath(), "cpu-hotplug1")
+        write("/sys/class/thermal/cooling_device1/max_state".toPath(), "1")
+        write("/sys/class/thermal/cooling_device1/cur_state".toPath(), "0")
+        write("/sys/class/thermal/cooling_device2/type".toPath(), "thermal-devfreq-gpu")
+        write("/sys/class/thermal/cooling_device2/max_state".toPath(), "13")
+        write("/sys/class/thermal/cooling_device2/cur_state".toPath(), "0")
+
+        // Only the thermal throttles count → max is 0 → engine pre-empt does NOT fire.
+        assertThat(prober.readMaxCoolingCurState()).isEqualTo(0)
+    }
+
+    @Test
+    fun `readMaxCoolingCurState excludes battery and audio cooling devices`() {
+        // Non-thermal devices that can sit non-zero during normal use.
+        write("/sys/class/thermal/cooling_device30/type".toPath(), "battery")
+        write("/sys/class/thermal/cooling_device30/max_state".toPath(), "30")
+        write("/sys/class/thermal/cooling_device30/cur_state".toPath(), "12")
+        write("/sys/class/thermal/cooling_device37/type".toPath(), "wsa2") // audio amp
+        write("/sys/class/thermal/cooling_device37/max_state".toPath(), "11")
+        write("/sys/class/thermal/cooling_device37/cur_state".toPath(), "5")
+        // A real CPU throttle, also engaged.
+        write("/sys/class/thermal/cooling_device0/type".toPath(), "thermal-cpufreq-0")
+        write("/sys/class/thermal/cooling_device0/max_state".toPath(), "16")
+        write("/sys/class/thermal/cooling_device0/cur_state".toPath(), "3")
+
+        // Battery (12) and audio (5) are excluded; only the CPU throttle (3) counts.
+        assertThat(prober.readMaxCoolingCurState()).isEqualTo(3)
+    }
+
+    @Test
+    fun `readMaxCoolingCurState reports real CPU and GPU throttling when engaged`() {
+        write("/sys/class/thermal/cooling_device1/type".toPath(), "cpu-hotplug1")
+        write("/sys/class/thermal/cooling_device1/max_state".toPath(), "1")
+        write("/sys/class/thermal/cooling_device1/cur_state".toPath(), "1")
+        write("/sys/class/thermal/cooling_device2/type".toPath(), "gpu")
+        write("/sys/class/thermal/cooling_device2/max_state".toPath(), "13")
+        write("/sys/class/thermal/cooling_device2/cur_state".toPath(), "7")
+
+        // Highest thermal-relevant cur_state wins (gpu = 7).
+        assertThat(prober.readMaxCoolingCurState()).isEqualTo(7)
+    }
+
+    @Test
+    fun `readMaxCoolingCurState returns null when only non-thermal devices exist`() {
+        // ONLY a pinned backlight present → no thermal-relevant device → null (honest:
+        // the engine falls back to die-temp signals, NOT a false "throttling").
+        write("/sys/class/thermal/cooling_device35/type".toPath(), "panel0-backlight")
+        write("/sys/class/thermal/cooling_device35/max_state".toPath(), "262")
+        write("/sys/class/thermal/cooling_device35/cur_state".toPath(), "262")
+
+        assertThat(prober.readMaxCoolingCurState()).isNull()
+    }
+
+    @Test
+    fun `isThermalThrottleCooling includes real CPU and GPU throttle types`() {
+        // Real types observed on Odin 3 / RP6 / SD8Gen2 kernels.
+        listOf(
+            "cpu-hotplug1", "thermal-cpufreq-0", "cpufreq-cpu0",
+            "gpu", "thermal-devfreq-gpu", "tsens_tz_sensor0",
+            "cpu-isolate0", "soc_cooling",
+        ).forEach { type ->
+            assertThat(prober.isThermalThrottleCooling(type)).isTrue()
+        }
+    }
+
+    @Test
+    fun `isThermalThrottleCooling excludes non-thermal cooling types`() {
+        listOf(
+            "panel0-backlight", "panel1-backlight", "battery",
+            "charger", "charge", "wsa2", "wsa-speaker", "led-flash",
+            "haptic", "vibrator", "", "   ",
+        ).forEach { type ->
+            assertThat(prober.isThermalThrottleCooling(type)).isFalse()
+        }
+    }
+
     // --- devfreq devices ------------------------------------------------
 
     @Test
@@ -402,8 +529,45 @@ class SysfsProberTest {
     }
 
     @Test
+    fun `probeSchedBoostInterface detects uclamp from the FLOAT format (cross-device bug 2)`() {
+        // Live evidence: on the Odin 3 AND RP6, `cat
+        // /dev/cpuctl/top-app/cpu.uclamp.min` returns "0.00" (a FLOAT, app-readable),
+        // yet uclampAvailable came back false. The detector must accept the float.
+        write("/dev/cpuctl/top-app/cpu.uclamp.min".toPath(), "0.00")
+        assertThat(prober.probeSchedBoostInterface()).isEqualTo(SchedBoostInterface.UCLAMP)
+    }
+
+    @Test
+    fun `probeSchedBoostInterface accepts a non-zero uclamp float`() {
+        write("/dev/cpuctl/top-app/cpu.uclamp.min".toPath(), "37.50")
+        assertThat(prober.probeSchedBoostInterface()).isEqualTo(SchedBoostInterface.UCLAMP)
+    }
+
+    @Test
     fun `probeSchedBoostInterface returns NONE when neither present`() {
         assertThat(prober.probeSchedBoostInterface()).isEqualTo(SchedBoostInterface.NONE)
+    }
+
+    @Test
+    fun `probeSchedBoostValues reads uclamp float percentages and rounds to Int`() {
+        // cgroup cpu.uclamp.{min,max} are floats; the integer-only read would lose them.
+        write("/dev/cpuctl/top-app/cpu.uclamp.min".toPath(), "0.00")
+        write("/dev/cpuctl/top-app/cpu.uclamp.max".toPath(), "100.00")
+        write("/dev/cpuctl/foreground/cpu.uclamp.min".toPath(), "37.50")
+        write("/dev/cpuctl/foreground/cpu.uclamp.max".toPath(), "100.00")
+
+        val values = prober.probeSchedBoostValues(
+            iface = SchedBoostInterface.UCLAMP,
+            slices = listOf("top-app", "foreground", "background"),
+        )
+
+        // background has no node → dropped honestly.
+        assertThat(values).hasSize(2)
+        val topApp = values.first { it.slice == "top-app" }
+        assertThat(topApp.boostOrUclampMin).isEqualTo(0)
+        assertThat(topApp.preferIdleOrUclampMax).isEqualTo(100)
+        val fg = values.first { it.slice == "foreground" }
+        assertThat(fg.boostOrUclampMin).isEqualTo(38) // 37.50 rounds to 38
     }
 
     @Test
@@ -491,10 +655,132 @@ class SysfsProberTest {
         assertThat(policies.first().onlineCores).containsExactly(4, 5, 6, 7).inOrder()
     }
 
+    // --- Privileged-read fallback (Odin 3 EACCES nodes) ----------------------
+    //
+    // Root cause proven off-device: on the Odin 3 the app UID cannot read the cgroup
+    // uclamp slice or the kgsl devfreq bounds directly (EACCES — Okio's read goes straight
+    // to FileInputStream, no stat, exactly like `cat`, but the app's SELinux domain is
+    // denied where the `shell` / PServer-root domain is allowed). The probe LOGIC was
+    // right; the read CHANNEL was wrong. These tests model that exact split: the node is
+    // ABSENT from the (app-visible) FakeFileSystem, but a privileged reader supplies the
+    // root-readable value — and the probe must then populate the field.
+
+    @Test
+    fun `probeSchedBoostInterface detects uclamp via privileged fallback when app read is denied`() {
+        // App-direct read denied → node NOT in the app-visible FS at all. The cgroup mount
+        // point exists (so /dev/cpuctl is "there") but cpu.uclamp.min is unreadable to us.
+        fs.createDirectories("/dev/cpuctl/top-app".toPath())
+        val priv = FakePrivilegedReader(
+            mapOf("/dev/cpuctl/top-app/cpu.uclamp.min" to "0.00"),
+        )
+        val proberWithPriv = SysfsProber(fs, priv)
+
+        // Without the privileged fallback this would be NONE (the bug); with it, UCLAMP.
+        assertThat(proberWithPriv.probeSchedBoostInterface())
+            .isEqualTo(SchedBoostInterface.UCLAMP)
+    }
+
+    @Test
+    fun `probeGpu populates devfreq envelope via privileged fallback when app read is denied`() {
+        // kgsl root exists (some sibling node is app-readable so fs.exists(root) is true),
+        // but devfreq/min_freq + max_freq are EACCES to the app → absent from the app FS.
+        // The privileged reader returns the Odin 3 values (160 MHz .. 1100 MHz).
+        val root = "/sys/class/kgsl/kgsl-3d0".toPath()
+        write(root / "devfreq" / "governor", "msm-adreno-tz") // makes root + devfreq exist
+        val priv = FakePrivilegedReader(
+            mapOf(
+                "/sys/class/kgsl/kgsl-3d0/devfreq/min_freq" to "160000000",
+                "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq" to "1100000000",
+            ),
+        )
+        val proberWithPriv = SysfsProber(fs, priv)
+
+        val gpu = proberWithPriv.probeGpu(GpuFamily.ADRENO)
+
+        assertThat(gpu).isNotNull()
+        assertThat(gpu!!.rootPath).isEqualTo("/sys/class/kgsl/kgsl-3d0")
+        assertThat(gpu.currentMinHz).isEqualTo(160_000_000L)
+        assertThat(gpu.currentMaxHz).isEqualTo(1_100_000_000L)
+    }
+
+    @Test
+    fun `TdpCaps from yields uclampAvailable and populated devfreq from the privileged-read probes`() {
+        // End-to-end: the two privileged-fallback probes feed a CapabilityReport, and
+        // TdpCaps.from(report) must then expose uclampAvailable=true plus a real GPU
+        // devfreq envelope — the exact fields that came back false/null at runtime on the
+        // Odin 3. Proves the fix flows all the way to what the AutoTDP engine consumes.
+        fs.createDirectories("/dev/cpuctl/top-app".toPath())
+        val root = "/sys/class/kgsl/kgsl-3d0".toPath()
+        write(root / "devfreq" / "governor", "msm-adreno-tz")
+        val priv = FakePrivilegedReader(
+            mapOf(
+                "/dev/cpuctl/top-app/cpu.uclamp.min" to "0.00",
+                "/sys/class/kgsl/kgsl-3d0/devfreq/min_freq" to "160000000",
+                "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq" to "1100000000",
+            ),
+        )
+        val proberWithPriv = SysfsProber(fs, priv)
+
+        val gpu = proberWithPriv.probeGpu(GpuFamily.ADRENO)
+        val schedIface = proberWithPriv.probeSchedBoostInterface()
+
+        // Build a minimal CapabilityReport carrying ONLY the two probed fields under test
+        // (every other field is a benign default) and run the real TdpCaps mapping.
+        val report = io.github.mayusi.calibratesoc.data.capability.CapabilityReport(
+            device = io.github.mayusi.calibratesoc.data.capability.DeviceIdentity(
+                manufacturer = "AYN", brand = "AYN", model = "Odin3", device = "odin3",
+                hardware = "qcom", androidVersion = "14", sdkInt = 34, knownHandheldKey = null,
+            ),
+            soc = io.github.mayusi.calibratesoc.data.capability.SoCIdentity(
+                "Qualcomm", "CQ8725S", GpuFamily.ADRENO,
+            ),
+            privilege = io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.NONE,
+            rootKind = io.github.mayusi.calibratesoc.data.capability.RootKind.NONE,
+            shizuku = io.github.mayusi.calibratesoc.data.capability.ShizukuStatus(false, false, false, null),
+            cpuPolicies = emptyList(),
+            gpu = gpu,
+            thermalZones = emptyList(),
+            fan = null,
+            vendorApps = io.github.mayusi.calibratesoc.data.capability.VendorAppPresence(false, false, false),
+            schedBoostInterface = schedIface,
+        )
+        val caps = io.github.mayusi.calibratesoc.data.autotdp.TdpCaps.from(report)
+
+        assertThat(caps.uclampAvailable).isTrue()
+        assertThat(caps.gpuRootPath).isEqualTo("/sys/class/kgsl/kgsl-3d0")
+        assertThat(caps.gpuDevfreqFloorHz).isEqualTo(160_000_000L)
+        assertThat(caps.gpuDevfreqCeilHz).isEqualTo(1_100_000_000L)
+    }
+
+    @Test
+    fun `probeGpu keeps honest null when neither app nor privileged read can reach the bounds`() {
+        // RP6 case: kgsl root exists but the devfreq bounds are SELinux-denied to BOTH the
+        // app AND PServer. The privileged reader returns null for those paths → the probe
+        // must NOT fabricate a lever; it stays null.
+        val root = "/sys/class/kgsl/kgsl-3d0".toPath()
+        write(root / "devfreq" / "governor", "msm-adreno-tz")
+        val priv = FakePrivilegedReader(emptyMap()) // privileged read also denied
+        val proberWithPriv = SysfsProber(fs, priv)
+
+        assertThat(proberWithPriv.probeGpu(GpuFamily.ADRENO)).isNull()
+    }
+
     // --- Helpers --------------------------------------------------------
 
     private fun write(path: okio.Path, contents: String) {
         path.parent?.let { fs.createDirectories(it) }
         fs.write(path) { writeUtf8(contents) }
+    }
+
+    /**
+     * Test double for [PrivilegedSysfsReader] backed by a fixed path→value map. Models the
+     * PServer-root `cat` channel: returns a value only for nodes the privileged context can
+     * read (everything else → null, the honest "unreadable" result).
+     */
+    private class FakePrivilegedReader(
+        private val values: Map<String, String>,
+    ) : PrivilegedSysfsReader(pServerWriter = null) {
+        // catOrNull is fully overridden, so the null PServerWriter is never dereferenced.
+        override fun catOrNull(path: String): String? = values[path]
     }
 }

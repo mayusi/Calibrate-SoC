@@ -558,9 +558,11 @@ class OverlayService :
  *  [autoTdpBigCapMhz]    — big-cluster MHz cap applied, null = uncapped
  *  [autoTdpGpuLevel]     — GPU power-level floor, null = unconstrained
  *  [autoTdpReason]       — last decision string from AutoTdpEngine
- *  [autoTdpSavingsMw]    — measured delta mW (positive = saved), null until measured
- *  [autoTdpSavingsPct]   — same delta as a percentage, null until measured
- *  [autoTdpSavingsReady] — true only when enoughData; never show savings before this
+ *  [autoTdpSavingsMw]        — measured delta mW (positive = saved), null until measured
+ *  [autoTdpSavingsPct]       — same delta as a percentage, null until measured
+ *  [autoTdpSavingsReady]     — true only when enoughData; never show savings before this
+ *  [autoTdpGoal]             — concrete GoalProfile resolved this tick (Wave 4b), null when not running
+ *  [autoTdpDetectedContext]  — classifier DETECTED context when AUTO goal is live (blue pill, NOT measured)
  */
 @Immutable
 data class HudUiState(
@@ -618,6 +620,12 @@ data class HudUiState(
     // AutoTDP active profile (used for the in-HUD profile picker)
     val autoTdpActiveProfile: io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile =
         io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile.BALANCED,
+    // Smart AutoTDP Wave 4b — goal + detected context for HUD display
+    /** The concrete GoalProfile the daemon resolved to this tick (null when not RUNNING). */
+    val autoTdpGoal: io.github.mayusi.calibratesoc.data.autotdp.GoalProfile? = null,
+    /** Classifier DETECTED context (non-null when AUTO goal is RUNNING and a tick completed).
+     *  Styled DETECTED (blue pill), NEVER "MEASURED" — this is a classifier belief. */
+    val autoTdpDetectedContext: io.github.mayusi.calibratesoc.data.autotdp.WorkloadContext? = null,
     // Refresh-rate / FPS-cap controls
     /** Available Hz options from RefreshRateController. Empty = no cap control. */
     val availableHzOptions: List<Float> = emptyList(),

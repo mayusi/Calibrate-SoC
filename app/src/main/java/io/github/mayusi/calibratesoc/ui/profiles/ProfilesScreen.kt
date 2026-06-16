@@ -78,6 +78,7 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
     val accessibilityGranted by viewModel.accessibilityGranted.collectAsStateWithLifecycle()
 
     var editingApp by remember { mutableStateOf<String?>(null) }
+    var bundleEditingApp by remember { mutableStateOf<String?>(null) }
     var sharingProfile by remember { mutableStateOf<UserProfile?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
 
@@ -118,7 +119,7 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
             ) {
                 Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.size(6.dp))
-                Text("Import preset from code")
+                Text("Import tune from code")
             }
         }
 
@@ -213,6 +214,33 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                 enabled = store.profiles.isNotEmpty(),
             ) { Text("Add per-app override") }
         }
+
+        // Wave 4b: per-app full bundle editor entry points
+        if (store.perAppOverrides.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Full bundle editor",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "Edit AutoTDP goal, refresh rate, fan mode, Game Boost on launch, and background app reaper per game.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(store.perAppOverrides.keys.toList(), key = { "bundle:$it" }) { pkg ->
+                OutlinedButton(
+                    onClick = { bundleEditingApp = pkg },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Outlined.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text(viewModel.resolveAppLabel(pkg).let { it.ifBlank { pkg } })
+                }
+            }
+        }
     }
 
     // ── Share dialog ────────────────────────────────────────────────────────────
@@ -255,6 +283,14 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                 editingApp = null
             },
             onDismiss = { editingApp = null },
+        )
+    }
+
+    // Wave 4b: full per-app bundle editor
+    bundleEditingApp?.let { pkg ->
+        PerAppBundleScreen(
+            packageName = pkg,
+            onDone = { bundleEditingApp = null },
         )
     }
 }
@@ -311,7 +347,7 @@ private fun ProfileCard(
             androidx.compose.material3.IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
                 Icon(
                     imageVector = Icons.Outlined.Share,
-                    contentDescription = "Share preset code",
+                    contentDescription = "Share tune code",
                     modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -488,14 +524,14 @@ private fun SharePresetDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Anyone with this code can import your preset exactly as-is.",
+                    "Anyone with this code can import your tune exactly as-is.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
                     value = code,
                     onValueChange = {},
                     readOnly = true,
-                    label = { Text("Preset code") },
+                    label = { Text("Tune code") },
                     modifier = Modifier.fillMaxWidth(),
                     trailingIcon = {
                         Icon(
@@ -523,9 +559,9 @@ private fun SharePresetDialog(
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
                         putExtra(Intent.EXTRA_TEXT, code)
-                        putExtra(Intent.EXTRA_SUBJECT, "Calibrate SoC preset: ${profile.name}")
+                        putExtra(Intent.EXTRA_SUBJECT, "Calibrate SoC tune: ${profile.name}")
                     }
-                    context.startActivity(Intent.createChooser(intent, "Share preset"))
+                    context.startActivity(Intent.createChooser(intent, "Share tune"))
                 }
                 onDismiss()
             }) { Text("Share…") }
@@ -547,11 +583,11 @@ private fun ImportPresetDialog(
     var code by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import preset") },
+        title = { Text("Import tune") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Paste a preset code shared by another user.",
+                    "Paste a tune code shared by another user.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
@@ -560,7 +596,7 @@ private fun ImportPresetDialog(
                         code = it
                         onCodeChange(it)
                     },
-                    label = { Text("Preset code") },
+                    label = { Text("Tune code") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = false,
                     minLines = 2,

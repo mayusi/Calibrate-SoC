@@ -25,15 +25,58 @@ enum class AutoTdpProfile {
 
 /**
  * Carries the optional target-watts budget used by [AutoTdpProfile.BATTERY_TARGET].
- * [targetWatts] is null for EFFICIENCY and BALANCED; the daemon must supply a
+ * [targetMilliWatts] is null for EFFICIENCY and BALANCED; the daemon must supply a
  * positive value when BATTERY_TARGET is active.
  *
  * Kept as a lightweight carrier — the daemon passes this alongside the profile
  * into [AutoTdpEngine.decide] so the pure function can compute the proportional
  * cap without reaching for any Android context.
+ *
+ * ## Smart goal (Wave 4a)
+ *
+ * [goal] optionally carries the new 5-mode [GoalProfile] (incl. AUTO). When
+ * non-null it is the ACTIVE intent — the daemon passes it to
+ * [AutoTdpEngine.decide] as `goalOverride`, so the Smart engine (band-following +
+ * AUTO classifier) is actually reached. When null the daemon falls back to the
+ * legacy behaviour: [AutoTdpEngine.decide] internally maps [profile] →
+ * [GoalProfile.fromLegacyProfile]. [profile] is ALWAYS kept populated (even when a
+ * goal is set) for back-compat with the [EXTRA_PROFILE_ORDINAL] intent extra and
+ * the [BATTERY_TARGET] watts-ceiling path; pick a sensible legacy mirror via
+ * [forGoal].
  */
 data class AutoTdpProfileConfig(
     val profile: AutoTdpProfile,
     /** Desired maximum steady-state draw in milliwatts. Non-null iff profile == BATTERY_TARGET. */
     val targetMilliWatts: Long? = null,
-)
+    /**
+     * The active Smart [GoalProfile], or null to use the legacy [profile] mapping.
+     * Carried end-to-end (controller → intent → daemon → engine `goalOverride`).
+     */
+    val goal: GoalProfile? = null,
+) {
+    companion object {
+        /**
+         * Build a config driven by a Smart [goal]. [profile] is set to a legacy
+         * mirror so the [EXTRA_PROFILE_ORDINAL] extra and the watts-ceiling path stay
+         * coherent, but [goal] is the authority the engine actually follows.
+         *
+         * The legacy mirror is chosen so the back-compat fields degrade sanely if the
+         * goal were ever dropped: a goal that carries a hard power ceiling mirrors to
+         * [AutoTdpProfile.BATTERY_TARGET] (so [targetMilliWatts] is honoured),
+         * [GoalProfile.BALANCED_SMART]/AUTO mirror to BALANCED, and the remaining
+         * thermally-lean goals mirror to EFFICIENCY.
+         */
+        fun forGoal(goal: GoalProfile, targetMilliWatts: Long? = null): AutoTdpProfileConfig {
+            val mirror = when {
+                goal.hasHardPowerCeiling -> AutoTdpProfile.BATTERY_TARGET
+                goal == GoalProfile.BALANCED_SMART || goal == GoalProfile.AUTO -> AutoTdpProfile.BALANCED
+                else -> AutoTdpProfile.EFFICIENCY
+            }
+            return AutoTdpProfileConfig(
+                profile = mirror,
+                targetMilliWatts = targetMilliWatts,
+                goal = goal,
+            )
+        }
+    }
+}

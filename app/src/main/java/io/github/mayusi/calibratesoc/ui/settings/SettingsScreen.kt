@@ -305,13 +305,13 @@ fun SettingsScreen(
             val tierChip = if (tier == PrivilegeTier.AYN_SETTINGS) vb.tierLabel else tier.name
             val tierExplainer = when (tier) {
                 PrivilegeTier.ROOT ->
-                    "Full kernel-level CPU/GPU clocking + fan control + custom presets. Magisk / KernelSU detected and root mode enabled."
+                    "Full kernel-level CPU/GPU clocking + fan control + custom tunes. Magisk / KernelSU detected and root mode enabled."
                 PrivilegeTier.AYN_SETTINGS ->
                     "${vb.brand} tier active. Vendor performance + fan modes apply instantly via the same Settings.System keys ${vb.brand}'s own Quick Settings tile uses. Custom MHz caps via Generate script."
                 PrivilegeTier.SHIZUKU ->
-                    "Monitoring + vendor preset switching. Full sysfs writes pending a Shizuku UserService update."
+                    "Monitoring + vendor tuning. Full sysfs writes pending a Shizuku UserService update."
                 PrivilegeTier.NONE ->
-                    "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor preset switching. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
+                    "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor tuning. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
             }
             ArsenalPanel(accent = tierAccent, title = "PRIVILEGE TIER") {
                 StatusPill(text = tierChip, accent = tierAccent)

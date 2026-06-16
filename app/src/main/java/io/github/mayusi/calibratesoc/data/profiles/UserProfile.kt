@@ -123,7 +123,23 @@ data class UserProfile(
 data class ProfileStore(
     val version: Int = 1,
     val profiles: List<UserProfile> = emptyList(),
-    /** package name -> profile id. The Accessibility service maps the
-     *  current foreground app through this to decide what to apply. */
+    /**
+     * Legacy single-profile override map: package name -> profile id.
+     *
+     * Kept for backwards-compat deserialization. [ForegroundAppWatcher] prefers
+     * [perAppBundles] when a bundle exists for a package; otherwise it falls back
+     * to this map so existing per-app overrides continue to work without migration.
+     * New writes go to [perAppBundles] (a bundle with only [PerAppBundle.profileId] set).
+     */
     val perAppOverrides: Map<String, String> = emptyMap(),
+    /**
+     * Full per-app tune bundles: package name -> [PerAppBundle].
+     *
+     * Supersedes [perAppOverrides] per package when present. A bundle with only
+     * [PerAppBundle.profileId] set is semantically identical to a [perAppOverrides]
+     * entry — the legacy map is not written when [perAppBundles] already covers
+     * a package. Serialized by kotlinx.serialization; ignoreUnknownKeys handles
+     * older stores that pre-date this field.
+     */
+    val perAppBundles: Map<String, PerAppBundle> = emptyMap(),
 )

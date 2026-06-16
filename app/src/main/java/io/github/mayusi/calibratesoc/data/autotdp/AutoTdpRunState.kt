@@ -66,6 +66,23 @@ data class AutoTdpRunState(
      * [MAX_DECISION_HISTORY]). Empty before the first applied tick.
      */
     val decisions: List<DecisionRecord> = emptyList(),
+    /**
+     * WAVE 4a: the Smart [GoalProfile] the daemon is currently running. When the
+     * user picked AUTO this is the CONCRETE goal the context classifier resolved AUTO
+     * to this tick (e.g. AUTO → BALANCED_SMART); otherwise it is the picked goal.
+     * Null until the first decision, or when the daemon is running the pure legacy
+     * profile path with no goal. This is CONFIG/INTENT — the goal in effect — not a
+     * measurement. The UI (Wave 4b) renders "… → Balanced".
+     */
+    val activeGoal: GoalProfile? = null,
+    /**
+     * WAVE 4a: the workload context the classifier currently BELIEVES it is in
+     * (`classifier.stable`). This is the DETECTED honesty tier — the classifier's
+     * committed belief after hysteresis, NOT a sensor reading. Null until the first
+     * decision. The UI (Wave 4b) renders "Detected: Heavy 3D → Balanced". Keep this
+     * honest: it is a classification (belief), never a measured quantity.
+     */
+    val detectedContext: WorkloadContext? = null,
 )
 
 /** Lifecycle states for the AutoTDP daemon. */

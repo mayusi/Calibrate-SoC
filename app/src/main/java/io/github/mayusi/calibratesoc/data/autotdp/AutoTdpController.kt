@@ -47,6 +47,21 @@ class AutoTdpController @Inject constructor(
     }
 
     /**
+     * NATIVE Smart start (Wave 4a): launch the daemon driving the 5-mode
+     * [GoalProfile] (incl. AUTO) directly. The goal survives the intent round-trip
+     * and is passed to [AutoTdpEngine.decide] as `goalOverride`, so the Smart band
+     * controller / AUTO classifier are genuinely reached — NOT the lossy
+     * goal→legacy-profile map.
+     *
+     * @param goal             the Smart goal to run (AUTO engages the classifier).
+     * @param targetMilliWatts optional hard watts ceiling; honoured by goals that
+     *                         carry one ([GoalProfile.hasHardPowerCeiling]).
+     */
+    fun start(goal: GoalProfile, targetMilliWatts: Long? = null) {
+        start(AutoTdpProfileConfig.forGoal(goal, targetMilliWatts))
+    }
+
+    /**
      * Stop the daemon and revert all writes. The service handles revert
      * internally via TunableWriter.revertAll before it exits.
      */

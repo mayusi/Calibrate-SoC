@@ -102,7 +102,7 @@ fun TuneHistoryScreen(viewModel: TuneHistoryViewModel = hiltViewModel()) {
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        "Every preset, vendor flip, and script run. Newest first. Up to 100 entries.",
+                        "Every tune, vendor flip, and script run. Newest first. Up to 100 entries.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -114,7 +114,7 @@ fun TuneHistoryScreen(viewModel: TuneHistoryViewModel = hiltViewModel()) {
                     EmptyState(
                         icon = Icons.Default.Delete,
                         title = "Nothing applied yet",
-                        body = "Pick a preset on Tune and your history shows up here.",
+                        body = "Pick a tune on Tune and your history shows up here.",
                     )
                 }
             } else {
@@ -123,7 +123,7 @@ fun TuneHistoryScreen(viewModel: TuneHistoryViewModel = hiltViewModel()) {
                         value = searchQuery,
                         onValueChange = viewModel::setSearchQuery,
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Search by preset name") },
+                        label = { Text("Search by tune name") },
                         singleLine = true,
                     )
                 }
@@ -137,7 +137,7 @@ fun TuneHistoryScreen(viewModel: TuneHistoryViewModel = hiltViewModel()) {
                         EmptyState(
                             icon = Icons.Default.Delete,
                             title = "No matches",
-                            body = "No presets match \"$searchQuery\".",
+                            body = "No tunes match \"$searchQuery\".",
                         )
                     }
                 } else {

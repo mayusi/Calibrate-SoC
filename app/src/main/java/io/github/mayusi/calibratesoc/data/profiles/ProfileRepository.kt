@@ -75,6 +75,17 @@ class ProfileRepository @Inject constructor(
                 // the Accessibility service doesn't try to apply a
                 // missing target.
                 perAppOverrides = current.perAppOverrides.filterValues { it != id },
+                // Also strip or clear the profileId inside any bundle that
+                // referenced the deleted profile — keep the bundle alive if
+                // it has other fields (autoTdpGoal, fanMode, etc.) but null
+                // out the profile reference so apply doesn't try a missing target.
+                perAppBundles = current.perAppBundles.mapValues { (_, b) ->
+                    if (b.profileId == id) b.copy(profileId = null) else b
+                }.filterValues { b ->
+                    // Drop bundles that are now entirely empty (all nulls / false).
+                    b.profileId != null || b.autoTdpGoal != null ||
+                        b.refreshRateHz != null || b.fanMode != null || b.gameBoostOnLaunch
+                },
             )
             persist(next)
         }
@@ -89,6 +100,44 @@ class ProfileRepository @Inject constructor(
                 current.perAppOverrides + (packageName to profileId)
             }
             persist(current.copy(perAppOverrides = updated))
+        }
+    }
+
+    /**
+     * Persist a [PerAppBundle] for [packageName].
+     *
+     * A bundle with only [PerAppBundle.profileId] set replaces the legacy
+     * [perAppOverrides] entry for the same package (so both code paths stay
+     * consistent). Calling with [bundle] == null removes the bundle.
+     *
+     * Note: this does NOT touch [perAppOverrides] — the two maps coexist and
+     * [ForegroundAppWatcher] prefers [perAppBundles] per the lookup contract.
+     */
+    suspend fun setBundle(packageName: String, bundle: PerAppBundle?) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val current = _store.value
+            val updatedBundles = if (bundle == null) {
+                current.perAppBundles - packageName
+            } else {
+                current.perAppBundles + (packageName to bundle)
+            }
+            persist(current.copy(perAppBundles = updatedBundles))
+        }
+    }
+
+    /**
+     * Remove any bundle AND legacy override for [packageName] in one atomic write.
+     * Equivalent to clearing a per-app mapping entirely.
+     */
+    suspend fun clearPerAppMapping(packageName: String) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val current = _store.value
+            persist(
+                current.copy(
+                    perAppOverrides = current.perAppOverrides - packageName,
+                    perAppBundles = current.perAppBundles - packageName,
+                )
+            )
         }
     }
 

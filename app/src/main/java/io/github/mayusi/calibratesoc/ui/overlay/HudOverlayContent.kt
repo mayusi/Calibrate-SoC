@@ -53,6 +53,9 @@ import androidx.compose.ui.unit.sp
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.autotdp.DecisionRecord
+import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
+import io.github.mayusi.calibratesoc.data.autotdp.WorkloadContext
+import io.github.mayusi.calibratesoc.ui.autotdp.GoalProfileUi
 import io.github.mayusi.calibratesoc.ui.components.CutCorner
 import io.github.mayusi.calibratesoc.ui.components.CutCornerShape
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
@@ -829,6 +832,11 @@ private fun AutoTdpProofSection(
         // 3. WHY (hold-reason, tap to expand raw) ─────────────────────────────
         AutoTdpWhyRow(state)
 
+        // 3b. GOAL / DETECTED row (Wave 4b) ───────────────────────────────────
+        if (state.autoTdpGoal != null) {
+            AutoTdpGoalRow(goal = state.autoTdpGoal, detectedContext = state.autoTdpDetectedContext)
+        }
+
         // 5. EFFECT (measured only) ───────────────────────────────────────────
         AutoTdpEffectRow(state)
 
@@ -982,6 +990,59 @@ private fun AutoTdpWhyRow(state: HudUiState) {
                 lineHeight = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(start = 2.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Wave 4b: GOAL row — shows the active GoalProfile and, when AUTO is running,
+ * the classifier DETECTED context (blue "DETECTED" pill, not Emerald "MEASURED").
+ *
+ * HONESTY: the detected context is a classifier BELIEF (GPU-busy% + foreground
+ * heuristic after hysteresis). It is NOT a measurement. Always rendered with
+ * HudBlue (not HudEmerald) to preserve the DETECTED vs MEASURED distinction.
+ */
+@Composable
+private fun AutoTdpGoalRow(
+    goal: GoalProfile,
+    detectedContext: WorkloadContext?,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = "GOAL",
+            color = HudLabel,
+            fontSize = 7.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp,
+        )
+        Text(
+            text = GoalProfileUi.goalShortLabel(goal),
+            color = HudBlue,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+        )
+        // DETECTED context only when AUTO is live — blue pill, not emerald.
+        if (detectedContext != null) {
+            Text(
+                text = "→ ${GoalProfileUi.detectedContextShort(detectedContext)}",
+                color = HudBlue,
+                fontSize = 8.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.weight(1f),
+            )
+            // Small "DETECTED" label — distinguishes from MEASURED honesty tier.
+            Text(
+                text = "DETECTED",
+                color = HudBlue,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp,
             )
         }
     }

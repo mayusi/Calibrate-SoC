@@ -36,6 +36,28 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
  *                         online count below this floor. Minimum is 1 (cpu0
  *                         is always online, but we set a practical floor
  *                         based on cluster count).
+ *
+ * ── Wave 2 envelope ──────────────────────────────────────────────────────────
+ * [gpuDevfreqFloorHz]    — Lowest GPU devfreq frequency the engine may write to
+ *                          min_freq/max_freq, in Hz. Read from the probed OPP
+ *                          table (NOT hardcoded). Null when no devfreq table is
+ *                          discoverable — the engine then skips the GPU_DEVFREQ
+ *                          lever and falls back to the pwrlevel floor.
+ * [gpuDevfreqCeilHz]     — Highest GPU devfreq frequency, in Hz. The engine
+ *                          never writes a min/max outside [floor, ceil].
+ * [gpuDevfreqStepsHz]    — The discrete devfreq OPP steps in Hz, ascending. The
+ *                          GPU_DEVFREQ lever moves between these; empty when the
+ *                          table is unknown.
+ * [gpuRootPath]          — The GPU sysfs root (e.g. /sys/class/kgsl/kgsl-3d0).
+ *                          Null when no GPU was probed. The engine carries it so
+ *                          the devfreq lever can be honestly skipped when absent.
+ * [uclampAvailable]      — True when the kernel exposes /dev/cpuctl uclamp on the
+ *                          top-app slice (probed). The UCLAMP lever is only ever
+ *                          selected when this is true; otherwise the engine
+ *                          degrades to parking (honesty: never fake a node).
+ * [fanModeAvailable]     — True when a vendor fan_mode preset key is controllable
+ *                          on this device. The fan governor only actuates when
+ *                          this is true.
  */
 data class TdpCaps(
     val primeCoreIndices: List<Int>,
@@ -47,6 +69,13 @@ data class TdpCaps(
     /** Total number of online CPU cores the CapabilityReport reports. Used to
      *  compute how many we can safely park before hitting [minOnlineCores]. */
     val totalOnlineCores: Int,
+    // ── Wave 2 envelope (defaulted so existing test fixtures keep compiling) ────
+    val gpuDevfreqFloorHz: Long? = null,
+    val gpuDevfreqCeilHz: Long? = null,
+    val gpuDevfreqStepsHz: List<Long> = emptyList(),
+    val gpuRootPath: String? = null,
+    val uclampAvailable: Boolean = false,
+    val fanModeAvailable: Boolean = false,
 ) {
     companion object {
 
@@ -114,6 +143,43 @@ data class TdpCaps(
             val gpuMinLevel = adrenoExtras?.currentMinPwrLevel
             val gpuMaxLevel = adrenoExtras?.currentMaxPwrLevel
 
+            // ── GPU devfreq envelope (Wave 2) ──────────────────────────────────
+            // The devfreq min/max lever is finer than the 0-7 pwrlevel. We read the
+            // bounds from the PROBED OPP table — never hardcoded — so a device that
+            // genuinely lacks devfreq simply yields nulls and the engine skips the
+            // lever (honesty). On the AYN Odin 3 this is 160 MHz..1100 MHz.
+            val gpu = report.gpu
+            val gpuDevfreqSteps: List<Long> = gpu?.availableFreqsHz?.sorted()?.distinct().orEmpty()
+            // Prefer the OPP table bounds; fall back to the probed current min/max
+            // when the table is sparse (some firmwares expose only min_freq/max_freq).
+            val gpuDevfreqFloor: Long? = when {
+                gpuDevfreqSteps.isNotEmpty() -> gpuDevfreqSteps.first()
+                gpu != null && gpu.currentMinHz > 0L -> gpu.currentMinHz
+                else -> null
+            }
+            val gpuDevfreqCeil: Long? = when {
+                gpuDevfreqSteps.isNotEmpty() -> gpuDevfreqSteps.last()
+                gpu != null && gpu.currentMaxHz > 0L -> gpu.currentMaxHz
+                else -> null
+            }
+            // Only expose a usable devfreq envelope when floor < ceil (a real range).
+            val devfreqUsable = gpuDevfreqFloor != null && gpuDevfreqCeil != null &&
+                gpuDevfreqFloor < gpuDevfreqCeil
+            val gpuRootPath = gpu?.rootPath
+
+            // ── uclamp availability (Wave 2) ───────────────────────────────────
+            // The top-app uclamp.min perf-hint is only a real lever when the kernel
+            // exposes /dev/cpuctl uclamp (probed via schedBoostInterface == UCLAMP).
+            val uclampAvailable =
+                report.schedBoostInterface == io.github.mayusi.calibratesoc.data.capability.SchedBoostInterface.UCLAMP
+
+            // ── fan_mode availability (Wave 2) ─────────────────────────────────
+            // The AYN/Retroid fan presets ride a Settings.System key the vendor app
+            // owns. We can control it when a vendor perf companion is present OR a
+            // vendor-settings fan source was probed.
+            val fanModeAvailable = report.vendorApps.anyVendorPerfApp ||
+                report.fan?.source == io.github.mayusi.calibratesoc.data.capability.FanSource.VENDOR_SETTINGS_KEY
+
             // ── Online core count & min-online floor ──────────────────────────
             val totalOnlineCores = policies.sumOf { it.onlineCores.size }
 
@@ -129,6 +195,12 @@ data class TdpCaps(
                 gpuMaxLevel = gpuMaxLevel,
                 minOnlineCores = minOnlineCores,
                 totalOnlineCores = totalOnlineCores,
+                gpuDevfreqFloorHz = if (devfreqUsable) gpuDevfreqFloor else null,
+                gpuDevfreqCeilHz = if (devfreqUsable) gpuDevfreqCeil else null,
+                gpuDevfreqStepsHz = if (devfreqUsable) gpuDevfreqSteps else emptyList(),
+                gpuRootPath = gpuRootPath,
+                uclampAvailable = uclampAvailable,
+                fanModeAvailable = fanModeAvailable,
             )
         }
     }

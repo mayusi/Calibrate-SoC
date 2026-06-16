@@ -374,11 +374,11 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
             PrivilegeTier.ROOT ->
                 "Magisk/KernelSU detected. Direct sysfs writes available — Apply works for everything."
             PrivilegeTier.AYN_SETTINGS ->
-                "${vb.brand} tier active. Vendor preset switching is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
+                "${vb.brand} tier active. Vendor tuning is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
             PrivilegeTier.SHIZUKU ->
-                "Shizuku bound. Custom MHz needs root or the script path. Vendor preset switching pending UserService support."
+                "Shizuku bound. Custom MHz needs root or the script path. Vendor tuning pending UserService support."
             PrivilegeTier.NONE ->
-                "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor presets:\nadb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
+                "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor tunes:\nadb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
         }
         Text(
             explainer,
@@ -416,7 +416,7 @@ private fun VendorCard(
             color = Color(0xFF999999),
         )
         Text(
-            "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the preset list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
+            "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the tune list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF999999),
         )
@@ -620,7 +620,7 @@ private fun PresetsCardInner(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
         // Section header
-        SectionHeader(title = "PRESETS", accent = AccentBar.Red)
+        SectionHeader(title = "TUNES", accent = AccentBar.Red)
 
         // Safety primer as an info panel
         ArsenalPanel(accent = AccentBar.Emerald, accentEdge = PanelAccentEdge.Start) {
@@ -632,10 +632,10 @@ private fun PresetsCardInner(
                 letterSpacing = 0.08.sp,
             )
             Text(
-                "Yes. Every preset only moves your CPU/GPU clock caps WITHIN the range " +
+                "Yes. Every tune only moves your CPU/GPU clock caps WITHIN the range " +
                     "your kernel already allows — it can't set a voltage, raise a thermal " +
                     "limit, or push past what the chip ships with. Worst case is \"a bit slower\" " +
-                    "or \"a bit warmer,\" never a damaged device. Every preset also resets the " +
+                    "or \"a bit warmer,\" never a damaged device. Every tune also resets the " +
                     "minimum clock so cores can still idle. And nothing survives a reboot unless " +
                     "you pick \"Install at boot,\" so a restart always returns you to stock.",
                 style = MaterialTheme.typography.bodySmall,
@@ -650,7 +650,7 @@ private fun PresetsCardInner(
         }
 
         Text(
-            "Community Tuned recipes are verified on your exact device; built-in presets are " +
+            "Community Tuned recipes are verified on your exact device; built-in tunes are " +
                 "generated from your kernel's own OPP table. Without root, use Generate script " +
                 "to run the same tune via your device's settings → Run script as Root.",
             style = MaterialTheme.typography.bodySmall,
@@ -904,7 +904,7 @@ private fun GpuCard(
         HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
         Text(
-            "WHAT EACH PRESET WOULD SET",
+            "WHAT EACH TUNE WOULD SET",
             style = MaterialTheme.typography.labelSmall,
             color = Color(0xFF999999),
             letterSpacing = 0.08.sp,
@@ -912,7 +912,7 @@ private fun GpuCard(
         val presetsWithGpu = presets.filter { it.gpuMaxHz != null }
         if (presetsWithGpu.isEmpty()) {
             Text(
-                "No bundled preset writes the GPU on this device.",
+                "No bundled tune writes the GPU on this device.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF999999),
             )
@@ -930,7 +930,7 @@ private fun GpuCard(
         }
         Text(
             "Adjust the sliders above and tap Apply to write a custom GPU cap, " +
-                "or apply a preset to use one of these.",
+                "or apply a tune to use one of these.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF777777),
         )
@@ -1299,7 +1299,7 @@ private fun BootDeployedDialog(
                     Text("Installed via ${deployed.manager} at:")
                     Text(deployed.path, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(Spacing.dense))
-                    Text("The tune will re-apply on every boot. To remove it later, delete the file via your root manager or run a fresh Apply on a different preset.")
+                    Text("The tune will re-apply on every boot. To remove it later, delete the file via your root manager or run a fresh Apply on a different tune.")
                 } else {
                     Text(deployed.error ?: "Unknown failure.", color = AccentBar.Red)
                 }
@@ -1322,7 +1322,7 @@ private fun UnknownDeviceConfirmDialog(
             Column {
                 Text(
                     "Calibrate SoC doesn't yet have a tested adapter for your device. The " +
-                        "preset \"${preset.name}\" was generated from your kernel's own OPP " +
+                        "tune \"${preset.name}\" was generated from your kernel's own OPP " +
                         "table — every frequency it writes is one the kernel already publishes " +
                         "as valid, so it shouldn't crash. But power and thermal behaviour on " +
                         "this exact silicon haven't been profiled.",
@@ -1549,7 +1549,7 @@ private fun AdvancedUnlockCard(
 
     ArsenalPanel(accent = AccentBar.Neutral, title = "ADVANCED UNLOCK") {
         Text(
-            "Tuning already works — presets generate a script you run as root (no setup needed). " +
+            "Tuning already works — tunes generate a script you run as root (no setup needed). " +
                 "This section only unlocks OPTIONAL extras: live FPS overlay, vendor-key writes, " +
                 "and the experimental instant ± HUD steppers.",
             style = MaterialTheme.typography.bodySmall,

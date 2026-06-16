@@ -199,6 +199,9 @@ class HudStateAssembler @Inject constructor(
                     autoTdpCapDeltaMhz = capDeltaMhz,
                     autoTdpSessionWh = sessionWh,
                     autoTdpDecisions = autoState.decisions,
+                    // Wave 4b: Smart goal + detected context passthrough
+                    autoTdpGoal = autoState.activeGoal,
+                    autoTdpDetectedContext = autoState.detectedContext,
                 )
             }
         }

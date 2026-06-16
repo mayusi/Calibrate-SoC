@@ -7,12 +7,17 @@ import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 import org.junit.Test
 
 /**
- * Verifies [AutoTdpEngine.decide] sets the correct [HoldReason] in EVERY return
- * branch. The mapping is part of the data contract two UI agents build against,
- * so each branch is asserted explicitly.
+ * Verifies the Smart-AutoTDP band controller sets the correct [HoldReason] in the
+ * branches the UI builds against. The mapping is part of the data contract two UI
+ * agents render, so each surfaced branch is asserted explicitly.
  *
  * Topology mirrors AutoTdpEngineTest (SD8Gen2-style 3-cluster):
  *   prime core = 7, big policy = 4.
+ *
+ * NOTE: under the band controller the BATTERY_TARGET_HOLDING branch is no longer
+ * EMITTED (BATTERY_SAVER follows the band with the watts step as the cap floor and
+ * surfaces GPU_BOUND_CAPPING / IDLE_HOLDING). The enum value is retained for UI
+ * back-compat; we do not assert it is produced.
  */
 class HoldReasonMappingTest {
 
@@ -29,7 +34,7 @@ class HoldReasonMappingTest {
         totalOnlineCores = 8,
     )
 
-    private val efficiencyConfig = AutoTdpProfileConfig(AutoTdpProfile.EFFICIENCY)
+    private val balancedConfig = AutoTdpProfileConfig(AutoTdpProfile.BALANCED)
 
     private fun telemetry(
         gpuLoad: Int,
@@ -51,11 +56,27 @@ class HoldReasonMappingTest {
         fanRpm = null,
     )
 
+    /** Drive the engine [n] ticks on the same window so timing/cool-down gates clear. */
+    private fun run(
+        window: List<Telemetry>,
+        current: TdpState,
+        config: AutoTdpProfileConfig = balancedConfig,
+        ticks: Int = 6,
+    ): TdpDecision {
+        var state = ControllerState.INITIAL
+        var decision = AutoTdpEngine.decide(window, config, caps3Cluster, current, state)
+        repeat(ticks - 1) {
+            state = decision.controllerState
+            decision = AutoTdpEngine.decide(window, config, caps3Cluster, current, state)
+        }
+        return decision
+    }
+
     @Test
     fun `empty window maps to NO_TELEMETRY`() {
         val decision = AutoTdpEngine.decide(
             window = emptyList(),
-            config = efficiencyConfig,
+            config = balancedConfig,
             caps = caps3Cluster,
             current = TdpState.STOCK,
         )
@@ -63,86 +84,59 @@ class HoldReasonMappingTest {
     }
 
     @Test
-    fun `saturated core maps to CPU_BOUND_RELAXING`() {
+    fun `saturated true-load core maps to CPU_BOUND_RELAXING`() {
+        // GPU well below band (would tighten) but a TRUE-load saturated prime core
+        // must take precedence and RELAX.
         val window = List(4) {
-            telemetry(gpuLoad = 30, coreLoads = List(8) { i -> if (i == 7) 92 else 50 })
+            telemetry(
+                gpuLoad = 30,
+                coreLoads = List(8) { i -> if (i == 7) 92 else 50 },
+                source = CpuLoadReading.Source.ROOT_PROC_STAT,
+            )
         }
-        val decision = AutoTdpEngine.decide(
+        val decision = run(
             window = window,
-            config = efficiencyConfig,
-            caps = caps3Cluster,
             current = TdpState(parkedPrimeCores = setOf(7), bigClusterCapKhz = 1_171_000),
         )
         assertThat(decision.holdReason).isEqualTo(HoldReason.CPU_BOUND_RELAXING)
     }
 
     @Test
-    fun `confirmed gpu-bound window maps to GPU_BOUND_CAPPING`() {
+    fun `gpu below band maps to GPU_BOUND_CAPPING after confirm`() {
+        // GPU at 30% is below the BALANCED_SMART band (63-85) → tighten → cap.
         val window = List(4) {
-            telemetry(gpuLoad = 90, coreLoads = List(8) { i -> if (i == 7) 10 else 15 })
+            telemetry(gpuLoad = 30, coreLoads = List(8) { i -> if (i == 7) 20 else 15 })
         }
-        val decision = AutoTdpEngine.decide(
-            window = window,
-            config = efficiencyConfig,
-            caps = caps3Cluster,
-            current = TdpState.STOCK,
-        )
+        val decision = run(window = window, current = TdpState.STOCK)
         assertThat(decision.holdReason).isEqualTo(HoldReason.GPU_BOUND_CAPPING)
     }
 
     @Test
-    fun `battery-target proportional cap maps to BATTERY_TARGET_HOLDING`() {
-        // Mixed/idle workload (neither saturated nor GPU-bound) under BATTERY_TARGET
-        // with a budget → proportional cap branch.
-        val window = List(4) {
-            telemetry(gpuLoad = 40, coreLoads = List(8) { 30 })
-        }
-        val decision = AutoTdpEngine.decide(
-            window = window,
-            config = AutoTdpProfileConfig(AutoTdpProfile.BATTERY_TARGET, targetMilliWatts = 1_500),
-            caps = caps3Cluster,
-            current = TdpState.STOCK, // no cap yet → budget cap differs → branch fires
-        )
-        assertThat(decision.holdReason).isEqualTo(HoldReason.BATTERY_TARGET_HOLDING)
-    }
-
-    @Test
-    fun `idle window with known load maps to IDLE_HOLDING`() {
+    fun `gpu inside band with known load maps to IDLE_HOLDING`() {
+        // GPU at 74% is inside BALANCED_SMART (63-85) → hold; load is real → IDLE.
         val window = List(4) {
             telemetry(
-                gpuLoad = 40,
+                gpuLoad = 74,
                 coreLoads = List(8) { 30 },
                 source = CpuLoadReading.Source.DIRECT_PROC_STAT,
             )
         }
-        val decision = AutoTdpEngine.decide(
-            window = window,
-            config = efficiencyConfig,
-            caps = caps3Cluster,
-            current = TdpState.STOCK,
-        )
+        val decision = run(window = window, current = TdpState.STOCK)
         assertThat(decision.holdReason).isEqualTo(HoldReason.IDLE_HOLDING)
     }
 
     @Test
-    fun `load-blind window maps to LOAD_BLIND_HOLDING not IDLE`() {
-        // UNAVAILABLE source + empty perCoreLoadPct = blind. The engine must NOT
-        // claim idle — that would be a lie. It must report LOAD_BLIND_HOLDING.
+    fun `load-blind window inside band maps to LOAD_BLIND_HOLDING not IDLE`() {
+        // GPU inside band → hold; but CPU dimension is blind → must say LOAD_BLIND.
         val window = List(4) {
             telemetry(
-                gpuLoad = 40,
+                gpuLoad = 74,
                 coreLoads = emptyList(),
                 source = CpuLoadReading.Source.UNAVAILABLE,
             )
         }
-        val decision = AutoTdpEngine.decide(
-            window = window,
-            config = efficiencyConfig,
-            caps = caps3Cluster,
-            current = TdpState.STOCK,
-        )
+        val decision = run(window = window, current = TdpState.STOCK)
         assertThat(decision.holdReason).isEqualTo(HoldReason.LOAD_BLIND_HOLDING)
-        // Honesty cross-check: never IDLE when blind.
         assertThat(decision.holdReason).isNotEqualTo(HoldReason.IDLE_HOLDING)
     }
 }

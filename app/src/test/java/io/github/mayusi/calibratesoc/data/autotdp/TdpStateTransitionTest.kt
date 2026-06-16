@@ -222,4 +222,113 @@ class TdpStateTransitionTest {
         val ops = TdpStateTransition.delta(TdpState.STOCK, TdpState.STOCK, BIG_POLICY, GPU_ROOT)
         assertThat(ops).isEmpty()
     }
+
+    // ── Wave 2: min-freq floor ────────────────────────────────────────────────
+
+    @Test
+    fun `setting min floor emits scaling_min_freq write`() {
+        val from = TdpState.STOCK
+        val to = TdpState(bigClusterMinKhz = 1_171_000)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT)
+
+        val floorOp = ops.single { it.description.contains("min floor") }
+        assertThat(floorOp.id).isEqualTo(Tunables.cpuMinFreq(BIG_POLICY))
+        assertThat(floorOp.value).isEqualTo("1171000")
+    }
+
+    @Test
+    fun `lowering the floor is written BEFORE the cap drops`() {
+        // Both the floor and the cap drop. The floor write must come first so the
+        // cluster's min never momentarily exceeds a not-yet-lowered max.
+        val from = TdpState(bigClusterCapKhz = 2_323_000, bigClusterMinKhz = 1_536_000)
+        val to = TdpState(bigClusterCapKhz = 1_536_000, bigClusterMinKhz = 1_171_000)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT)
+        val floorIdx = ops.indexOfFirst { it.description.contains("min floor") }
+        val capIdx = ops.indexOfFirst { it.description.contains("big cap") }
+        assertThat(floorIdx).isAtLeast(0)
+        assertThat(capIdx).isAtLeast(0)
+        assertThat(floorIdx).isLessThan(capIdx)
+    }
+
+    @Test
+    fun `raising the floor is written AFTER the cap rises`() {
+        val from = TdpState(bigClusterCapKhz = 1_536_000, bigClusterMinKhz = 844_000)
+        val to = TdpState(bigClusterCapKhz = 2_323_000, bigClusterMinKhz = 1_171_000)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT)
+        val floorIdx = ops.indexOfFirst { it.description.contains("min floor") }
+        val capIdx = ops.indexOfFirst { it.description.contains("big cap") }
+        assertThat(capIdx).isLessThan(floorIdx)
+    }
+
+    // ── Wave 2: GPU devfreq min/max ───────────────────────────────────────────
+
+    @Test
+    fun `gpu devfreq min and max emit kgsl devfreq writes`() {
+        val from = TdpState.STOCK
+        val to = TdpState(gpuDevfreqMinHz = 305_000_000L, gpuDevfreqMaxHz = 800_000_000L)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT)
+
+        val minOp = ops.single { it.id == Tunables.gpuMinFreq(GPU_ROOT) }
+        val maxOp = ops.single { it.id == Tunables.gpuMaxFreq(GPU_ROOT) }
+        assertThat(minOp.value).isEqualTo("305000000")
+        assertThat(maxOp.value).isEqualTo("800000000")
+    }
+
+    @Test
+    fun `no gpu devfreq write when gpuRootPath is null`() {
+        val from = TdpState.STOCK
+        val to = TdpState(gpuDevfreqMinHz = 305_000_000L, gpuDevfreqMaxHz = 800_000_000L)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, gpuRootPath = null)
+        assertThat(ops.none { it.description.contains("devfreq") }).isTrue()
+    }
+
+    // ── Wave 2: uclamp top-app hint ───────────────────────────────────────────
+
+    @Test
+    fun `uclamp hint emits cpu_uclamp_min write on top-app slice`() {
+        val from = TdpState.STOCK
+        val to = TdpState(uclampTopAppMin = 640)
+
+        val ops = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT)
+
+        val op = ops.single { it.description.contains("uclamp") }
+        assertThat(op.id.target).isEqualTo("/dev/cpuctl/top-app/cpu.uclamp.min")
+        assertThat(op.value).isEqualTo("640")
+    }
+
+    // ── Wave 2: fan_mode (Settings.System) ────────────────────────────────────
+
+    @Test
+    fun `fan_mode emits a settings-system write only when the key is known`() {
+        val from = TdpState.STOCK
+        val to = TdpState(fanMode = 5)
+
+        // Without a fan key → NO fan write (honest skip).
+        val noKey = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT, fanModeKey = null)
+        assertThat(noKey.none { it.description.contains("fan_mode") }).isTrue()
+
+        // With a fan key → a SETTINGS_SYSTEM write.
+        val withKey = TdpStateTransition.delta(from, to, BIG_POLICY, GPU_ROOT, fanModeKey = "fan_mode")
+        val fanOp = withKey.single { it.description.contains("fan_mode") }
+        assertThat(fanOp.id).isEqualTo(Tunables.settingsSystemKey("fan_mode"))
+        assertThat(fanOp.value).isEqualTo("5")
+    }
+
+    @Test
+    fun `unchanged wave2 fields produce no writes`() {
+        val state = TdpState(
+            bigClusterMinKhz = 1_171_000,
+            gpuDevfreqMinHz = 305_000_000L,
+            gpuDevfreqMaxHz = 800_000_000L,
+            uclampTopAppMin = 512,
+            fanMode = 4,
+        )
+        val ops = TdpStateTransition.delta(state, state, BIG_POLICY, GPU_ROOT, fanModeKey = "fan_mode")
+        assertThat(ops).isEmpty()
+    }
 }
