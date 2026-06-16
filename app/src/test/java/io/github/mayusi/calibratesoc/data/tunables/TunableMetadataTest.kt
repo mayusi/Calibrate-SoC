@@ -207,6 +207,144 @@ class TunableMetadataTest {
     }
 
     // =========================================================================
+    // SEC-1: expanded dangerous-node block list (each new blocked node)
+    // =========================================================================
+
+    @Test
+    fun `blocklist blocks core_pattern (root-escalation primitive)`() {
+        // A write to core_pattern can pipe core dumps to an arbitrary program.
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/core_pattern")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks kptr_restrict (kernel-pointer disclosure hardening)`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/kptr_restrict")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks perf_event_paranoid`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/perf_event_paranoid")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks dmesg_restrict`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/dmesg_restrict")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks modules_disabled`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/modules_disabled")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks proc kmem and proc mem and proc kcore`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/kcore")).isNotNull()
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/kmem")).isNotNull()
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/mem")).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks proc sys kernel panic via component`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic")).isNotNull()
+    }
+
+    // =========================================================================
+    // SEC-1: power-supply charge/voltage family (battery-damage prefixes)
+    // =========================================================================
+
+    @Test
+    fun `blocklist blocks power_supply constant_charge_current family`() {
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/class/power_supply/battery/constant_charge_current",
+            ),
+        ).isNotNull()
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/class/power_supply/battery/constant_charge_current_max",
+            ),
+        ).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks power_supply voltage_max`() {
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath("/sys/class/power_supply/battery/voltage_max"),
+        ).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks power_supply charge_control family by prefix`() {
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/class/power_supply/battery/charge_control_limit",
+            ),
+        ).isNotNull()
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/class/power_supply/battery/charge_control_start_threshold",
+            ),
+        ).isNotNull()
+    }
+
+    @Test
+    fun `blocklist blocks power_supply input_current_limit`() {
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/class/power_supply/usb/input_current_limit",
+            ),
+        ).isNotNull()
+    }
+
+    @Test
+    fun `power_supply charge prefix only applies under power_supply root`() {
+        // A node merely starting with "voltage_max" OUTSIDE /sys/class/power_supply/
+        // must NOT be blocked — the prefix family is power-supply-scoped.
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath(
+                "/sys/devices/platform/sensor/voltage_max_threshold",
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun `safe power_supply read-style node is allowed`() {
+        // capacity / status / temp under power_supply are not in the charge/voltage
+        // family and must remain writable-as-far-as-validation-is-concerned.
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath("/sys/class/power_supply/battery/capacity"),
+        ).isNull()
+    }
+
+    // =========================================================================
+    // SEC-1: component-match precision (no substring false-positives)
+    // =========================================================================
+
+    @Test
+    fun `component match does not false-block kmem_stats`() {
+        // "/proc/kmem_stats": component is "kmem_stats", NOT "kmem" → must be ALLOWED.
+        // (Substring matching would have wrongly blocked it.)
+        assertThat(TunableMetadata.validateCustomSysfsPath("/proc/kmem_stats")).isNull()
+    }
+
+    @Test
+    fun `component match does not false-block meminfo-like component`() {
+        // "mem" as a component must not match "meminfo_node".
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath("/sys/devices/platform/x/meminfo_node"),
+        ).isNull()
+    }
+
+    @Test
+    fun `component match does not false-block panic_on_oops`() {
+        // Only the exact component "panic" is blocked; "panic_on_oops" is a different
+        // component and is allowed (errs toward NOT blocking innocent neighbours).
+        assertThat(
+            TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic_on_oops"),
+        ).isNull()
+    }
+
+    // =========================================================================
     // NUL byte in path (FIX 2)
     // =========================================================================
 

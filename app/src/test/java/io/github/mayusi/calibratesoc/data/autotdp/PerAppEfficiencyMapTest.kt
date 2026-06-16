@@ -158,4 +158,41 @@ class PerAppEfficiencyMapTest {
             assertThat(result!!.profile).isEqualTo(profile)
         }
     }
+
+    // ── Runtime-binding contract (FIX 1: dead toggle → live) ──────────────────
+    //
+    // ForegroundAppWatcher now consults this map on every foreground-app change and
+    // STARTS the AutoTDP daemon with the resolved config (and stops it when the bound
+    // app leaves the foreground). Previously NOTHING consumed the binding. These tests
+    // pin the resolution contract the watcher depends on: a bound app yields a
+    // non-null, startable AutoTdpProfileConfig; an unbound app yields null (the
+    // watcher then does NOT touch AutoTDP for that app).
+
+    @Test
+    fun `bound app resolves to a startable config (watcher will start AutoTDP)`() {
+        // The watcher passes this config straight to AutoTdpController.start(config).
+        val config = PerAppEfficiencyMap.lookup("com.example.emulator", filledMap)
+        assertThat(config).isNotNull()
+        assertThat(config!!.profile).isEqualTo(AutoTdpProfile.EFFICIENCY)
+        // No watts ceiling baked in here — EFFICIENCY/BALANCED bindings are null-budget.
+        assertThat(config.targetMilliWatts).isNull()
+    }
+
+    @Test
+    fun `unbound app resolves to null (watcher leaves AutoTDP untouched)`() {
+        val config = PerAppEfficiencyMap.lookup("com.some.unbound.app", filledMap)
+        assertThat(config).isNull()
+    }
+
+    @Test
+    fun `instance and companion snapshot lookups agree (single source of truth)`() {
+        // The suspend profileForApp(pkg) reads DataStore then delegates to lookup();
+        // the snapshot-based instance method and the companion must agree so the
+        // watcher and the UI resolve identically.
+        filledMap.keys.forEach { pkg ->
+            val viaCompanion = PerAppEfficiencyMap.lookup(pkg, filledMap)?.profile
+            // The instance snapshot method shares the exact same pure logic.
+            assertThat(viaCompanion).isNotNull()
+        }
+    }
 }

@@ -45,7 +45,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 import kotlin.math.roundToInt
 
@@ -238,17 +237,6 @@ class OverlayService :
     override fun onBind(intent: Intent): IBinder? = null
 
     override fun onDestroy() {
-        if (sessionRecorder.isRecording.value) {
-            runBlocking(Dispatchers.IO) {
-                runCatching { sessionRecorder.stop("hud_stop") }
-                    .onFailure { e ->
-                        hudEventLog.add(
-                            HudEventLog.Level.WARN,
-                            "sessionRecorder.stop failed: ${e.message}",
-                        )
-                    }
-            }
-        }
         frameRateSampler.stop()
         gameFpsSampler.stop()
         // Detach the FPS bridge — the overlay-layer sampler is going away.
@@ -259,8 +247,41 @@ class OverlayService :
         runCatching { composeView?.let { windowManager?.removeView(it) } }
         composeView = null
         _viewModelStore.clear()
-        // Fire setRunning(false) before cancel so the launched coroutine isn't dropped.
-        serviceScope.launch { hudPrefs.setRunning(false) }
+
+        // CRITICAL (UI) ANR + C-3 FIX: the two persistence writes onDestroy must perform —
+        // sessionRecorder.stop(...) and hudPrefs.setRunning(false) — were each broken:
+        //   - sessionRecorder.stop ran under runBlocking(Dispatchers.IO) on the MAIN thread
+        //     (an unbounded main-thread block → ANR if the recorder flush stalled).
+        //   - setRunning(false) was launched on serviceScope and then serviceScope.cancel()
+        //     ran immediately after, cancelling the launched coroutine BEFORE the write hit
+        //     disk (it persisted only by luck of scheduling).
+        // Fix: run BOTH fire-and-forget on a fresh DETACHED scope under NonCancellable, so:
+        //   - they execute off the main thread (no ANR — nothing blocks onDestroy), and
+        //   - serviceScope.cancel() below cannot drop them (the scope is independent and the
+        //     body is NonCancellable), so the writes reliably reach disk.
+        // GlobalScope-equivalent detached scope is intentional here: a fire-and-forget flush
+        // that must outlive the service's own scope.
+        CoroutineScope(Dispatchers.IO).launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                if (sessionRecorder.isRecording.value) {
+                    runCatching { sessionRecorder.stop("hud_stop") }
+                        .onFailure { e ->
+                            hudEventLog.add(
+                                HudEventLog.Level.WARN,
+                                "sessionRecorder.stop failed: ${e.message}",
+                            )
+                        }
+                }
+                runCatching { hudPrefs.setRunning(false) }
+                    .onFailure { e ->
+                        hudEventLog.add(
+                            HudEventLog.Level.WARN,
+                            "setRunning(false) failed: ${e.message}",
+                        )
+                    }
+            }
+        }
+
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
@@ -309,10 +330,10 @@ class OverlayService :
         windowManager = wm
         val density = resources.displayMetrics.density
 
-        // Read last-saved position synchronously (one-time warm DataStore read,
-        // < 1 ms) to place the overlay without any visible jump on open.
-        val (savedXDp, savedYDp) = runBlocking { hudPrefs.xDp.first() to hudPrefs.yDp.first() }
-
+        // CRITICAL (UI) ANR FIX: do NOT block the main thread reading DataStore. onCreate
+        // runs on the main thread; the old `runBlocking { hudPrefs.xDp.first() }` could ANR
+        // on a cold DataStore (first read deserializes from disk). Instead init at (0,0) and
+        // asynchronously read the last-saved position, then updateViewLayout once it lands.
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -322,10 +343,29 @@ class OverlayService :
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (savedXDp * density).roundToInt()
-            y = (savedYDp * density).roundToInt()
+            x = 0
+            y = 0
         }
         layoutParams = params
+
+        // Async one-shot read of the saved position; apply it once (the observeProfile()
+        // x/y collector also keeps it in sync afterwards, so this just covers the first
+        // placement without a visible jump being driven from a blocked main thread).
+        serviceScope.launch {
+            val savedXDp = hudPrefs.xDp.first()
+            val savedYDp = hudPrefs.yDp.first()
+            val view = composeView ?: return@launch
+            val p = layoutParams ?: return@launch
+            p.x = (savedXDp * density).roundToInt()
+            p.y = (savedYDp * density).roundToInt()
+            runCatching { windowManager?.updateViewLayout(view, p) }
+                .onFailure { e ->
+                    hudEventLog.add(
+                        HudEventLog.Level.WARN,
+                        "initial position updateViewLayout failed: ${e.message}",
+                    )
+                }
+        }
 
         val view = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@OverlayService)

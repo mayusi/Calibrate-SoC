@@ -1,9 +1,15 @@
 package io.github.mayusi.calibratesoc.ui.dashboard
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
@@ -40,6 +46,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     capabilityProbe: CapabilityProbe,
     monitorService: MonitorService,
     tuneHistoryStore: TuneHistoryStore,
@@ -136,7 +143,56 @@ class DashboardViewModel @Inject constructor(
     )
     val batteryEstimate: StateFlow<BatteryEstimate> = _batteryEstimate.asStateFlow()
 
+    /**
+     * Battery state-of-charge in whole percent (0–100), or null when unknown.
+     *
+     * PERF-2: this used to be read inside the [AtAGlanceCard] Composable via a
+     * synchronous `registerReceiver(null, ACTION_BATTERY_CHANGED)` binder call on
+     * the composition thread — re-keyed on every 1 Hz telemetry tick, so the UI
+     * thread made a blocking binder round-trip every second. The read now lives
+     * here, driven by a sticky [BroadcastReceiver]: the OS delivers the current
+     * level immediately on register, then pushes an update ONLY when the level
+     * actually changes (a few times an hour), not once a second. The Composable
+     * just collects this StateFlow.
+     */
+    private val _batteryPct = MutableStateFlow<Int?>(null)
+    val batteryPct: StateFlow<Int?> = _batteryPct.asStateFlow()
+
+    /**
+     * Sticky ACTION_BATTERY_CHANGED receiver. Registering with a null receiver
+     * would only give a one-shot read; a real receiver keeps [_batteryPct] fresh
+     * for the lifetime of the screen without polling. Unregistered in [onCleared].
+     */
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateBatteryPct(intent)
+        }
+    }
+
+    private fun updateBatteryPct(intent: Intent?) {
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        _batteryPct.value = if (level >= 0 && scale > 0) {
+            (level * 100 / scale).coerceIn(0, 100)
+        } else {
+            null
+        }
+    }
+
     init {
+        // PERF-2: register the sticky battery receiver. registerReceiver with a
+        // sticky action returns the current sticky Intent synchronously, so the
+        // first level is available immediately; subsequent changes arrive via
+        // onReceive. runCatching guards the rare case where the framework refuses
+        // the registration (e.g. headless test context).
+        runCatching {
+            val sticky = appContext.registerReceiver(
+                batteryReceiver,
+                IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            )
+            updateBatteryPct(sticky)
+        }
+
         // Make sure the capability report is loaded; the monitor service
         // needs it for GPU probe path lookup. Idempotent.
         viewModelScope.launch { capabilityProbe.refresh() }
@@ -164,6 +220,14 @@ class DashboardViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // Unregister the battery receiver so it doesn't leak past the ViewModel.
+        // runCatching guards a double-unregister or a never-registered receiver
+        // (registration may have failed in init).
+        runCatching { appContext.unregisterReceiver(batteryReceiver) }
     }
 
     companion object {

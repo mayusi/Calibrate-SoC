@@ -592,45 +592,90 @@ object TunableMetadata {
     // =========================================================================
 
     /**
-     * Paths (or bare node names) that must never be written to via a custom sysfs path.
+     * Bare node names that must never be written to via a custom sysfs/procfs path.
      *
-     * Two kinds of entries:
-     *   - Entries that start with "/" are FULL-PATH / prefix entries (e.g. "/proc/sys/kernel/panic").
-     *     These are matched with a substring check — they are already absolute and specific enough
-     *     that a substring hit on the resolved path string is correct and intentional.
-     *   - Entries that do NOT start with "/" are BARE NAMES (e.g. "reboot", "sysrq-trigger").
-     *     These must match a whole path component to avoid false positives like
-     *     "/sys/devices/virtual/reboot_mode/reboot_mode" being blocked because it contains the
-     *     substring "reboot".
+     * Every entry is matched against a WHOLE path component (split on '/'), never as a
+     * substring. Whole-component matching is the consistent rule for the entire blocklist
+     * so that:
+     *   - `reboot` blocks `/proc/sys/kernel/reboot` but NOT `/sys/.../reboot_mode/reboot_mode`.
+     *   - `mem` / `kmem` block `/proc/mem` and `/proc/kmem` but NOT `/proc/kmem_stats` or
+     *     `/proc/meminfo` (those have distinct components).
+     *   - `panic` blocks `/proc/sys/kernel/panic` (and `panic_on_oops` etc. are NOT matched
+     *     because they are different components — add them explicitly if ever needed).
      *
-     * Use [isDangerousPath] to evaluate a path — never call [any { path.contains(it) }] directly.
+     * Categories covered:
+     *   - Reboot / panic / sysrq — instant device kill or crash primitives.
+     *   - kcore / kmem / mem — raw kernel/physical memory windows (info-leak + corruption).
+     *   - drop_caches — forced cache drop, unsafe without quiescing the FS.
+     *   - core_pattern — a write here pipes core dumps to an arbitrary program → classic
+     *     root-escalation primitive.
+     *   - kptr_restrict / dmesg_restrict / perf_event_paranoid — relaxing these lowers the
+     *     kernel's own exploit-hardening (kernel-pointer disclosure, dmesg leak, perf abuse).
+     *   - modules_disabled — irreversibly locks/unlocks module loading; writing it can either
+     *     brick module loading or (mis)used to gate security.
+     *
+     * Use [isDangerousPath] to evaluate a path — never call `any { path.contains(it) }` directly.
      */
     private val DANGEROUS_PROC_PATHS = listOf(
+        // Reboot / panic / sysrq
         "sysrq-trigger",
         "reboot",
-        "/proc/sys/kernel/panic",
-        "/proc/kcore",
-        "/proc/kmem",
-        "/proc/mem",
-        "drop_caches", // Writing 3 forcefully drops all caches — unsafe without quiescing FS
+        "panic",
+        // Raw memory windows
+        "kcore",
+        "kmem",
+        "mem",
+        // Cache drop
+        "drop_caches",
+        // Root-escalation + kernel-hardening sysctls (SEC-1 expansion)
+        "core_pattern",
+        "kptr_restrict",
+        "perf_event_paranoid",
+        "dmesg_restrict",
+        "modules_disabled",
+    )
+
+    /**
+     * Power-supply node-name fragments whose write could DAMAGE the battery: forcing a
+     * higher constant-charge current, raising the max charge voltage, or overriding the
+     * charge-control / input-current limits. Matched as a PREFIX of a whole path component
+     * (so `charge_control` blocks `charge_control_limit`, `charge_control_start_threshold`,
+     * etc.) but ONLY when the path is under `/sys/class/power_supply/`. Restricting to that
+     * root avoids false-blocking unrelated nodes that merely start with `voltage_max`.
+     */
+    private const val POWER_SUPPLY_ROOT = "/sys/class/power_supply/"
+    private val DANGEROUS_POWER_SUPPLY_PREFIXES = listOf(
+        "constant_charge_current",   // covers constant_charge_current[_max]
+        "voltage_max",               // raising the charge-voltage ceiling
+        "charge_control",            // charge_control_limit / *_start_threshold / *_end_threshold
+        "input_current_limit",       // forcing more input current than the cell is rated for
     )
 
     /**
      * Returns true when [p] refers to a known-dangerous kernel node.
      *
-     * Full-path entries (starting with "/") are matched with [String.contains] — they are
-     * already absolute and precise, so a substring hit is correct.
+     * Matching is WHOLE-COMPONENT only (split on '/'): an entry blocks a path iff some path
+     * component equals it exactly. This prevents substring false-positives (e.g. "reboot"
+     * inside "reboot_mode", or "kmem" inside "kmem_stats") while still erring toward blocking
+     * the real nodes.
      *
-     * Bare-name entries (not starting with "/") are matched against WHOLE path components
-     * only ([String.split] on '/') to prevent false positives where the name appears as a
-     * substring of an innocent segment (e.g. "reboot" inside "reboot_mode").
+     * Additionally, under `/sys/class/power_supply/` any component that STARTS WITH one of
+     * [DANGEROUS_POWER_SUPPLY_PREFIXES] is blocked — a write to the charge-current / charge-
+     * voltage family can physically damage the battery.
      */
-    private fun isDangerousPath(p: String): Boolean =
-        DANGEROUS_PROC_PATHS.any { entry ->
-            if (entry.startsWith("/")) {
-                p.contains(entry)
-            } else {
-                p.split('/').any { comp -> comp == entry }
+    internal fun isDangerousPath(p: String): Boolean {
+        val components = p.split('/')
+        if (DANGEROUS_PROC_PATHS.any { entry -> components.any { it == entry } }) {
+            return true
+        }
+        if (p.startsWith(POWER_SUPPLY_ROOT)) {
+            if (components.any { comp ->
+                    DANGEROUS_POWER_SUPPLY_PREFIXES.any { prefix -> comp.startsWith(prefix) }
+                }
+            ) {
+                return true
             }
         }
+        return false
+    }
 }

@@ -10,9 +10,7 @@ import javax.inject.Singleton
  * Hilt bindings for the profiles package.
  *
  * [GameBoostLauncher] is bound to [GameBoostLauncherImpl] which delegates to
- * Wave 3a's GameBoostService. To fall back to the no-op stub (e.g. for testing
- * builds where GameBoostService is not yet available), swap the binding here to
- * [NoOpGameBoostLauncher].
+ * Wave 3a's GameBoostService.
  *
  * [AppReaper] is bound to [AppReaperImpl] — the concrete reaper that issues
  * `am force-stop` commands via PServerWriter.executeShell.

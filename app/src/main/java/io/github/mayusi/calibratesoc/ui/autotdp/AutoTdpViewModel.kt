@@ -26,6 +26,7 @@ import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyAdvisor
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
 import io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapability
 import io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapabilityProbe
+import io.github.mayusi.calibratesoc.data.monitor.BatteryChargeReader
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
@@ -89,6 +90,7 @@ class AutoTdpViewModel @Inject constructor(
     private val advancedPermissionsScript: AdvancedPermissionsScript,
     private val idleChargeTrigger: IdleChargeTrigger,
     private val perAppEfficiencyMap: PerAppEfficiencyMap,
+    private val batteryChargeReader: BatteryChargeReader,
     private val userPrefs: UserPrefs,
     private val efficiencyAdvisor: EfficiencyAdvisor,
     private val undervoltCapabilityProbe: UndervoltCapabilityProbe,
@@ -127,6 +129,16 @@ class AutoTdpViewModel @Inject constructor(
     /** Result from BatteryTarget.capForTarget — computed when BATTERY_TARGET is selected. */
     private val _batteryTargetResult = MutableStateFlow<BatteryTarget.BatteryTargetResult?>(null)
     val batteryTargetResult: StateFlow<BatteryTarget.BatteryTargetResult?> = _batteryTargetResult.asStateFlow()
+
+    /**
+     * True when the device does not expose a readable battery charge counter
+     * (BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER returned -1/unavailable), so
+     * the required-cap preview cannot be computed from a REAL remaining-capacity.
+     * The UI MUST surface this as an honest "estimate unavailable" note instead of
+     * showing a number backed by a fabricated constant.
+     */
+    private val _batteryCapacityUnavailable = MutableStateFlow(false)
+    val batteryCapacityUnavailable: StateFlow<Boolean> = _batteryCapacityUnavailable.asStateFlow()
 
     // ── Efficiency Curve Finder ────────────────────────────────────────────────
 
@@ -453,11 +465,21 @@ class AutoTdpViewModel @Inject constructor(
             val drawMw = t.batteryDrawMilliW ?: return@launch
             val voltMv = (t.batteryVoltageUv ?: 0L).let { (it / 1000L).toInt() }
             if (voltMv <= 0) return@launch
-            // BatteryManager BATTERY_PROPERTY_CHARGE_COUNTER is not available here without
-            // context injection; we use 3000 mAh as a fallback placeholder. The real value
-            // requires BatteryManager access which the service tier should inject.
-            // TODO: inject BatteryManager or BatteryEstimate to get real remaining mAh.
-            val remainingMah = 3000
+
+            // Real remaining capacity from BatteryManager's charge counter (µAh → mAh).
+            // HONESTY (FIX 2): this used to be a hardcoded 3000 mAh placeholder, which
+            // made the REQUIRED CAP preview wrong on every device (an Odin ~5000 mAh got
+            // a cap ~67% too low). We now read the device's real remaining charge. When
+            // the device does not expose the counter (returns null), we DO NOT substitute
+            // a fake constant — we flag the preview as unavailable so the UI can be honest.
+            val remainingUah = batteryChargeReader.readChargeCounterUah()
+            val remainingMah = remainingMahFromChargeCounter(remainingUah)
+            if (remainingMah == null) {
+                _batteryCapacityUnavailable.value = true
+                _batteryTargetResult.value = null
+                return@launch
+            }
+            _batteryCapacityUnavailable.value = false
             val result = BatteryTarget.capForTarget(
                 targetHours = _targetHours.value,
                 remainingCapacityMah = remainingMah,
@@ -917,6 +939,26 @@ class AutoTdpViewModel @Inject constructor(
                     isKnee = p.capKhz == kneeKhz,
                 )
             }
+        }
+
+        /**
+         * Convert a battery charge-counter reading (µAh, from
+         * [BatteryChargeReader.readChargeCounterUah]) into the remaining capacity in
+         * mAh that [BatteryTarget.capForTarget] expects, or null when the device does
+         * not expose a usable reading.
+         *
+         * HONESTY (FIX 2): this replaces a hardcoded 3000 mAh placeholder. A null/<=0
+         * reading returns null so the caller can show an HONEST "estimate unavailable"
+         * note rather than feeding a fabricated constant into the cap math. A valid
+         * reading is floored to ≥ 1 mAh so an odd near-empty value can't yield a
+         * zero/negative-energy computation. Pure — unit-tested without Android.
+         *
+         * @return remaining capacity in mAh (≥ 1), or null when unavailable.
+         */
+        fun remainingMahFromChargeCounter(chargeCounterUah: Long?): Int? {
+            if (chargeCounterUah == null) return null
+            if (chargeCounterUah <= 0L) return null
+            return (chargeCounterUah / 1000L).toInt().coerceAtLeast(1)
         }
 
         /**

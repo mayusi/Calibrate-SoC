@@ -1,5 +1,6 @@
 package io.github.mayusi.calibratesoc.data.tunables.writer
 
+import android.content.Context
 import com.google.common.truth.Truth.assertThat
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.DeviceIdentity
@@ -281,26 +282,15 @@ class PServerWriterLiveTest {
     // ── 3. validateSysfsPath pure-logic tests ─────────────────────────────────
 
     /**
-     * Standalone instance for path validation tests.
-     * validateSysfsPath() is pure — it doesn't touch the binder or Android APIs.
-     * We can call it directly via a spy / by accessing it through the internal modifier.
+     * REAL PServerWriter, validated against its own [PServerWriter.validateSysfsPath].
+     *
+     * SEC-2: these tests previously ran against a COPY of the validator, so gaps in
+     * the real method (it claimed to guard NUL bytes and the dangerous-node block
+     * list but did not) were invisible. We now instantiate the real writer with a
+     * relaxed-mock Context — validateSysfsPath() is pure (no binder, no Android
+     * calls), so the mock Context is never touched — and call the real method.
      */
-    private class PathValidator {
-        fun validateSysfsPath(path: String): String? {
-            if (!path.startsWith("/sys/") && !path.startsWith("/proc/")) {
-                return "path must start with /sys/ or /proc/ (got '$path')"
-            }
-            if (path.contains("..")) {
-                return "path contains path-traversal sequence '..' (got '$path')"
-            }
-            if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
-                return "path contains disallowed control characters"
-            }
-            return null
-        }
-    }
-
-    private val pathValidator = PathValidator()
+    private val pathValidator = PServerWriter(mockk<Context>(relaxed = true))
 
     @Test
     fun `validateSysfsPath accepts a valid cpufreq path`() {
@@ -346,6 +336,38 @@ class PServerWriterLiveTest {
     fun `validateSysfsPath rejects a path with embedded newline`() {
         val err = pathValidator.validateSysfsPath("/sys/devices/cpu\n/cat /etc/shadow")
         assertThat(err).isNotNull()
+    }
+
+    // ── SEC-2: NUL byte + dangerous-node block list (gaps the COPY hid) ────────
+
+    @Test
+    fun `validateSysfsPath rejects a real NUL byte (doc always claimed this guard)`() {
+        val err = pathValidator.validateSysfsPath("/sys/block/sda" + ' ' + "evil")
+        assertThat(err).isNotNull()
+        assertThat(err).contains("null byte")
+    }
+
+    @Test
+    fun `validateSysfsPath rejects sysrq-trigger via the dangerous-node block list`() {
+        val err = pathValidator.validateSysfsPath("/proc/sysrq-trigger")
+        assertThat(err).isNotNull()
+        assertThat(err).contains("block list")
+    }
+
+    @Test
+    fun `validateSysfsPath rejects core_pattern (root-escalation primitive)`() {
+        val err = pathValidator.validateSysfsPath("/proc/sys/kernel/core_pattern")
+        assertThat(err).isNotNull()
+        assertThat(err).contains("block list")
+    }
+
+    @Test
+    fun `validateSysfsPath rejects power-supply charge-current node (battery damage)`() {
+        val err = pathValidator.validateSysfsPath(
+            "/sys/class/power_supply/battery/constant_charge_current_max",
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("block list")
     }
 
     // ── 4. PServerWriter.canWrite() for SYSFS ────────────────────────────────

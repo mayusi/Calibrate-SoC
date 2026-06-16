@@ -234,6 +234,17 @@ class BackupManager @Inject constructor(
             TunableMetadata.validateCustomSysfsPath(path)?.let { err ->
                 return "extraSysfs path '$path' is invalid: $err"
             }
+            // SEC-3: mirror the OTA validator (RemoteContentValidator.validatePreset).
+            // For an UNKNOWN path, TunableMetadata.forId returns a RAW_STRING whose
+            // validate() returns null — i.e. NO value check at all — so without this
+            // a crafted backup/share could carry a value like "0; reboot" or a control
+            // char straight into the script generator. The generator shell-quotes its
+            // output, but we reject shell metacharacters + control chars at this trust
+            // boundary too (defence-in-depth, identical rule to the OTA path).
+            if (ValidationRegexes.SHELL_META.containsMatchIn(value)) {
+                return "extraSysfs value for '$path' contains disallowed characters"
+            }
+            // Then apply any value-kind constraint the metadata declares (range/enum/bool).
             val valueError = TunableMetadata
                 .forId(TunableId(kind = TunableKind.SYSFS, target = path))
                 .validate(value)

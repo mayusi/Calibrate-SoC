@@ -30,8 +30,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
@@ -81,6 +81,22 @@ class GameBoostService : Service() {
     private var loopJob: Job? = null
     private var batteryManager: android.os.BatteryManager? = null
 
+    /**
+     * HIGH-1 (DEFECT B sibling): the [CapabilityReport] resolved this session, hoisted so
+     * EVERY exit path (stopDaemon, onDestroy, onTaskRemoved, the runDaemon `finally`) can
+     * revert against it. Null before capabilities resolve (nothing pinned ⇒ nothing to
+     * revert). Game Boost PINS clocks to the ceiling, so a missed revert = stuck-at-max =
+     * worse heat/drain than the AutoTDP cap-pin DEFECT B.
+     */
+    @Volatile private var sessionReport: CapabilityReport? = null
+
+    /**
+     * HIGH-1: the idempotent, NonCancellable revert latch (shared [ServiceRevert]). One per
+     * session, rebuilt at daemon start. GUARANTEES the ceiling-pin revert survives the
+     * `loopJob.cancel()` that DEFECT B silently swallowed.
+     */
+    private var revert: ServiceRevert? = null
+
     override fun onCreate() {
         super.onCreate()
         batteryManager = getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
@@ -102,17 +118,55 @@ class GameBoostService : Service() {
 
     override fun onBind(intent: Intent): IBinder? = null
 
+    /**
+     * HIGH-1: revert the ceiling pin to stock before teardown. The old onDestroy cancelled
+     * the loop only — the loop's `finally` revert rode the cancelled job and was silently
+     * skipped, leaving clocks PINNED AT MAX. Now we block here and [ServiceRevert.revertNow]
+     * runs under NonCancellable so the writes land. Idempotent with stopDaemon /
+     * onTaskRemoved / the finally. We also release the arbiter so AutoTDP / the throttle
+     * guard are un-suppressed even on this teardown path.
+     */
     override fun onDestroy() {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onDestroy revert failed", it) }
+            arbiter.release(BoostArbiter.ClockOwner.GAME_BOOST)
+        }
         loopJob?.cancel()
         loopJob = null
         serviceScope.cancel()
         super.onDestroy()
     }
 
+    /**
+     * HIGH-1: when the user swipes the app away from Recents, Android may kill the process
+     * without an orderly onDestroy in time to flush a cancelled-job revert. Revert the
+     * ceiling pin to stock here too. Without this, a swipe-away mid-boost could leave clocks
+     * pinned at max (stuck-at-max heat/drain). Idempotent.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onTaskRemoved revert failed", it) }
+            arbiter.release(BoostArbiter.ClockOwner.GAME_BOOST)
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     // ── Daemon lifecycle ──────────────────────────────────────────────────────
 
     private fun startDaemon(config: GameBoostConfig) {
         if (loopJob?.isActive == true) return
+        // HIGH-1: a fresh single-session revert latch. Reset the session report so a stop
+        // before capabilities resolve has nothing stale to revert against.
+        sessionReport = null
+        revert = ServiceRevert(tunableWriter)
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) { runDaemon(config) }
         }
@@ -165,6 +219,10 @@ class GameBoostService : Service() {
         val sessionStartEpochMs = System.currentTimeMillis()
         val expiresAt = sessionStartEpochMs + config.timeBoxMillis
 
+        // HIGH-1: publish the resolved report BEFORE the first pin write so every exit path
+        // (incl. onDestroy / onTaskRemoved during the apply loop) can revert partial pins.
+        sessionReport = report
+
         Log.i(TAG, "Game Boost applying ${bundle.size} pins (timeBox=${config.timeBoxMinutes}m)")
         var pinned = 0
         val skipped = mutableListOf<String>()
@@ -203,8 +261,9 @@ class GameBoostService : Service() {
                     skippedNodes = skipped,
                 )
             )
-            // Revert any partial writes (defensive) + release ownership.
-            tunableWriter.revertAll(report)
+            // Revert any partial writes (defensive) + release ownership. Route through the
+            // NonCancellable latch so it is idempotent with the finally / lifecycle paths.
+            revert?.revertNow(report)
             arbiter.release(BoostArbiter.ClockOwner.GAME_BOOST)
             stopSelf()
             return
@@ -254,14 +313,31 @@ class GameBoostService : Service() {
                 }
             }
         } finally {
-            Log.i(TAG, "Game Boost reverting all writes via TunableWriter")
-            val summary = tunableWriter.revertAll(report)
-            Log.i(TAG, "Game Boost revert complete: ok=${summary.ok} failed=${summary.failed}")
+            // HIGH-1 (DEFECT B sibling): route the revert through the NonCancellable latch.
+            // This finally runs on the loopJob, which EVERY stop path cancels — the old
+            // direct revertAll() rode that cancelled job and was silently skipped (PServer's
+            // withContext(Dispatchers.IO) throws CancellationException), leaving clocks
+            // PINNED AT MAX until reboot. revertNow runs under NonCancellable so it lands;
+            // idempotent — a no-op if stopDaemon/onDestroy already reverted.
+            Log.i(TAG, "Game Boost reverting all writes via TunableWriter (finally)")
+            val summary = revert?.revertNow(report)
+            if (summary != null) {
+                Log.i(TAG, "Game Boost revert complete: ok=${summary.ok} failed=${summary.failed}")
+            } else {
+                Log.i(TAG, "Game Boost revert already performed by an earlier exit path (no-op)")
+            }
             arbiter.release(BoostArbiter.ClockOwner.GAME_BOOST)
             updateNotification("Stopped", "All writes reverted")
         }
     }
 
+    /**
+     * HIGH-1: stop the daemon and revert the ceiling pin to stock FIRST (NonCancellable,
+     * awaited) THEN cancel the loop and stopSelf — so a write/revert race cannot leave
+     * clocks pinned at max. The old body cancelled the loop and called stopSelf() WITHOUT
+     * awaiting a revert; the only revert was the loop's `finally`, which rode the cancelled
+     * job and was skipped. Thermal-trip and time-box paths call this, so they revert too.
+     */
     private fun stopDaemon(
         status: GameBoostStatus,
         thermalTripReason: String? = null,
@@ -270,9 +346,25 @@ class GameBoostService : Service() {
         controller.updateState(
             current.copy(status = status, thermalTripReason = thermalTripReason)
         )
-        loopJob?.cancel()
-        loopJob = null
-        stopSelf()
+        val report = sessionReport
+        val revertHandle = revert
+        serviceScope.launch {
+            if (report != null && revertHandle != null) {
+                runCatching {
+                    val summary = revertHandle.revertNow(report)
+                    if (summary != null) {
+                        Log.i(TAG, "stopDaemon revert: ok=${summary.ok} failed=${summary.failed}")
+                    }
+                }.onFailure { Log.w(TAG, "stopDaemon revert failed", it) }
+                // Release ownership here too (the finally also releases; release() is a
+                // no-op if a later owner already took over).
+                arbiter.release(BoostArbiter.ClockOwner.GAME_BOOST)
+            }
+            // Now safe to cancel the loop (its finally revert is a latched no-op) + stop.
+            loopJob?.cancel()
+            loopJob = null
+            stopSelf()
+        }
     }
 
     // ── LIVE availability gate ─────────────────────────────────────────────────

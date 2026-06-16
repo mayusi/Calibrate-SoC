@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.R
 import io.github.mayusi.calibratesoc.data.boost.BoostArbiter
+import io.github.mayusi.calibratesoc.data.boost.ServiceRevert
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
@@ -70,6 +71,23 @@ class ThrottleGuardService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
 
+    /**
+     * CRITICAL-1 (DEFECT B sibling): the [CapabilityReport] the daemon resolved this
+     * session, hoisted to a field so EVERY exit path (stopDaemon, onDestroy, onTaskRemoved,
+     * the runDaemon `finally`) can revert against it. Null before the daemon resolves
+     * capabilities (nothing has been written, so nothing to revert).
+     */
+    @Volatile private var sessionReport: CapabilityReport? = null
+
+    /**
+     * CRITICAL-1: the idempotent, NonCancellable revert latch (one per session, rebuilt at
+     * daemon start). GUARANTEES the cap revert survives the `loopJob.cancel()` that DEFECT B
+     * silently swallowed (the inner PServer `withContext(Dispatchers.IO)` threw
+     * CancellationException → revert skipped → cap pinned until reboot). Shared with
+     * GameBoost via [ServiceRevert]. Lazily set so a never-started service has nothing to call.
+     */
+    private var revert: ServiceRevert? = null
+
     override fun onCreate() {
         super.onCreate()
         startInForeground()
@@ -85,17 +103,53 @@ class ThrottleGuardService : Service() {
 
     override fun onBind(intent: Intent): IBinder? = null
 
+    /**
+     * CRITICAL-1: revert the pre-emptive cap to stock before teardown. The old onDestroy
+     * cancelled the loop only — the loop's `finally` revert rode the cancelled job and was
+     * silently skipped. Now we block here (the lifecycle callback must finish the revert
+     * before the process can be reclaimed) and [ServiceRevert.revertNow] runs the writes
+     * under NonCancellable so they land even though serviceScope is about to be cancelled.
+     * Idempotent with stopDaemon / onTaskRemoved / the finally.
+     */
     override fun onDestroy() {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onDestroy revert failed", it) }
+        }
         loopJob?.cancel()
         loopJob = null
         serviceScope.cancel()
         super.onDestroy()
     }
 
+    /**
+     * CRITICAL-1: when the user swipes the app away from Recents, Android may kill the
+     * process without an orderly onDestroy in time to flush a cancelled-job revert. Revert
+     * the cap to stock here too. Without this, a swipe-away mid-session could leave the
+     * pre-emptive cap pinned. Idempotent.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onTaskRemoved revert failed", it) }
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     // ── Daemon lifecycle ──────────────────────────────────────────────────────
 
     private fun startDaemon() {
         if (loopJob?.isActive == true) return
+        // CRITICAL-1: a fresh single-session revert latch. Reset the session report so a stop
+        // before capabilities resolve has nothing stale to revert against.
+        sessionReport = null
+        revert = ServiceRevert(tunableWriter)
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) { runDaemon() }
         }
@@ -127,7 +181,16 @@ class ThrottleGuardService : Service() {
         val actuator = ThrottleGuardActuator(
             bigPolicyId = bigPolicy.policyId,
             stockCeilingKhz = stockCeilingKhz,
+            // HIGH-2: real device OPP steps for the cap, so the guard never writes a
+            // value the kernel will silently clamp (its activeCapKhz belief == reality),
+            // and the shared 40% hard floor below is snapped to a real OPP.
+            availableFreqsKhz = bigPolicy.availableFreqsKhz,
         )
+
+        // CRITICAL-1: publish the resolved report so EVERY exit path (stopDaemon /
+        // onDestroy / onTaskRemoved / the finally) can revert against it. From here on the
+        // guard may write a cap, so from here on a revert is meaningful.
+        sessionReport = report
 
         controller.updateState(
             ThrottleGuardState(
@@ -195,20 +258,49 @@ class ThrottleGuardService : Service() {
                 updateNotification("Watching", detail)
             }
         } finally {
-            Log.i(TAG, "Throttle Guard reverting all writes via TunableWriter")
-            val summary = tunableWriter.revertAll(report)
-            Log.i(TAG, "Throttle Guard revert complete: ok=${summary.ok} failed=${summary.failed}")
+            // CRITICAL-1 (DEFECT B sibling): route the revert through the NonCancellable
+            // latch. This finally runs on the loopJob, which EVERY stop path cancels — the
+            // old direct revertAll() rode that cancelled job and was silently skipped
+            // (PServer's withContext(Dispatchers.IO) throws CancellationException), leaving
+            // the pre-emptive cap pinned until reboot. revertNow runs under NonCancellable
+            // so it lands; idempotent — a no-op if stopDaemon/onDestroy already reverted.
+            Log.i(TAG, "Throttle Guard reverting all writes via TunableWriter (finally)")
+            val summary = revert?.revertNow(report)
+            if (summary != null) {
+                Log.i(TAG, "Throttle Guard revert complete: ok=${summary.ok} failed=${summary.failed}")
+            } else {
+                Log.i(TAG, "Throttle Guard revert already performed by an earlier exit path (no-op)")
+            }
             updateNotification("Stopped", "Cap reverted")
         }
     }
 
+    /**
+     * CRITICAL-1: stop the daemon and revert the cap to stock FIRST (NonCancellable, awaited)
+     * THEN cancel the loop and stopSelf — so a write/revert race cannot leave the cap pinned.
+     * The old body cancelled the loop and called stopSelf() WITHOUT awaiting a revert; the
+     * only revert was the loop's `finally`, which rode the cancelled job and was skipped.
+     */
     private fun stopDaemon(status: ThrottleGuardStatus) {
         controller.updateState(
             controller.state.value.copy(status = status, activeCapKhz = null)
         )
-        loopJob?.cancel()
-        loopJob = null
-        stopSelf()
+        val report = sessionReport
+        val revertHandle = revert
+        serviceScope.launch {
+            if (report != null && revertHandle != null) {
+                runCatching {
+                    val summary = revertHandle.revertNow(report)
+                    if (summary != null) {
+                        Log.i(TAG, "stopDaemon revert: ok=${summary.ok} failed=${summary.failed}")
+                    }
+                }.onFailure { Log.w(TAG, "stopDaemon revert failed", it) }
+            }
+            // Now safe to cancel the loop (its finally revert is a latched no-op) + stop.
+            loopJob?.cancel()
+            loopJob = null
+            stopSelf()
+        }
     }
 
     // ── LIVE availability gate ─────────────────────────────────────────────────

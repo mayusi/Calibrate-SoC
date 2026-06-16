@@ -16,9 +16,28 @@ import io.github.mayusi.calibratesoc.data.session.SessionDao
 import io.github.mayusi.calibratesoc.data.share.AndroidBase64Encoder
 import io.github.mayusi.calibratesoc.data.share.Base64Encoder
 import io.github.mayusi.calibratesoc.data.share.PresetShareCodec
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import okio.FileSystem
+import javax.inject.Qualifier
 import javax.inject.Singleton
+
+/**
+ * Qualifies the application-lifetime [CoroutineScope] provided by [AppModule].
+ *
+ * This scope lives for the whole process. It is used to host long-lived shared
+ * flows — notably [io.github.mayusi.calibratesoc.data.monitor.MonitorService]'s
+ * single shared telemetry stream — so that ONE sysfs-polling loop is shared by
+ * every default-interval subscriber instead of each one spawning its own. The
+ * scope is never cancelled (the process death is the only "shutdown"), which is
+ * correct for `SharingStarted.WhileSubscribed` flows that stop their upstream on
+ * their own when no one is collecting.
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class ApplicationScope
 
 /**
  * Explicit Hilt bindings live here. Most classes use @Inject constructor +
@@ -28,6 +47,17 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+
+    /**
+     * Application-lifetime coroutine scope (IO dispatcher + a [SupervisorJob] so
+     * one failing child never tears down siblings). Hosts process-scoped shared
+     * flows. Never cancelled — process death is the lifecycle boundary.
+     */
+    @Provides
+    @Singleton
+    @ApplicationScope
+    fun provideApplicationScope(): CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Lenient + non-strict so future schema additions don't break old caches. */
     @Provides

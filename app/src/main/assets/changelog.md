@@ -1,3 +1,25 @@
+## [0.1.33-alpha] — 2026-06-16
+
+A deep full-app audit pass: safety, honesty, a new feature, and battery savings.
+
+### Added
+- **AYANEO: custom fan curves, zero setup.** The one AYANEO with no fan control now gets the best — draw your own temp→fan% curve (or pick a preset), driven through AYANEO's own system service. Same hard anti-overheat floor as the Odin curves.
+
+### Fixed — safety
+- **Game Boost and Throttle Guard now always restore your clocks** when they stop (or you swipe the app away). Previously either one could leave your clocks pinned (Game Boost at max, Throttle Guard capped) until a reboot — the same class of bug fixed for AutoTDP in 0.1.30, now closed everywhere.
+- **Throttle Guard can no longer cap the CPU too low** — it respects the same safe floor as AutoTDP and only sets real clock steps.
+- **More reliable GPU-temperature reading** across devices (a unit mismatch could blind the heat-protection on some firmwares).
+- Removed two cases where the floating HUD could briefly freeze the app on slow storage.
+
+### Fixed — honesty
+- **The per-app AutoTDP setting now actually works** — binding a mode to a game previously did nothing; it now applies when that game is in front.
+- **Battery-Saver's "hours target" now uses your real battery capacity** instead of a fixed guess, so the suggested cap is correct for your device.
+- Removed a "fan curve editor coming soon" placeholder for a feature that already ships, and stopped advertising fan control the app can't actually perform.
+
+### Improved
+- **Lower idle battery drain** — the app now shares one sensor-polling stream instead of spinning up a duplicate for every open screen.
+- Hardened the safety checks around custom kernel-path writes.
+
 ## [0.1.32-alpha] — 2026-06-16
 
 A correctness & safety pass over the new AYANEO and fan-curve work.

@@ -420,6 +420,62 @@ class SysfsProberTest {
         }
     }
 
+    // --- HIGH-3: GPU die-temp unit normalization ------------------------
+
+    @Test
+    fun `normalizeDieTempMilliC passes a sane milli-C reading unchanged`() {
+        // Odin 3 observed value: 37800 = 37.8 C, already milli-C.
+        assertThat(prober.normalizeDieTempMilliC(37_800)).isEqualTo(37_800)
+        assertThat(prober.normalizeDieTempMilliC(95_000)).isEqualTo(95_000)
+    }
+
+    @Test
+    fun `normalizeDieTempMilliC scales deci-C up to milli-C`() {
+        // 378 deci-C = 37.8 C → 37800 milli-C (the blinding case: /1000 would give 0 C).
+        assertThat(prober.normalizeDieTempMilliC(378)).isEqualTo(37_800)
+        // 950 deci-C = 95 C.
+        assertThat(prober.normalizeDieTempMilliC(950)).isEqualTo(95_000)
+    }
+
+    @Test
+    fun `normalizeDieTempMilliC scales whole-C up to milli-C`() {
+        assertThat(prober.normalizeDieTempMilliC(38)).isEqualTo(38_000)
+        assertThat(prober.normalizeDieTempMilliC(95)).isEqualTo(95_000)
+    }
+
+    @Test
+    fun `normalizeDieTempMilliC scales micro-C down to milli-C`() {
+        // 37_800_000 micro-C = 37.8 C → /1000 = 37800 milli-C (would otherwise be 37800 C).
+        assertThat(prober.normalizeDieTempMilliC(37_800_000)).isEqualTo(37_800)
+    }
+
+    @Test
+    fun `normalizeDieTempMilliC rejects implausible readings as null`() {
+        assertThat(prober.normalizeDieTempMilliC(0)).isNull()         // dead/zero sensor
+        assertThat(prober.normalizeDieTempMilliC(5)).isNull()         // too low even as whole-C
+        assertThat(prober.normalizeDieTempMilliC(200_000)).isNull()   // 200 C milli — off-scale
+        assertThat(prober.normalizeDieTempMilliC(150)).isNull()       // 150 C whole — off-scale
+    }
+
+    @Test
+    fun `readGpuDieTempMilliC normalizes a deci-C node and never returns a 0 C blind value`() {
+        // A device reporting deci-C: raw 378 must become 37800 milli-C, NOT 0 C.
+        write("/sys/class/kgsl/kgsl-3d0/temp".toPath(), "378")
+        val v = prober.readGpuDieTempMilliC("/sys/class/kgsl/kgsl-3d0")
+        assertThat(v).isEqualTo(37_800)
+    }
+
+    @Test
+    fun `readGpuDieTempMilliC returns null for an implausible node so zones win`() {
+        write("/sys/class/kgsl/kgsl-3d0/temp".toPath(), "0")
+        assertThat(prober.readGpuDieTempMilliC("/sys/class/kgsl/kgsl-3d0")).isNull()
+    }
+
+    @Test
+    fun `readGpuDieTempMilliC returns null when no GPU root`() {
+        assertThat(prober.readGpuDieTempMilliC(null)).isNull()
+    }
+
     // --- devfreq devices ------------------------------------------------
 
     @Test

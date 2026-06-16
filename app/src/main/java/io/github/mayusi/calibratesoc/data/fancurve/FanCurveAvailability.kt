@@ -6,23 +6,29 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
  * Whether the custom fan-curve feature can run on this device, and if not, an
  * honest reason. Pure decision so it is unit-testable without Android.
  *
- * Two hard requirements (BOTH must hold):
- *   1. The device is a SPECIFIC AYN Odin model whose fan-curve storage + reload
- *      procedure we have verified (`ayn_odin3` / `ayn_odin2`). The apply path
- *      writes HARDCODED Odin-3 paths (`com.odin.settings` config.xml +
- *      the `/sys/class/gpio5_pwm2/` nodes), so we must NOT over-match: a loose
- *      `startsWith("ayn")` would let other AYN models (Loki, Odin Lite, future
- *      SKUs) through, and a sideloaded `com.odin.settings` alone could qualify a
- *      non-Odin device. We therefore require a recognized Odin key; the settings
- *      package is only accepted as corroboration on a device that ALSO reports an
- *      AYN handheld key (never package-presence by itself).
- *   2. A privileged write path is live: AYN PServer is whitelisted
- *      ([CapabilityReport.pserverSysfsLive]). Editing `com.odin.settings`'s
- *      private prefs and killing its process both require root, which on a
- *      non-rooted Odin is only reachable through PServer. (Real root counts too.)
+ * The feature now spans TWO vendors, each with its OWN apply mechanism. The gate
+ * resolves the RIGHT vendor per device (see [FanCurveGate.resolve]):
  *
- * Architected so a future vendor adapter could supply a different
- * [FanCurveVendor]; today only [FanCurveVendor.ODIN] is implemented.
+ *  - [FanCurveVendor.ODIN] — a SPECIFIC AYN Odin model (`ayn_odin3` / `ayn_odin2`)
+ *    whose fan-curve storage + reload procedure we have verified. The apply path
+ *    writes HARDCODED Odin paths (`com.odin.settings` config.xml + the
+ *    `/sys/class/gpio5_pwm2/` nodes) via a privileged shell, so it must NOT
+ *    over-match: a loose `startsWith("ayn")` would let other AYN models through,
+ *    and a sideloaded `com.odin.settings` alone could qualify a non-Odin device.
+ *    We require a recognized Odin key; the settings package only corroborates a
+ *    device that ALSO reports an AYN handheld key. ALSO requires a privileged
+ *    write path: AYN PServer whitelisted ([CapabilityReport.pserverSysfsLive]) or
+ *    real root.
+ *
+ *  - [FanCurveVendor.AYANEO] — an AYANEO model (`ayaneo_*`) whose
+ *    `com.ayaneo.gamewindow` perf binder is LIVE ([CapabilityReport.ayaneoBinderLive],
+ *    set ONLY after a real bind round-trip). The apply path sends a
+ *    `com_set_fan_speed_strategy` command over that binder (ZERO-SETUP — no root,
+ *    no script); the overlay (uid=system) actuates the PWM. NO config.xml is
+ *    touched. Requires the binder to be live; "AYANEO device" alone is not enough
+ *    (a firmware variant without the gamewindow service degrades honestly).
+ *
+ * On a device matching NEITHER path → [Unavailable] with an honest reason.
  */
 sealed interface FanCurveAvailability {
     /** Feature is usable; the controller may read + apply curves. */
@@ -34,16 +40,28 @@ sealed interface FanCurveAvailability {
     val isAvailable: Boolean get() = this is Available
 }
 
-/** Which vendor's fan-curve mechanism applies. Only ODIN is built today. */
-enum class FanCurveVendor { ODIN }
+/**
+ * Which vendor's fan-curve mechanism applies.
+ *  - [ODIN]   — config.xml rewrite + fan_mode bounce via the privileged shell.
+ *  - [AYANEO] — `com_set_fan_speed_strategy` over the gamewindow binder (zero-setup).
+ */
+enum class FanCurveVendor { ODIN, AYANEO }
 
 object FanCurveGate {
 
     /**
-     * Resolve availability from the live [report] plus a cheap check of whether
-     * the Odin settings package is installed ([odinSettingsInstalled] — the
-     * controller passes `packageManager` result; kept as a param so this stays
-     * a pure function).
+     * Resolve availability + the vendor to dispatch on, from the live [report]
+     * plus a cheap check of whether the Odin settings package is installed
+     * ([odinSettingsInstalled] — the controller passes the `packageManager`
+     * result; kept as a param so this stays a pure function).
+     *
+     * Resolution order:
+     *   1. ODIN device (recognized key / corroboration) → require a privileged
+     *      write path, then Available(ODIN). Odin stays the config.xml path.
+     *   2. AYANEO device whose gamewindow binder is live → Available(AYANEO)
+     *      (binder path). An AYANEO device WITHOUT the live binder is Unavailable
+     *      with a binder-specific reason (honest: the zero-setup path isn't reachable).
+     *   3. Neither → Unavailable.
      */
     fun resolve(
         report: CapabilityReport?,
@@ -53,25 +71,38 @@ object FanCurveGate {
             return FanCurveAvailability.Unavailable("Still detecting device capabilities…")
         }
 
-        if (!isOdin(report, odinSettingsInstalled)) {
-            return FanCurveAvailability.Unavailable(
-                "Custom fan curves are an AYN Odin feature. This device stores its " +
-                    "fan curve differently and isn't supported yet.",
-            )
+        // ── 1. ODIN (config.xml path) ───────────────────────────────────────
+        if (isOdin(report, odinSettingsInstalled)) {
+            // Privileged write path: PServer whitelisted, OR real root.
+            val privileged = report.pserverSysfsLive ||
+                report.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT
+            if (!privileged) {
+                return FanCurveAvailability.Unavailable(
+                    "Writing the Odin fan curve needs a privileged write path. Run the " +
+                        "one-time unlock (PServer) so Calibrate can edit the curve, then " +
+                        "come back.",
+                )
+            }
+            return FanCurveAvailability.Available(FanCurveVendor.ODIN)
         }
 
-        // Privileged write path: PServer whitelisted, OR real root.
-        val privileged = report.pserverSysfsLive ||
-            report.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT
-        if (!privileged) {
-            return FanCurveAvailability.Unavailable(
-                "Writing the Odin fan curve needs a privileged write path. Run the " +
-                    "one-time unlock (PServer) so Calibrate can edit the curve, then " +
-                    "come back.",
-            )
+        // ── 2. AYANEO (gamewindow-binder path) ──────────────────────────────
+        if (isAyaneo(report)) {
+            if (!report.ayaneoBinderLive) {
+                return FanCurveAvailability.Unavailable(
+                    "Custom fan curves on AYANEO need the AYANEO game-window service, " +
+                        "which isn't reachable on this device (it may be a firmware " +
+                        "variant without it). No setup can enable it here.",
+                )
+            }
+            return FanCurveAvailability.Available(FanCurveVendor.AYANEO)
         }
 
-        return FanCurveAvailability.Available(FanCurveVendor.ODIN)
+        // ── 3. Neither ──────────────────────────────────────────────────────
+        return FanCurveAvailability.Unavailable(
+            "Custom fan curves are available on AYN Odin and AYANEO handhelds. This " +
+                "device stores its fan curve differently and isn't supported yet.",
+        )
     }
 
     /**
@@ -97,4 +128,18 @@ object FanCurveGate {
         // is at least an AYN handheld. Never package-presence alone.
         return odinSettingsInstalled && key.startsWith("ayn")
     }
+
+    /**
+     * AYANEO detection for the fan-curve binder path. Any AYANEO handheld key
+     * (`ayaneo_*`) qualifies as the DEVICE half; the gate ALSO requires
+     * [CapabilityReport.ayaneoBinderLive] before reporting Available, so a loose
+     * `startsWith("ayaneo")` here is safe — the live-bind requirement (not a
+     * device-key allowlist) is what actually gates the apply. Unlike Odin, the
+     * AYANEO apply touches no hardcoded per-model paths: it sends one binder
+     * command and the overlay actuates the fan, so the same code works across the
+     * AYANEO line wherever the gamewindow binder is reachable. A device whose
+     * binder isn't live is rejected upstream with a binder-specific reason.
+     */
+    internal fun isAyaneo(report: CapabilityReport): Boolean =
+        report.device.knownHandheldKey.orEmpty().startsWith("ayaneo")
 }

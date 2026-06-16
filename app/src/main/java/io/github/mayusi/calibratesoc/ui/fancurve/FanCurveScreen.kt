@@ -40,6 +40,7 @@ import io.github.mayusi.calibratesoc.data.fancurve.FanCurveAvailability
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurvePoint
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurvePreset
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurveValidation
+import io.github.mayusi.calibratesoc.data.fancurve.FanCurveVendor
 import io.github.mayusi.calibratesoc.data.fancurve.LiveFanReading
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
@@ -83,6 +84,7 @@ fun FanCurveScreen(
     val lastApply by viewModel.lastApply.collectAsStateWithLifecycle()
 
     val isAvailable = availability is FanCurveAvailability.Available
+    val vendor = (availability as? FanCurveAvailability.Available)?.vendor
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -104,7 +106,13 @@ fun FanCurveScreen(
                         letterSpacing = 0.04.sp,
                     )
                     Text(
-                        "Custom smart fan curve for the AYN Odin 3.",
+                        text = when (vendor) {
+                            FanCurveVendor.AYANEO ->
+                                "Custom fan curve for AYANEO — zero-setup, via the game-window service."
+                            FanCurveVendor.ODIN ->
+                                "Custom smart fan curve for the AYN Odin."
+                            null -> "Custom smart fan curve."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -129,7 +137,7 @@ fun FanCurveScreen(
         }
 
         // ── 3. Live readout ─────────────────────────────────────────────────
-        item { LiveFanReadout(live) }
+        item { LiveFanReadout(live, vendor) }
 
         // ── 4. Presets ──────────────────────────────────────────────────────
         item {
@@ -145,13 +153,19 @@ fun FanCurveScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Row {
-                    ArsenalButton(
-                        label = "Load device curve",
-                        onClick = viewModel::loadCurrentFromDevice,
-                        style = ArsenalButtonStyle.Secondary,
-                        accent = AccentBar.Blue,
-                    )
+                // "Load device curve" only makes sense where the device exposes
+                // its active curve for read-back. AYANEO applies via the overlay
+                // and has no readable curve node, so hide it there (honest UI —
+                // we never offer an action that can't work).
+                if (vendor == FanCurveVendor.ODIN) {
+                    Row {
+                        ArsenalButton(
+                            label = "Load device curve",
+                            onClick = viewModel::loadCurrentFromDevice,
+                            style = ArsenalButtonStyle.Secondary,
+                            accent = AccentBar.Blue,
+                        )
+                    }
                 }
             }
         }
@@ -224,8 +238,15 @@ fun FanCurveScreen(
         item {
             ArsenalPanel(accent = AccentBar.Red, title = "APPLY") {
                 Text(
-                    "This controls your device's cooling. Calibrate edits the Odin fan " +
-                        "curve, reloads the fan service, and verifies the result.",
+                    text = when (vendor) {
+                        FanCurveVendor.AYANEO ->
+                            "This controls your device's cooling. Calibrate sends the curve to " +
+                                "the AYANEO game-window service and reads the fan PWM back to " +
+                                "confirm the fan path is active."
+                        else ->
+                            "This controls your device's cooling. Calibrate edits the Odin fan " +
+                                "curve, reloads the fan service, and verifies the result."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -244,15 +265,22 @@ fun FanCurveScreen(
                     checked = applyOnOpen,
                     onChange = viewModel::setApplyOnOpen,
                 )
-                lastApply?.let { ApplyStatusCard(it) }
+                lastApply?.let { ApplyStatusCard(it, vendor) }
             }
         }
 
         // ── 9. Safety note ──────────────────────────────────────────────────
         item {
             Text(
-                "Calibrate preserves your other Odin settings when writing the curve, " +
-                    "and never reports success it could not verify.",
+                text = when (vendor) {
+                    FanCurveVendor.AYANEO ->
+                        "Every curve must pass Calibrate's hot-zone cooling floor before it can " +
+                            "apply, so a curve can't run your AYANEO hot. Calibrate never reports " +
+                            "success it could not verify."
+                    else ->
+                        "Calibrate preserves your other Odin settings when writing the curve, " +
+                            "and never reports success it could not verify."
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth(),
@@ -276,7 +304,8 @@ private fun AvailabilityPill(availability: FanCurveAvailability) {
 }
 
 @Composable
-private fun LiveFanReadout(live: LiveFanReading?) {
+private fun LiveFanReadout(live: LiveFanReading?, vendor: FanCurveVendor?) {
+    val isAyaneo = vendor == FanCurveVendor.AYANEO
     ArsenalPanel(accent = AccentBar.Amber, title = "LIVE FAN") {
         val dutyPct = live?.dutyPct
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
@@ -288,13 +317,15 @@ private fun LiveFanReadout(live: LiveFanReading?) {
                 modifier = Modifier.weight(1f),
             )
             MetricTile(
-                label = "Raw duty",
+                // On AYANEO the raw node is the 8-bit pwm1 value (0..255); on Odin
+                // it's the gpio duty. Label it per-vendor so the number is honest.
+                label = if (isAyaneo) "pwm1 (0-255)" else "Raw duty",
                 value = live?.dutyRaw?.toString() ?: "—",
                 accent = AccentBar.Amber,
                 modifier = Modifier.weight(1f),
             )
             MetricTile(
-                label = "Period",
+                label = if (isAyaneo) "Scale" else "Period",
                 value = live?.periodRaw?.toString() ?: "—",
                 accent = AccentBar.Amber,
                 modifier = Modifier.weight(1f),
@@ -303,6 +334,8 @@ private fun LiveFanReadout(live: LiveFanReading?) {
         Text(
             text = when {
                 live == null -> "Reading the live fan node…"
+                isAyaneo -> "Reading the AYANEO fan PWM (pwm1). The duty tracks the current " +
+                    "temperature, so a low value at idle is normal."
                 live.fanMode == 4 -> "Fan mode: Smart (curve-driven)."
                 live.fanMode != null -> "Fan mode: ${live.fanMode} (not Smart — apply a curve to engage Smart)."
                 else -> "Fan mode unknown."
@@ -442,18 +475,32 @@ private fun ToggleRow(
 }
 
 @Composable
-private fun ApplyStatusCard(result: ApplyResult) {
+private fun ApplyStatusCard(result: ApplyResult, vendor: FanCurveVendor?) {
+    val isAyaneo = vendor == FanCurveVendor.AYANEO
     val (type, title, message) = when (result) {
         is ApplyResult.Applied -> Triple(
             if (result.liveConfirmed) AlertType.INFO else AlertType.WARNING,
-            if (result.liveConfirmed) "Applied & verified" else "Applied (live effect unconfirmed)",
-            if (result.liveConfirmed) {
-                "The curve is in place and the fan node is active " +
-                    "(duty ${result.fanDuty}, period ${result.fanPeriod} — reflects the " +
-                    "current temperature)."
-            } else {
-                "The curve was written to config.xml and Smart mode was set, but the " +
-                    "live fan node couldn't be read to confirm the effect."
+            when {
+                result.liveConfirmed -> "Applied & verified"
+                // AYANEO never sets liveConfirmed (no readback can prove the exact
+                // temp-dependent curve), so its "applied" state is honestly framed
+                // as "accepted + fan active", not a failure to verify.
+                isAyaneo -> "Applied — fan active"
+                else -> "Applied (live effect unconfirmed)"
+            },
+            when {
+                result.liveConfirmed ->
+                    "The curve is in place and the fan node is active " +
+                        "(duty ${result.fanDuty}, period ${result.fanPeriod} — reflects the " +
+                        "current temperature)."
+                isAyaneo ->
+                    "The AYANEO game-window service accepted the curve and the fan PWM is " +
+                        "active (pwm ${result.fanDuty}% of full — reflects the current " +
+                        "temperature). The exact curve can't be read back from the overlay, " +
+                        "so this is confirmed as accepted-and-active, not a full curve readback."
+                else ->
+                    "The curve was written to config.xml and Smart mode was set, but the " +
+                        "live fan node couldn't be read to confirm the effect."
             },
         )
         is ApplyResult.Unverified -> Triple(

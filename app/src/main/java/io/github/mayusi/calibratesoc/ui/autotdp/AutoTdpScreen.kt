@@ -118,6 +118,7 @@ fun AutoTdpScreen(
     // state; the main screen drives everything off `smartSelectedGoal`.
     val targetHours by viewModel.targetHours.collectAsStateWithLifecycle()
     val batteryTargetResult by viewModel.batteryTargetResult.collectAsStateWithLifecycle()
+    val batteryCapacityUnavailable by viewModel.batteryCapacityUnavailable.collectAsStateWithLifecycle()
     val sweepProgress by viewModel.sweepProgress.collectAsStateWithLifecycle()
     val kneeKhz by viewModel.kneeKhz.collectAsStateWithLifecycle()
     val idleChargeTriggerEnabled by viewModel.idleChargeTriggerEnabled.collectAsStateWithLifecycle()
@@ -246,6 +247,7 @@ fun AutoTdpScreen(
                 BatteryTargetArsenalCard(
                     targetHours = targetHours,
                     result = batteryTargetResult,
+                    capacityUnavailable = batteryCapacityUnavailable,
                     onTargetHoursChanged = { viewModel.setTargetHours(it) },
                 )
             }
@@ -1512,6 +1514,7 @@ private fun UndervoltTierPanel(capability: io.github.mayusi.calibratesoc.data.ef
 private fun BatteryTargetArsenalCard(
     targetHours: Double,
     result: io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget.BatteryTargetResult?,
+    capacityUnavailable: Boolean,
     onTargetHoursChanged: (Double) -> Unit,
 ) {
     ArsenalPanel(accent = AccentBar.Amber, title = "Battery target") {
@@ -1533,6 +1536,17 @@ private fun BatteryTargetArsenalCard(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        // HONEST fallback (FIX 2): when the device exposes no readable battery charge
+        // counter we cannot compute a real required-cap — say so instead of showing a
+        // figure backed by a fabricated capacity constant.
+        if (capacityUnavailable) {
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "Battery capacity unreadable on this device — required-cap estimate unavailable.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AccentBar.Amber,
+            )
+        }
         result?.let { r ->
             Spacer(Modifier.height(Spacing.dense))
             Text(

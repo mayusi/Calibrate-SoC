@@ -18,7 +18,7 @@ private const val TAG = "GameBoostLauncherImpl"
  * [PerAppBundle] and passed through here in a later wave.
  *
  * This implementation is bound by [ProfilesModule] so [ForegroundAppWatcher]
- * receives the real service instead of [NoOpGameBoostLauncher].
+ * receives the real GameBoostService.
  */
 @Singleton
 class GameBoostLauncherImpl @Inject constructor(

@@ -59,7 +59,11 @@ class FanCurveModelTest {
     }
 
     @Test
-    fun `model with VENDOR_SERVICE_INTENT probe is active`() {
+    fun `model with VENDOR_SERVICE_INTENT probe is NOT active (honesty fix)`() {
+        // HONESTY: no FanProbe-driven consumer writes via a generic service-intent
+        // source — every fan write path in the app filters on the Settings.System
+        // key. Advertising control here would over-claim a capability the model
+        // cannot deliver, so VENDOR_SERVICE_INTENT must NOT be active.
         val intentProbe = FanProbe(
             source = FanSource.VENDOR_SERVICE_INTENT,
             controlPath = "com.ayaneo.ayaspace/.FanService",
@@ -68,7 +72,7 @@ class FanCurveModelTest {
             currentRpm = null,
         )
         val model = FanCurveModel(points = defaultPoints, fanProbe = intentProbe)
-        assertThat(model.isActive).isTrue()
+        assertThat(model.isActive).isFalse()
     }
 
     @Test
@@ -254,8 +258,11 @@ class FanCurveModelTest {
     }
 
     @Test
-    fun `isControllable returns true for VENDOR_SERVICE_INTENT`() {
-        assertThat(FanSource.VENDOR_SERVICE_INTENT.isControllable()).isTrue()
+    fun `isControllable returns false for VENDOR_SERVICE_INTENT (honesty fix)`() {
+        // No fan consumer drives a generic service-intent source; reporting it
+        // controllable would over-claim. The shipping AYANEO binder fan editor
+        // gates on CapabilityReport.ayaneoBinderLive, not on this enum value.
+        assertThat(FanSource.VENDOR_SERVICE_INTENT.isControllable()).isFalse()
     }
 
     @Test

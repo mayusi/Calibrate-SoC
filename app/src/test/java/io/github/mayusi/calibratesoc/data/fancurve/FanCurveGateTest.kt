@@ -23,6 +23,7 @@ class FanCurveGateTest {
         handheldKey: String?,
         pserverLive: Boolean,
         tier: PrivilegeTier = PrivilegeTier.VENDOR_SETTINGS,
+        ayaneoBinderLive: Boolean = false,
     ): CapabilityReport = CapabilityReport(
         device = DeviceIdentity(
             manufacturer = "AYN", brand = "AYN", model = "Odin3",
@@ -39,6 +40,7 @@ class FanCurveGateTest {
         fan = null,
         vendorApps = VendorAppPresence(false, false, false),
         pserverSysfsLive = pserverLive,
+        ayaneoBinderLive = ayaneoBinderLive,
     )
 
     @Test
@@ -128,5 +130,60 @@ class FanCurveGateTest {
     fun `Odin 2 is recognized`() {
         val result = FanCurveGate.resolve(report("ayn_odin2", pserverLive = true), odinSettingsInstalled = false)
         assertThat(result).isInstanceOf(FanCurveAvailability.Available::class.java)
+    }
+
+    // ── AYANEO (binder path) ──────────────────────────────────────────────────
+
+    @Test
+    fun `AYANEO with a LIVE gamewindow binder is Available as AYANEO vendor`() {
+        val result = FanCurveGate.resolve(
+            report("ayaneo_pocket_ds", pserverLive = false, ayaneoBinderLive = true),
+            odinSettingsInstalled = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Available::class.java)
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.AYANEO)
+    }
+
+    @Test
+    fun `AYANEO WITHOUT a live binder is Unavailable with a binder-specific reason`() {
+        // An AYANEO device whose gamewindow binder isn't reachable (firmware
+        // variant) is honestly unavailable — no setup can enable it.
+        val result = FanCurveGate.resolve(
+            report("ayaneo_pocket_ds", pserverLive = false, ayaneoBinderLive = false),
+            odinSettingsInstalled = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+        assertThat((result as FanCurveAvailability.Unavailable).reason).contains("game-window")
+    }
+
+    @Test
+    fun `AYANEO does NOT use the Odin config-xml path even with PServer live`() {
+        // Even if PServer somehow reported live on an AYANEO, the vendor resolves
+        // to AYANEO (binder), never ODIN — the config.xml path is Odin-only.
+        val result = FanCurveGate.resolve(
+            report("ayaneo_pocket_ds", pserverLive = true, ayaneoBinderLive = true),
+            odinSettingsInstalled = false,
+        )
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.AYANEO)
+    }
+
+    @Test
+    fun `Odin stays the ODIN config-xml vendor even when an AYANEO binder flag is set`() {
+        // An Odin device key resolves to ODIN first; the AYANEO binder flag is
+        // irrelevant on an Odin (defensive — the two paths never cross).
+        val result = FanCurveGate.resolve(
+            report("ayn_odin3", pserverLive = true, ayaneoBinderLive = true),
+            odinSettingsInstalled = true,
+        )
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.ODIN)
+    }
+
+    @Test
+    fun `a device that is neither Odin nor AYANEO is Unavailable`() {
+        val result = FanCurveGate.resolve(
+            report("retroid_pocket6", pserverLive = true, ayaneoBinderLive = false),
+            odinSettingsInstalled = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
     }
 }

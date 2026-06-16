@@ -32,10 +32,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -136,6 +139,32 @@ fun HudOverlayContent(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Shared live-clock helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A remembered "now" timestamp that advances every second while composed.
+ *
+ * The HUD's AutoTDP heartbeat verdict ("live" vs "stalled") compares the last
+ * applied epoch against *now*. If `now` were captured once at composition it would
+ * freeze whenever no other field recomposed, so a daemon that quietly stalls would
+ * keep showing a fake "live" — exactly the dishonesty we must avoid. This ticker
+ * keeps the verdict truthful. Mirrors the pattern in
+ * [io.github.mayusi.calibratesoc.ui.autotdp] AutoTdpProofOfEffectPanels.
+ */
+@Composable
+private fun rememberHudNowMs(): Long {
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000L)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    return nowMs
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  COMPACT mode -- single thin horizontal bar
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,7 +179,10 @@ private fun HudCompactBar(
     onCycleLayout: () -> Unit,
     onClose: () -> Unit,
 ) {
-    val nowMs = System.currentTimeMillis()
+    // Live 1 s clock so the heartbeat "live/stalled" verdict keeps ticking even
+    // when no other field recomposes. (Previously captured once at composition,
+    // which froze the verdict.) Mirrors AutoTdpScreen.AutoTdpProofOfEffectPanels.
+    val nowMs = rememberHudNowMs()
     val a11y = buildString {
         append(if (state.gameFps != null) "${state.gameFps} ${if (state.gameFpsIsReal) "FPS" else "Hz"}" else "FPS unavailable")
         append(", CPU ${HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 })}")
@@ -328,7 +360,9 @@ private fun CompactMetric(dot: Color, value: String) {
  */
 @Composable
 private fun CompactProofChip(state: HudUiState) {
-    val nowMs = System.currentTimeMillis()
+    // Live 1 s clock so the pulse-dot's live/stalled verdict keeps ticking even
+    // when no other field recomposes (was captured once at composition → froze).
+    val nowMs = rememberHudNowMs()
     val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
     val accent = if (live) HudEmerald else HudDim
 
@@ -503,8 +537,11 @@ private fun FullPanelHeader(
             AutoTdpStatus.KILLED_BY_SAFETY, AutoTdpStatus.WRITE_DENIED -> HudRed
             else -> HudDim
         }
+        // Show the GOAL the engine actually runs (goal-mapped), so the header
+        // matches the picker + the main AutoTDP screen instead of the legacy
+        // EFF/BAL/TGT names.
         val tdpLabel = if (state.autoTdpRunning) {
-            "AUTOTDP - ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}"
+            "AUTOTDP - ${GoalProfileUi.goalShortLabel(GoalProfile.fromLegacyProfile(state.autoTdpActiveProfile))}"
         } else "AUTOTDP OFF"
         StatusPill(text = tdpLabel, accent = tdpAccent)
 
@@ -523,12 +560,11 @@ private fun FullPanelHeader(
                 .padding(4.dp),
             contentAlignment = Alignment.Center,
         ) {
+            // The recording badge is always "R" (the elapsed m:ss is shown in the
+            // adjacent Text below when recording). Removed a dead m/s computation
+            // here that produced "R" regardless — the label is coherent now.
             Text(
-                text = if (state.isRecording) {
-                    val m = state.recordingElapsedSeconds / 60
-                    val s = state.recordingElapsedSeconds % 60
-                    "R"
-                } else "R",
+                text = "R",
                 color = if (state.isRecording) HudRed else HudDim,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
@@ -776,7 +812,9 @@ private fun AutoTdpProofSection(
     }
 
     // ── RUNNING: proof block ─────────────────────────────────────────────────
-    val nowMs = System.currentTimeMillis()
+    // Live 1 s clock so the heartbeat keeps ticking without an external recompose
+    // (previously captured once at composition → froze "live/stalled").
+    val nowMs = rememberHudNowMs()
     val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
     val heartbeatText = HudDisplayUtils.heartbeatLabel(state.autoTdpLastAppliedEpochMs, nowMs)
 
@@ -801,7 +839,8 @@ private fun AutoTdpProofSection(
         ) {
             Icon(Icons.Outlined.Bolt, null, tint = HudEmerald, modifier = Modifier.size(11.dp))
             Text(
-                text = "AUTOTDP - ${HudDisplayUtils.formatAutoTdpProfileShort(state.autoTdpActiveProfile.name)}",
+                // Goal-mapped label (matches the picker + main screen), not legacy EFF/BAL/TGT.
+                text = "AUTOTDP - ${GoalProfileUi.goalShortLabel(GoalProfile.fromLegacyProfile(state.autoTdpActiveProfile))}",
                 color = HudEmerald,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
@@ -866,7 +905,17 @@ private fun AutoTdpProofSection(
     }
 }
 
-/** 3-segment EFF/BAL/TGT profile picker. Shared by running + stopped states. */
+/**
+ * 3-segment AutoTDP mode picker, shared by running + stopped states.
+ *
+ * HONESTY (HUD/main-screen alignment fix): the chips still drive the legacy
+ * [AutoTdpProfile] (the HUD start path in OverlayService takes that type), but the
+ * engine actually runs each legacy profile as a [GoalProfile] via
+ * [GoalProfile.fromLegacyProfile]. The labels therefore show the GOAL the engine
+ * runs — COOL / BAL / BATT — so the mode set in the HUD reads the same as on the
+ * main AutoTDP screen (whose goal picker uses COOL_QUIET / BALANCED_SMART /
+ * BATTERY_SAVER), mapping 1:1 instead of advertising a divergent EFF/BAL/TGT set.
+ */
 @Composable
 private fun AutoTdpProfilePicker(
     active: AutoTdpProfile,
@@ -874,12 +923,12 @@ private fun AutoTdpProfilePicker(
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         listOf(
-            AutoTdpProfile.EFFICIENCY to "EFF",
-            AutoTdpProfile.BALANCED to "BAL",
-            AutoTdpProfile.BATTERY_TARGET to "TGT",
-        ).forEach { (profile, shortLabel) ->
+            AutoTdpProfile.EFFICIENCY,
+            AutoTdpProfile.BALANCED,
+            AutoTdpProfile.BATTERY_TARGET,
+        ).forEach { profile ->
             AutoTdpProfileChip(
-                label = shortLabel,
+                label = GoalProfileUi.goalShortLabel(GoalProfile.fromLegacyProfile(profile)),
                 selected = active == profile,
                 onClick = { onSetAutoTdpProfile(profile) },
             )
@@ -1263,6 +1312,17 @@ private fun FullProfileChips(
         modifier = Modifier.padding(top = 2.dp),
     )
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  FUTURE: detached VERBOSE-panel sections (scaffolding — intentionally uncalled)
+//
+//  The four composables below (FullRefreshRateSection, FullOpacityRow,
+//  FullPerCoreSection, FullThermalRow) were extracted for a denser VERBOSE HUD
+//  layout that is not wired into HudFullPanel yet. They are kept as ready-to-mount
+//  building blocks, NOT dead code to delete: when the denser layout lands they
+//  drop straight in. Until then they are deliberately not referenced — do not
+//  treat the "unused" warning as a bug.
+// ═════════════════════════════════════════════════════════════════════════════
 
 // ── Full panel: Refresh rate section ────────────────────────────────────────
 

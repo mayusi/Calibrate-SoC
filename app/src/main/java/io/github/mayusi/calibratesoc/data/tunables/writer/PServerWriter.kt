@@ -546,13 +546,21 @@ class PServerWriter @Inject constructor(
      * PServer's root shell. Returns a human-readable error string on failure,
      * null when the path is accepted.
      *
-     * Rules (mirrors [TunableMetadata.validateCustomSysfsPath]):
+     * Rules (mirrors [io.github.mayusi.calibratesoc.data.tunables.TunableMetadata.validateCustomSysfsPath]):
      *   - Must start with /sys/ or /proc/ (kernel surfaces only).
      *   - Must not contain path-traversal sequences (`..`).
-     *   - Must not contain shell metacharacters that could escape the
-     *     single-quote boundary (newlines, null bytes — the path itself is
-     *     single-quote-escaped via [shellQuote], but these bytes break the
-     *     escaping contract).
+     *   - Must not contain a real NUL byte. A NUL truncates the C string the
+     *     kernel/shell ultimately sees, so `'/sys/safe ; rm -rf /'` could be
+     *     read as `/sys/safe` by the path check yet do something else downstream.
+     *     The doc previously claimed this check existed; SEC-2 makes the code match.
+     *   - Must not contain newlines/spaces that would break the single-quote
+     *     escaping contract.
+     *   - Must not be on the dangerous-node block list. The door validator
+     *     ([TunableMetadata.validateCustomSysfsPath]) already rejects these, but
+     *     PServer runs the write as ROOT, so the writer-local validator must NOT
+     *     be weaker than the door — defence-in-depth in case a caller reaches the
+     *     writer with a path that bypassed the door (e.g. an internally-constructed
+     *     [TunableId]).
      */
     internal fun validateSysfsPath(path: String): String? {
         if (!path.startsWith("/sys/") && !path.startsWith("/proc/")) {
@@ -561,8 +569,16 @@ class PServerWriter @Inject constructor(
         if (path.contains("..")) {
             return "path contains path-traversal sequence '..' (got '$path')"
         }
+        // SEC-2: reject real NUL bytes (the doc above always claimed this guard).
+        if (path.any { it.code == 0 }) {
+            return "path contains a null byte"
+        }
         if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
             return "path contains disallowed control characters"
+        }
+        // SEC-2: apply the SAME dangerous-node block list the door validator uses.
+        if (io.github.mayusi.calibratesoc.data.tunables.TunableMetadata.isDangerousPath(path)) {
+            return "path '$path' is on the dangerous-node block list"
         }
         return null
     }

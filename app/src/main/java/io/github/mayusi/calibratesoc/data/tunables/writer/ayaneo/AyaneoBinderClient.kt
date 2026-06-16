@@ -34,9 +34,9 @@ private const val TAG = "CalibrateSoC-AyaBinder"
  * `com.ayaneo.gamewindow/.utils.aidl.AyaAidlService` (exported=true, NO permission
  * guard) and send perf commands; the overlay (uid=system) actuates the privileged
  * sysfs write. Binding succeeded, the transact returned without exception, and the
- * GPU kgsl node moved (680000000 → 585000000, then restored). This client reuses the
- * EXACT working binder call from the de-risk probe
- * ([io.github.mayusi.calibratesoc.debug.AyaneoBindProbe]) as the basis for production.
+ * GPU kgsl node moved (680000000 → 585000000, then restored). This client uses the
+ * exact working binder call that an on-device de-risk probe verified before this
+ * production path was built.
  *
  * ## Wire protocol
  *  - Bind: Intent component {pkg=[TARGET_PKG], cls=[TARGET_CLS]}, BIND_AUTO_CREATE.

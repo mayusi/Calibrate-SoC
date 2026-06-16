@@ -1,6 +1,5 @@
 package io.github.mayusi.calibratesoc.data.tunables.writer
 
-import android.content.Context
 import com.google.common.truth.Truth.assertThat
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
@@ -13,91 +12,24 @@ import io.github.mayusi.calibratesoc.data.capability.ShizukuStatus
 import io.github.mayusi.calibratesoc.data.capability.SoCIdentity
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
 import io.github.mayusi.calibratesoc.data.shizuku.ShizukuNodeCache
-import io.github.mayusi.calibratesoc.data.tunables.TunableId
-import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Test
 
 /**
- * CHANGE 2 honesty tests: a vendor SETTINGS_SYSTEM key write that's supposed to
- * drive a kernel node must be readback-verified. An INERT key (the AYANEO case,
- * where fan/perf ride a private binder, not these Settings keys) must NOT be
- * reported as a live kernel write. And the VENDOR_SETTINGS privilege tier must
- * never be assumed to be a live cpufreq path.
+ * Honesty test: the VENDOR_SETTINGS privilege tier must never be assumed to be a
+ * live cpufreq path. On a vendor-settings device with no root / PServer / Shizuku,
+ * a prime-cluster scaling_max_freq SYSFS node is NOT live-writable — the vendor
+ * key surface is a preset surface, not a kernel-cap surface.
+ *
+ * (The former readback-verification honesty core — SettingsKeyWriter
+ * .writeAndVerifyKernelNode and its evaluateNodeMovement helper — was removed as
+ * dead code: it was never wired into a production write path. The live cpufreq
+ * decision is made entirely by WriterRegistry.isLiveWritable on the SYSFS node,
+ * which is what this test exercises.)
  */
 class SettingsKeyVerifyTest {
-
-    private val writer = SettingsKeyWriter(mockk<Context>(relaxed = true))
-
-    private val key = TunableId(TunableKind.SETTINGS_SYSTEM, "performance_mode")
-
-    // ── evaluateNodeMovement: the pure honesty core ───────────────────────────
-
-    @Test
-    fun `node that changed counts as MOVED (vendor subscribes to the key)`() {
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = "2016000",
-            nodeAfter = "3200000",
-            expectedNodeValue = null,
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.MOVED)
-    }
-
-    @Test
-    fun `node that did NOT change is INERT (AYANEO private-binder case)`() {
-        // The key write succeeded but the kernel node is unchanged — the vendor
-        // does not subscribe to this Settings key on this device.
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = "2016000",
-            nodeAfter = "2016000",
-            expectedNodeValue = null,
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.INERT)
-    }
-
-    @Test
-    fun `unreadable node is UNVERIFIED not a fabricated live result`() {
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = null,
-            nodeAfter = null,
-            expectedNodeValue = null,
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.UNREADABLE)
-    }
-
-    @Test
-    fun `expected value match counts as MOVED`() {
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = "0",
-            nodeAfter = "1",
-            expectedNodeValue = "1",
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.MOVED)
-    }
-
-    @Test
-    fun `expected value mismatch is INERT even if the node moved to something else`() {
-        // Node moved, but NOT to the value the vendor key was supposed to set —
-        // honest: this is not the effect we asked for, so don't claim success.
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = "0",
-            nodeAfter = "2",
-            expectedNodeValue = "1",
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.INERT)
-    }
-
-    @Test
-    fun `expected value match tolerates surrounding whitespace`() {
-        val result = writer.evaluateNodeMovement(
-            nodeBefore = "0",
-            nodeAfter = " 1 ",
-            expectedNodeValue = "1",
-        )
-        assertThat(result).isEqualTo(SettingsKeyWriter.NodeMovement.MOVED)
-    }
 
     // ── VENDOR_SETTINGS tier never claims a live cpufreq path ─────────────────
 

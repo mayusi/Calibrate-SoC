@@ -66,6 +66,15 @@ object AutoTdpEngine {
     /** "Within N°C of soft" window that gates the dTemp pre-empt arm. */
     private const val DTEMP_NEAR_SOFT_C = 8
 
+    /**
+     * HIGH-3: plausible GPU die-temp band in milli-°C. The engine only PREFERS the GPU die
+     * read over the skin zones when it falls in this band; otherwise the die is treated as
+     * absent (fall back to zones). Mirrors SysfsProber's normalization band — defense in
+     * depth so a bad-unit / zero / off-scale die can never blind the thermal pre-empt.
+     */
+    private const val DIE_SANE_MILLI_MIN = 20_000
+    private const val DIE_SANE_MILLI_MAX = 130_000
+
     /** A big/prime core at/above this TRUE-load% is the CPU bottleneck (unpark). */
     private const val CPU_SATURATED_THRESHOLD = 85
 
@@ -114,8 +123,14 @@ object AutoTdpEngine {
      *     the snap lands on the 1 708 800 kHz step (first OPP ≥ 40%, ≈ 1.71 GHz).
      *   - AYN Odin 3 big/prime cluster scales the same way off its own top OPP.
      * The floor is always snapped to a REAL OPP via [hardCapFloorIndex], so MM-2 holds.
+     *
+     * SHARED (HIGH-2): the fraction is the single source of truth in
+     * [io.github.mayusi.calibratesoc.data.thermal.CapFloor.HARD_FLOOR_FRACTION] so the
+     * predictive throttle guard applies the IDENTICAL 40% floor on the same node. Value
+     * and behaviour are unchanged from before — this only de-duplicates the constant.
      */
-    private const val CAP_HARD_FLOOR_FRACTION = 0.40
+    private const val CAP_HARD_FLOOR_FRACTION =
+        io.github.mayusi.calibratesoc.data.thermal.CapFloor.HARD_FLOOR_FRACTION
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -1112,6 +1127,16 @@ object AutoTdpEngine {
     /**
      * Returns the next prime core to park (highest index first), or null when
      * parking would breach the min-online floor / no candidate / cpu0 only.
+     *
+     * NOTE (MEDIUM, deferred — see audit): the online-after estimate uses
+     * [TdpCaps.totalOnlineCores], captured at session start. If a core hotplugs offline
+     * mid-session (kernel thermal hotplug) this can be stale-high and slightly over-park.
+     * Recomputing the live online count would require threading the telemetry window through
+     * both [parkOneMore] call sites and their tighten-ladder callers — an invasive change to
+     * the engine's verified decision path for a narrow, soft-degradation risk (the
+     * [TdpCaps.minOnlineCores] floor still keeps the device usable, and over-parking by one
+     * core is recoverable; this is NOT the stuck/hot/ANR severity class). Deferred to keep
+     * AutoTdpService's verified behaviour intact; revisit if telemetry is already in scope.
      */
     private fun parkOneMore(current: TdpState, caps: TdpCaps): Int? {
         val candidates = caps.primeCoreIndices
@@ -1228,22 +1253,41 @@ object AutoTdpEngine {
         val smoothedGpu = gpuEwma.toInt().coerceIn(0, 100)
 
         // ── Die temp (prefer gpuDieTempMilliC; fall back to hottest zone) ─────────
+        // HIGH-3: only PREFER the GPU die read when it is a SANE milli-°C value. SysfsProber
+        // now normalizes/rejects bad units, but as defense-in-depth the engine also refuses
+        // an out-of-band die so it can never win over the skin zones (a deci-°C device
+        // reading 0 °C must not blind the thermal pre-empt; a micro-°C device must not pin
+        // it). Outside the band ⇒ treat die as absent and fall back to the hottest zone.
         val dieTempsC = window.mapNotNull { s ->
-            val milli = s.gpuDieTempMilliC
+            val sane = s.gpuDieTempMilliC?.takeIf { it in DIE_SANE_MILLI_MIN..DIE_SANE_MILLI_MAX }
+            val milli = sane
                 ?: s.zoneTempsMilliC.maxByOrNull { it.tempMilliC }?.tempMilliC
             milli?.let { it / 1000 }
         }
         val smoothedDie = if (dieTempsC.isNotEmpty()) dieTempsC.average().toInt() else null
 
         // ── dTemp slope EWMA (α=0.5) over ≥3 ticks; never a 1-tick raw delta ──────
+        // Fold ONLY the newest per-tick delta into the carried slope when prior state
+        // exists — matching the GPU EWMA pattern above. The window is the daemon's rolling
+        // buffer; older deltas were already folded on prior ticks. Re-folding the WHOLE
+        // overlapping window every tick over-inflated the slope (each older delta counted
+        // many times), driving spurious early tightens / COOL_QUIET routing. On the FIRST
+        // computation (no carried EWMA) seed by folding the window's deltas once.
         val dTempSlope: Double? = if (dieTempsC.size >= DTEMP_MIN_TICKS) {
-            // Per-tick deltas (1 Hz → °C/s). Smooth them with α=0.5.
-            var slope: Double? = state.dTempSlopeEwma
-            for (i in 1 until dieTempsC.size) {
-                val d = (dieTempsC[i] - dieTempsC[i - 1]).toDouble()
-                slope = if (slope == null) d else DTEMP_EWMA_ALPHA * d + (1 - DTEMP_EWMA_ALPHA) * slope
+            val prior = state.dTempSlopeEwma
+            if (prior != null) {
+                // Newest delta only (1 Hz → °C/s), folded into the carried EWMA.
+                val newest = (dieTempsC.last() - dieTempsC[dieTempsC.size - 2]).toDouble()
+                DTEMP_EWMA_ALPHA * newest + (1 - DTEMP_EWMA_ALPHA) * prior
+            } else {
+                // Seed: fold the window's deltas once to start from a representative value.
+                var slope: Double? = null
+                for (i in 1 until dieTempsC.size) {
+                    val d = (dieTempsC[i] - dieTempsC[i - 1]).toDouble()
+                    slope = if (slope == null) d else DTEMP_EWMA_ALPHA * d + (1 - DTEMP_EWMA_ALPHA) * slope
+                }
+                slope
             }
-            slope
         } else null
 
         // ── Cooling-device max cur_state across the window ────────────────────────

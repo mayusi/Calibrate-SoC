@@ -3,13 +3,18 @@ package io.github.mayusi.calibratesoc.data.monitor
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
 import io.github.mayusi.calibratesoc.data.capability.SysfsProber
+import io.github.mayusi.calibratesoc.di.ApplicationScope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.shareIn
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -41,6 +46,23 @@ import javax.inject.Singleton
  *   3. scaling_cur_freq ÷ scaling_max_freq as a coarse proxy.
  * The [CpuLoadReading.source] is stored in the emitted [Telemetry] so the
  * HUD can render a "~" indicator when freq-proxy data is shown.
+ *
+ * ## Shared default-interval stream (battery win)
+ *
+ * The 1 Hz ([DEFAULT_INTERVAL_MS]) stream is a SINGLE process-shared hot flow
+ * ([sharedDefaultTelemetry]). Every default-interval subscriber — Dashboard,
+ * AutoTDP, Tunes, Advanced, the HUD assembler, the throttle/boost services, the
+ * session recorder, the advisory controller — observes the SAME flow, so the
+ * sysfs-polling loop (per-core freq, GPU, meminfo, every thermal zone, battery,
+ * cooling devices) runs ONCE no matter how many screens are open. The upstream
+ * is started lazily and stopped [SHARE_STOP_TIMEOUT_MS] after the last collector
+ * leaves (`SharingStarted.WhileSubscribed`), so an idle, fully-backgrounded app
+ * polls nothing.
+ *
+ * The [STRESS_INTERVAL_MS] (4 Hz benchmark) variant is intentionally NOT shared:
+ * benchmark/stability runs are short-lived, explicitly scoped, and want a fresh
+ * cold loop each time, so [telemetry] returns a cold flow for any non-default
+ * interval.
  */
 @Singleton
 class MonitorService @Inject constructor(
@@ -52,9 +74,46 @@ class MonitorService @Inject constructor(
     private val gpuLoad: GpuLoadSampler,
     private val battery: BatterySampler,
     private val gameFpsSampler: io.github.mayusi.calibratesoc.ui.overlay.GameFpsSampler,
+    @ApplicationScope private val appScope: CoroutineScope,
 ) {
 
-    fun telemetry(intervalMs: Long = DEFAULT_INTERVAL_MS): Flow<Telemetry> = flow {
+    /**
+     * The ONE shared 1 Hz telemetry stream. Created once at construction and
+     * shared across the whole process. `replay = 1` so a fresh subscriber gets
+     * the most recent sample immediately instead of waiting up to a full second.
+     * `WhileSubscribed` keeps the upstream alive only while at least one collector
+     * is active (plus a short grace window), so backgrounding the app stops the
+     * polling loop entirely.
+     */
+    private val sharedDefaultTelemetry: SharedFlow<Telemetry> =
+        coldTelemetry(DEFAULT_INTERVAL_MS)
+            .shareIn(
+                scope = appScope,
+                started = SharingStarted.WhileSubscribed(stopTimeoutMillis = SHARE_STOP_TIMEOUT_MS),
+                replay = 1,
+            )
+
+    /**
+     * Telemetry stream at the requested [intervalMs].
+     *
+     * For [DEFAULT_INTERVAL_MS] (the default) this returns the single
+     * process-shared hot flow so all subscribers share ONE polling loop. For any
+     * other cadence (notably [STRESS_INTERVAL_MS]) it returns a fresh cold flow —
+     * benchmark runs want their own short-lived loop.
+     *
+     * The returned [Flow] honours the same contract as before: collectors receive
+     * a [Telemetry] sample roughly every [intervalMs].
+     */
+    fun telemetry(intervalMs: Long = DEFAULT_INTERVAL_MS): Flow<Telemetry> =
+        if (intervalMs == DEFAULT_INTERVAL_MS) sharedDefaultTelemetry
+        else coldTelemetry(intervalMs)
+
+    /**
+     * The underlying cold polling loop. One `collect` == one independent
+     * sysfs-polling loop, so this is private: default-interval callers MUST go
+     * through [sharedDefaultTelemetry] (via [telemetry]) to avoid duplicate polls.
+     */
+    private fun coldTelemetry(intervalMs: Long): Flow<Telemetry> = flow {
         // Reset the load sampler's baseline on every (re)start so the
         // first sample isn't a delta against ancient state from a prior
         // collect.
@@ -176,5 +235,14 @@ class MonitorService @Inject constructor(
     companion object {
         const val DEFAULT_INTERVAL_MS = 1_000L
         const val STRESS_INTERVAL_MS = 250L // 4 Hz
+
+        /**
+         * Grace period the shared default stream keeps polling after the LAST
+         * subscriber leaves before it stops the upstream loop. A few seconds
+         * absorbs brief subscriber churn (navigating Dashboard → Tunes, a config
+         * change) without tearing down and re-priming the samplers, while still
+         * guaranteeing the loop stops when the app is genuinely backgrounded.
+         */
+        const val SHARE_STOP_TIMEOUT_MS = 5_000L
     }
 }

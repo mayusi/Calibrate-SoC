@@ -11,6 +11,175 @@ Nothing yet.
 
 ---
 
+## [0.1.32-alpha] — 2026-06-16
+
+Adversarial-audit hardening pass over the new AYANEO + fan-curve surface, plus a
+battery/security/cleanup round. Telemetry is now a single shared 1 Hz stream, the
+dangerous-path block list is expanded and component-matched, and several orphaned
+code paths were removed.
+
+### Performance
+- **Single shared telemetry stream (biggest battery win).** Every default-interval
+  subscriber (Dashboard, AutoTDP, Tunes, Advanced, the HUD assembler, throttle/boost
+  services, session recorder) now observes ONE process-shared hot flow instead of
+  each one spawning its own 1 Hz sysfs-polling loop. With several screens open this
+  collapses 4–5 duplicate loops (per-core freq, GPU, meminfo, every thermal zone,
+  battery, cooling devices) into one; the loop stops 5 s after the last subscriber
+  leaves, so a backgrounded app polls nothing. The 4 Hz benchmark variant stays a
+  cold, short-lived flow.
+- **Battery % read off the composition thread.** The Dashboard "At a glance" card
+  used to make a synchronous `registerReceiver(ACTION_BATTERY_CHANGED)` binder call
+  on the UI thread every telemetry tick. It now reads battery % in the ViewModel via
+  a sticky `BroadcastReceiver` (updates only when the level actually changes).
+
+### Security
+- **Expanded the dangerous-node block list** for custom sysfs paths: `core_pattern`
+  (a root-escalation primitive), `kptr_restrict`, `perf_event_paranoid`,
+  `dmesg_restrict`, `modules_disabled`, and the `/sys/class/power_supply/*` charge/
+  voltage family (`constant_charge_current*`, `voltage_max`, `charge_control*`,
+  `input_current_limit` — a write here could damage the battery). Matching is now
+  whole-component everywhere, so the real nodes block while neighbours like
+  `/proc/kmem_stats` and `/proc/sys/kernel/panic_on_oops` are no longer false-blocked.
+- **PServer writer validator no longer weaker than the door.** `PServerWriter`'s
+  local sysfs-path check now rejects NUL bytes (the doc always claimed this) and
+  applies the same dangerous-node block list as `TunableMetadata`, so a path that
+  bypassed the door validator can't reach the root shell.
+- **Backup/share import rejects shell-meta in `extraSysfs` values.** For an unknown
+  sysfs path the metadata validator returned no value check, so a crafted profile
+  could carry `0; reboot`. Import now rejects shell metacharacters + control chars in
+  `extraSysfs` values, mirroring the OTA validator.
+
+### Cleanup
+- Removed the unreachable `NoOpGameBoostLauncher` stub (the real `GameBoostLauncherImpl`
+  is bound) and the orphaned `SettingsKeyWriter.writeAndVerifyKernelNode` honesty path
+  (never wired into a production write) plus its dead tests.
+
+---
+
+## [0.1.31-alpha] — 2026-06-16
+
+AYANEO zero-setup live tuning + Odin custom fan curves.
+
+### Added
+- **AYANEO zero-setup vendor tuning.** Discovered (by decompiling AYANEO's own apps)
+  that binding the exported `com.ayaneo.gamewindow` AIDL service lets the privileged
+  overlay perform real sysfs writes (GPU/CPU clocks, perf mode) with **no root, no
+  Shizuku, no script** — AYANEO's PServer-equivalent. A new vendor adapter drives it,
+  verified live on the Pocket DS (GPU node moved 680→585→680 MHz).
+- **Custom fan curves** for devices that expose a controllable fan (Odin family +
+  AYANEO via the vendor service): map temperature → fan level, applied and reverted
+  honestly, gated on whether the device's fan is actually controllable.
+
+---
+
+## [0.1.30-alpha] — 2026-06-16
+
+Fix a catastrophic AutoTDP cap-collapse + sticky clocks; vendor-agnostic device access.
+
+### Fixed
+- **AutoTDP could floor the CPU to 384 MHz mid-game and stay stuck.** Root causes: a
+  GameNative Wine wrapper was unknown to the classifier (blind), a null GPU signal
+  read as "idle" → BATTERY_SAVER, and there was no hard cap floor. Then the revert ran
+  inside a cancelled coroutine, so it was skipped (reboot-only recovery). Fixed with
+  four guardrails: a hard 40 %-of-max cap floor (8th invariant), a `NonCancellable`
+  revert on every exit path, "hold" on a null signal instead of acting blind, and a
+  wrapper-aware classifier.
+- **Vendor-agnostic device access** — the Shizuku-only path is now generalised so
+  vendor-settings devices light up live tuning where the surface exists.
+
+---
+
+## [0.1.29-alpha] — 2026-06-16
+
+Smart AutoTDP — a goal-seeking governor — plus four new features. Verified on Odin 3
+and Retroid Pocket 6.
+
+### Added
+- **Smart AutoTDP governor** — a band-controller that drives toward a goal (5 modes
+  incl. AUTO) instead of a fixed cap: it nudges CPU/GPU caps to hold the target while
+  honouring hard safety invariants (cap floors, thermal debounce, null-signal hold).
+- **Game Boost** — a short, bounded performance burst on game launch (per-app), with
+  an honest revert when the game leaves the foreground.
+- **Throttle Guard** — predictive thermal forecasting that eases caps before the
+  kernel throttles, rather than after.
+- **Per-app Tunes** (formerly "Presets") — bind a saved tune to a package; applied on
+  foreground-enter, reverted on exit, with an app reaper for stuck processes.
+
+### Notes
+- Adversarial review before build caught four bad numbers; multi-device testing caught
+  a backlight-as-cooling-device false throttle and app-UID SELinux denials on uclamp /
+  GPU devfreq (now read via a PServer-root fallback).
+
+---
+
+## [0.1.26-alpha] — 2026-06-15
+
+AutoTDP now PROVES it's working.
+
+### Changed
+- **Live effect data** — AutoTDP surfaces the MEASURED cap delta, power savings, and
+  session energy (null until a completed probe backs it, never a fabricated number),
+  with a bolder, denser status UI.
+
+---
+
+## [0.1.25-alpha] — 2026-06-15
+
+AutoTDP reliability + HUD direction.
+
+### Fixed
+- **AutoTDP actually starts now** — three silent-fail causes fixed.
+
+### Changed
+- **New horizontal HUD** — denser horizontal layout; removed the manual clock stepper
+  (AutoTDP is the single clock-control surface now).
+
+---
+
+## [0.1.22-alpha] — 2026-06-15
+
+Real live tuning that actually lands, working AutoTDP.
+
+### Fixed
+- **AutoTDP was load-blind and over-eager on thermal** — `/proc/stat` was restricted,
+  so load read as zero (added a freq-proxy load floor), and a single 95 °C sample
+  thermal-killed it (now 105 °C with a 2-sample debounce). Verified live on the Odin 3
+  release build.
+- Live writes now reliably land via the PServer-LIVE root-shell path (chmod-sandwich +
+  readback verification), instead of silently no-op'ing against a read-only node.
+
+---
+
+## [0.1.19-alpha] — 2026-06-15
+
+Fix the SELinux/root prompts, Direction-C UI, new features.
+
+### Fixed
+- Reduced spurious SELinux/root prompts on the no-root path; more reliable AutoTDP
+  startup.
+
+### Changed
+- **Direction-C "Arsenal" UI** restyle across the key screens (categorical accent
+  edges, metric tiles, status pills).
+
+---
+
+## [0.1.17-alpha] — 2026-06-14
+
+The AutoTDP suite + a HUD remake — the headline feature wave.
+
+### Added
+- **AutoTDP** — an automatic thermal/power governor that caps clocks toward a target
+  with honest, MEASURED effect reporting and a full set of safety invariants.
+- **No-root live control** path (PServer-LIVE on AYN/Odin) so the HUD ± and AutoTDP can
+  write the kernel without Magisk.
+- **Real in-game FPS** capture via the SurfaceFlinger/PServer path, fed to the HUD and
+  the Smart engine.
+- **Cross-device safety** — wrapper-aware classification, null-signal honesty, and
+  per-device capability gating across the supported handhelds.
+
+---
+
 ## [0.1.16-alpha] — 2026-06-14
 
 Third audit round — focused on the never-audited new feature surface (benchmark hub, external-score logging, comparative A/B, session stats, baseline degradation) + the recent hardening. 19 confirmed-new findings (0 critical, 3 high, 7 medium, 7 low); the verifiers dropped 12 as false-positive or already-fixed. 662 unit tests green (was 629).
@@ -465,7 +634,29 @@ Initial public release: universal performance monitor, in-game floating HUD, ben
 
 ---
 
-[Unreleased]: https://github.com/mayusi/Calibrate-SoC/compare/v0.1.3-alpha...HEAD
+[Unreleased]: https://github.com/mayusi/Calibrate-SoC/compare/v0.1.32-alpha...HEAD
+[0.1.32-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.32-alpha
+[0.1.31-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.31-alpha
+[0.1.30-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.30-alpha
+[0.1.29-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.29-alpha
+[0.1.26-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.26-alpha
+[0.1.25-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.25-alpha
+[0.1.22-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.22-alpha
+[0.1.19-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.19-alpha
+[0.1.17-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.17-alpha
+[0.1.16-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.16-alpha
+[0.1.15-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.15-alpha
+[0.1.14-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.14-alpha
+[0.1.13-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.13-alpha
+[0.1.12-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.12-alpha
+[0.1.11-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.11-alpha
+[0.1.10-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.10-alpha
+[0.1.9-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.9-alpha
+[0.1.8-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.8-alpha
+[0.1.7-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.7-alpha
+[0.1.6-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.6-alpha
+[0.1.5-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.5-alpha
+[0.1.4-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.4-alpha
 [0.1.3-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.3-alpha
 [0.1.2-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.2-alpha
 [0.1.1-alpha]: https://github.com/mayusi/Calibrate-SoC/releases/tag/v0.1.1-alpha

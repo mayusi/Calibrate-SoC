@@ -251,26 +251,6 @@
         </receiver>
 
         <!--
-          DE-RISK PROBE (debug-only, removable). Lets us fire AyaneoBindProbe
-          from adb to answer one question: can a normal app bind AYANEO's
-          exported AyaAidlService and drive a GPU-max change on Pocket DS?
-
-          Disabled + un-exported here so it is INERT in release builds. The
-          debug-only manifest overlay (src/debug/AndroidManifest.xml) flips it
-          to enabled + exported for debug builds. onReceive() also hard-returns
-          unless BuildConfig.DEBUG as a second guard. Delete this block, the
-          overlay, and the debug/ package once the probe has served its purpose.
-        -->
-        <receiver
-            android:name=".debug.AyaneoProbeReceiver"
-            android:enabled="false"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="io.github.mayusi.calibratesoc.debug.PROBE_AYANEO" />
-            </intent-filter>
-        </receiver>
-
-        <!--
           Floating HUD overlay. TYPE_APPLICATION_OVERLAY foreground
           service so the panel survives the user backgrounding our
           app and switching into a game. SPECIAL_USE category — no

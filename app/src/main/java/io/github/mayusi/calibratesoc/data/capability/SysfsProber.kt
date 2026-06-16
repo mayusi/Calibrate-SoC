@@ -697,26 +697,83 @@ class SysfsProber @Inject constructor(
         )
         if (deny.any { it in t }) return false
 
-        // ── ALLOW — genuine CPU/GPU/SoC perf throttles. ──────────────────────────
-        val allow = listOf(
-            "cpu", "gpu", "cpufreq", "devfreq",
-            "hotplug", "isolate", "cpu-idle", "cluster",
-            "tsens", "thermal", "soc", "mdss", "isp", "cdsp",
+        // ── ALLOW (1): explicit KNOWN-THROTTLE prefixes — the strongest signal. ──
+        // A cooling_device whose type STARTS with one of these is unambiguously a
+        // CPU/GPU DVFS or core-isolation throttle. Prefixes avoid the broad-substring
+        // false-positive class (e.g. a "thermal-..." backlight node, or a board name
+        // that merely CONTAINS "soc"/"isp") that previously let a non-DVFS device count
+        // as "throttling now".
+        val knownPrefixes = listOf(
+            "thermal-cpufreq-", "thermal-devfreq-", "thermal-cpu-", "thermal-gpu-",
+            "cpufreq-", "devfreq-", "cpu-isolate", "cpu-isolat", "cpu-hotplug",
+            "tsens", "cdsp", "cluster",
         )
-        return allow.any { it in t }
+        if (knownPrefixes.any { t.startsWith(it) }) return true
+
+        // ── ALLOW (2): narrowed substrings for the genuine perf throttles that don't
+        // share a stable prefix across vendors. We DROP the broad bare "thermal" and "isp"
+        // substrings (which matched non-DVFS nodes — "thermal" matches nearly every cooling
+        // device, including a backlight node that slipped the deny-list; "isp" is the image
+        // signal processor, not a CPU/GPU perf throttle). We KEEP "soc" — "soc_cooling" is a
+        // real SoC-level thermal throttle observed on Odin 3 / RP6. "cpu"/"gpu" still match
+        // the per-core/per-rail throttle names every vendor uses (e.g. "cpu0-cpu-step",
+        // "gpu-step", "mdss-gpu"). ──────────────────────────────────────────────────────
+        val narrowedSubstrings = listOf(
+            "cpufreq", "devfreq", "cpu-idle", "isolate", "hotplug",
+            "cpu", "gpu", "mdss", "soc",
+        )
+        return narrowedSubstrings.any { it in t }
     }
 
     /**
      * GPU die temperature in milli-°C from the Adreno node (e.g.
      * /sys/class/kgsl/kgsl-3d0/temp), or null when no GPU root is known / the node is
-     * unreadable. App-readable on the Odin 3 (observed value 37800 = 37.8°C). Lets the
-     * engine relax the GPU before the skin sensor reacts.
+     * unreadable / the reading is implausible. App-readable on the Odin 3 (observed value
+     * 37800 = 37.8°C). Lets the engine relax the GPU before the skin sensor reacts.
+     *
+     * HIGH-3 — UNIT NORMALIZATION + SANITY BOUNDS. The kernel `temp` node has NO universal
+     * unit: most expose milli-°C (37800 = 37.8°C), but some expose deci-°C (378 = 37.8°C),
+     * whole-°C (38 = 38°C), or micro-°C (37_800_000). Without normalization a deci-°C device
+     * reads 378 → /1000 = 0°C → the engine prefers this "0°C" die over the real skin zones
+     * and the thermal pre-empt NEVER fires on a hot GPU; a micro-°C device reads 37_800_000
+     * → 37800°C → PERMANENT pre-empt. We normalize to milli-°C and reject anything still
+     * implausible (returns null → the engine falls back to skin zones, which are safe).
      *
      * @param gpuRootPath the GPU sysfs root from the [GpuProbe], or null.
+     * @return die temperature in milli-°C within the plausible band, or null.
      */
     fun readGpuDieTempMilliC(gpuRootPath: String?): Int? {
         if (gpuRootPath == null) return null
-        return readIntOrNull("$gpuRootPath/temp".toPath())
+        val raw = readIntOrNull("$gpuRootPath/temp".toPath()) ?: return null
+        return normalizeDieTempMilliC(raw)
+    }
+
+    /**
+     * Normalize a raw kernel `temp` reading to milli-°C, or null if implausible.
+     *
+     * Heuristic by magnitude (the bands don't overlap for realistic die temps ~20–130°C):
+     *  - micro-°C (|raw| > 1_000_000): ÷1000 → milli-°C.
+     *  - milli-°C (|raw| in [PLAUSIBLE_MILLI_MIN, PLAUSIBLE_MILLI_MAX]): pass through.
+     *  - whole-°C (|raw| in [DIE_PLAUSIBLE_MIN_C, DIE_PLAUSIBLE_MAX_C], i.e. ~10..200): ×1000.
+     *  - deci-°C (|raw| in [DIE_PLAUSIBLE_MIN_C*10, DIE_PLAUSIBLE_MAX_C*10], i.e. ~100..2000): ×100.
+     *
+     * After scaling, the result must land within the plausible milli-°C band or we return
+     * null (a sensor we can't trust must never win over the skin zones).
+     */
+    internal fun normalizeDieTempMilliC(raw: Int): Int? {
+        val a = kotlin.math.abs(raw.toLong())
+        val milli: Long = when {
+            a > 1_000_000L -> raw / 1000L                                  // micro-°C → milli-°C
+            a in PLAUSIBLE_MILLI_MIN..PLAUSIBLE_MILLI_MAX -> raw.toLong()  // already milli-°C
+            a in (DIE_PLAUSIBLE_MIN_C.toLong())..(DIE_PLAUSIBLE_MAX_C.toLong()) ->
+                raw * 1000L                                                // whole-°C → milli-°C
+            a in (DIE_PLAUSIBLE_MIN_C * 10L)..(DIE_PLAUSIBLE_MAX_C * 10L) ->
+                raw * 100L                                                 // deci-°C → milli-°C
+            else -> return null                                           // implausible
+        }
+        // Final guard: even after scaling, reject anything outside the plausible band so an
+        // out-of-range/zero die read can NEVER win over the skin zones in the engine.
+        return if (milli in PLAUSIBLE_MILLI_MIN..PLAUSIBLE_MILLI_MAX) milli.toInt() else null
     }
 
     // --- Bus / DDR devfreq ---------------------------------------------------
@@ -960,5 +1017,18 @@ class SysfsProber @Inject constructor(
          *  30 s is long enough to avoid per-tick I/O; short enough to catch
          *  a dock insertion within the first sample after the user plugs in. */
         private const val THERMAL_ZONE_CACHE_TTL_MS = 30_000L
+
+        // ── HIGH-3: GPU die-temp plausibility bands (see normalizeDieTempMilliC) ──────
+        // Band ~20–130 °C: a powered SoC GPU die sits above ambient; the kernel kill is
+        // ~105–110 °C. Anything outside this band (after unit normalization) is rejected
+        // so a bogus 0 °C / off-scale read can never win over the skin zones.
+        /** Lowest plausible die temperature in whole °C. Below this a "die temp" is noise. */
+        private const val DIE_PLAUSIBLE_MIN_C = 20
+        /** Highest plausible die temperature in whole °C (kernel kill is ~105–110 °C). */
+        private const val DIE_PLAUSIBLE_MAX_C = 130
+        /** Plausible band lower bound in milli-°C (DIE_PLAUSIBLE_MIN_C * 1000 = 20 000). */
+        private const val PLAUSIBLE_MILLI_MIN = DIE_PLAUSIBLE_MIN_C * 1000L
+        /** Plausible band upper bound in milli-°C (DIE_PLAUSIBLE_MAX_C * 1000 = 130 000). */
+        private const val PLAUSIBLE_MILLI_MAX = DIE_PLAUSIBLE_MAX_C * 1000L
     }
 }

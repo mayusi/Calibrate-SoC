@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.ui.settings
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -129,7 +130,14 @@ fun SettingsScreen(
 
     // Full-screen What's New overlay — shown when the user taps the
     // What's New row OR the post-update banner's "See what's new" button.
+    //
+    // M-2 fix: this overlay is a boolean flip inside Settings, NOT a real nav
+    // destination, so a system Back press would otherwise fall through to the
+    // NavHost and pop the whole Settings stack. Intercept Back here so it just
+    // closes the overlay and returns to Settings (matching the in-screen Back
+    // button's behaviour).
     if (showWhatsNewScreen) {
+        BackHandler(enabled = true) { viewModel.closeWhatsNew() }
         WhatsNewScreen(onBack = { viewModel.closeWhatsNew() })
         return
     }

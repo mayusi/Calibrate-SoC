@@ -30,6 +30,15 @@ class ThrottleGuardActuator(
     private val bigPolicyId: Int,
     /** Stock big-cluster ceiling (kHz) — written back to revert the cap. */
     private val stockCeilingKhz: Int,
+    /**
+     * HIGH-2: the big cluster's REAL available OPP steps (kHz), used to (a) snap the
+     * recommended cap DOWN to an achievable OPP so the kernel can't silently clamp it
+     * (keeping [activeCapKhz] honest) and (b) clamp it at the shared 40%-of-top-OPP hard
+     * floor (the SAME floor AutoTDP enforces on this node). Empty ⇒ no snap/floor is
+     * applied (degenerate device with no enumerable OPP table) and the raw recommendation
+     * is used, still clamped at/below the stock ceiling.
+     */
+    private val availableFreqsKhz: List<Int> = emptyList(),
 ) {
     /** The cap currently applied (kHz), or null when at stock (no guard cap). */
     var activeCapKhz: Int? = null
@@ -67,9 +76,16 @@ class ThrottleGuardActuator(
         // ── Forecast says act: apply (or update) the pre-emptive cap. ──────────────
         if (forecast.actionRequired) {
             val target = forecast.recommendedCapKhz ?: return noChange()
-            // Never cap ABOVE the stock ceiling (that's not a cap), and never the same
-            // value twice.
-            val clamped = target.coerceAtMost(stockCeilingKhz)
+            // HIGH-2: snap the recommendation to a REAL OPP at/below it and raise it to the
+            // shared 40%-of-top-OPP hard floor, so we never write a value the kernel will
+            // silently clamp (activeCapKhz stays == reality) and never cap below the floor.
+            // Then never cap ABOVE the stock ceiling (that's not a cap).
+            val snapped = if (availableFreqsKhz.isNotEmpty()) {
+                CapFloor.snapCapToOpp(target, availableFreqsKhz)
+            } else {
+                target
+            }
+            val clamped = snapped.coerceAtMost(stockCeilingKhz)
             if (clamped >= stockCeilingKhz) {
                 // Recommended cap is at/above stock — effectively no cap. Revert if needed.
                 return revertIfCapped()

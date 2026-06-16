@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -36,10 +37,17 @@ private val Context.autoTdpDataStore by preferencesDataStore(name = "autotdp_pre
  * at runtime. The most common bindings are EFFICIENCY and BALANCED.)
  *
  * ## Usage by the integration layer
- * The [ForegroundAppWatcher] (or its replacement) calls [profileForApp] when
- * the foreground app changes. The result is a [AutoTdpProfileConfig]? which
- * feeds [AutoTdpTrigger.onProfileRequested]. Unmapped apps return null →
- * the trigger is silent for that app (no change to the active AutoTDP profile).
+ * [ForegroundAppWatcher] calls the suspend [profileForApp] when the foreground
+ * app changes (it already runs on Dispatchers.IO). The result is an
+ * [AutoTdpProfileConfig]? — non-null only for an explicitly-bound package, in
+ * which case the watcher starts the AutoTDP daemon with that profile and stops
+ * it when the bound app leaves the foreground. Unmapped apps return null →
+ * the per-app efficiency map is silent for that app (no change to AutoTDP).
+ *
+ * This runs ALONGSIDE — and is subordinate to — the richer
+ * [PerAppBundle.autoTdpGoal] path: when a package has a bundle that already
+ * drives AutoTDP, the bundle wins and the efficiency-map binding is skipped for
+ * that package (see [ForegroundAppWatcher]). The two never both start the daemon.
  *
  * ## Honesty invariant
  * Only explicitly mapped apps receive a profile. Unmapped → null. No implicit
@@ -70,20 +78,16 @@ class PerAppEfficiencyMap @Inject constructor(
      * no binding exists. The returned config always has [targetMilliWatts] = null
      * (i.e. EFFICIENCY / BALANCED mode; the caller may enrich for BATTERY_TARGET).
      *
-     * This is a synchronous snapshot read intended for use from the accessibility
-     * event callback or wherever the integration layer decides the active profile.
-     * For reactive UI, collect [observeAll] instead.
+     * Reads the current binding snapshot from DataStore via [observeAll]'s first
+     * emission, then delegates to the pure [lookup]. This is a real read — NOT a
+     * stub — intended for the accessibility-event callback in [ForegroundAppWatcher],
+     * which already runs on Dispatchers.IO. Suspends until the DataStore emits its
+     * current value (effectively a one-shot read). For reactive UI, collect
+     * [observeAll] instead.
      */
-    fun profileForApp(packageName: String): AutoTdpProfileConfig? {
-        // DataStore doesn't offer a synchronous read; callers that need a
-        // point-in-time snapshot should cache the last [observeAll] emission.
-        // This method is intentionally absent a synchronous DataStore read to
-        // avoid blocking the calling thread. See integration note in kdoc.
-        //
-        // The ForegroundAppWatcher-style caller is already on Dispatchers.IO
-        // and can use the cached snapshot approach. We expose the pure map
-        // logic separately for testability.
-        return null // Stateless version — see profileForApp(pkg, snapshot) below.
+    suspend fun profileForApp(packageName: String): AutoTdpProfileConfig? {
+        val snapshot = observeAll().first()
+        return lookup(packageName, snapshot)
     }
 
     /**

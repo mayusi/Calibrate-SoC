@@ -108,6 +108,7 @@ import io.github.mayusi.calibratesoc.ui.theme.Spacing
 @Composable
 fun AdvancedTuningScreen(
     onBack: () -> Unit,
+    onOpenFanCurve: () -> Unit = {},
     viewModel: AdvancedTuningViewModel = hiltViewModel(),
 ) {
     val report by viewModel.capability.collectAsStateWithLifecycle()
@@ -186,7 +187,7 @@ fun AdvancedTuningScreen(
         fanCurveModel?.let { fan ->
             if (fan.isActive) {
                 item {
-                    FanCurvePanel(fanCurveModel = fan)
+                    FanCurvePanel(fanCurveModel = fan, onOpenFanCurve = onOpenFanCurve)
                 }
             }
         }
@@ -609,11 +610,14 @@ private fun ThermalGuardPanel(
 // =============================================================================
 
 @Composable
-private fun FanCurvePanel(fanCurveModel: FanCurveModel) {
+private fun FanCurvePanel(fanCurveModel: FanCurveModel, onOpenFanCurve: () -> Unit) {
     ArsenalPanel(accent = AccentBar.Blue, title = "Fan curve") {
         val probe = fanCurveModel.fanProbe!!
+        // HONEST copy (FIX 3): the real, editable Fan Curve editor already ships as
+        // its own Tune tab. This panel is a read-only summary that links to it — it
+        // no longer promises a "coming soon" editor for a feature that exists today.
         Text(
-            "Device has a controllable fan (${probe.source.name}). Default curve shown — curve editor coming in a future update. Current RPM: ${probe.currentRpm?.let { "$it RPM" } ?: "unknown"}.",
+            "Device has a controllable fan (${probe.source.name}). Current RPM: ${probe.currentRpm?.let { "$it RPM" } ?: "unknown"}. Preview of the active default curve below.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF999999),
         )
@@ -632,9 +636,16 @@ private fun FanCurvePanel(fanCurveModel: FanCurveModel) {
             )
             if (i < fanCurveModel.points.size - 1) Spacer(Modifier.height(Spacing.dense))
         }
+        Spacer(Modifier.height(Spacing.group))
+        ArsenalButton(
+            label = "Edit fan curve",
+            onClick = onOpenFanCurve,
+            accent = AccentBar.Blue,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(Modifier.height(Spacing.dense))
         Text(
-            "Fan control path: ${probe.controlPath}. Source: ${probe.source.name}. Curve editor will be exposed once the write path is verified on this device.",
+            "Fan control path: ${probe.controlPath}. Source: ${probe.source.name}. The editor opens the Fan Curve tab, where the curve is applied through the verified write path.",
             style = MaterialTheme.typography.labelSmall,
             color = Color(0xFF777777),
         )

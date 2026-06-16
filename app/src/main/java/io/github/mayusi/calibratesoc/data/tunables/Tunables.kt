@@ -117,9 +117,8 @@ object Tunables {
             // write does NOT guarantee a kernel effect. On vendors that subscribe to
             // the key (AYN/Retroid fan_mode/performance_mode) it drives the kernel;
             // on vendors that drive fan/perf via a private binder (e.g. AYANEO) the
-            // key write is INERT. Callers that need a live KERNEL effect must verify
-            // via SettingsKeyWriter.writeAndVerifyKernelNode, NOT assume liveness from
-            // a null here. The live cpufreq path is decided entirely by
+            // key write is INERT. So callers must NOT assume liveness from a null
+            // here. The live cpufreq path is decided entirely by
             // WriterRegistry.isLiveWritable on the SYSFS node, which never routes a
             // vendor key to a live cpufreq writer.
             return null // no write-denial: the Settings row itself is reachable

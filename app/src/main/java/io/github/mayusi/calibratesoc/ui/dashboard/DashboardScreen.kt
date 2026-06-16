@@ -1,8 +1,5 @@
 package io.github.mayusi.calibratesoc.ui.dashboard
 
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -84,6 +81,9 @@ fun DashboardScreen(
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
     val recordingElapsed by viewModel.recordingElapsedSeconds.collectAsStateWithLifecycle()
     val autoTdpState by viewModel.autoTdpState.collectAsStateWithLifecycle()
+    // PERF-2: battery % is read in the ViewModel via a sticky receiver, NOT via a
+    // per-tick registerReceiver binder call on the composition thread.
+    val batteryPct by viewModel.batteryPct.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -123,7 +123,7 @@ fun DashboardScreen(
         }
         val current = latest!!
 
-        item { AtAGlanceCard(current) }
+        item { AtAGlanceCard(current, batteryPct) }
         item { PerCoreFreqCard(current) }
         item { CpuLoadCard(history) }
         item { GpuCard(history, current) }
@@ -442,7 +442,7 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
  *   CPU peak → Blue, GPU MHz → Purple, Power → Amber, Temp → Amber, Battery % → Emerald
  */
 @Composable
-private fun AtAGlanceCard(t: Telemetry) {
+private fun AtAGlanceCard(t: Telemetry, battPct: Int?) {
     val peakTempC = t.zoneTempsMilliC
         .filter { it.tempMilliC in 1_000..150_000 }
         .maxOfOrNull { it.tempMilliC / 1000.0 }
@@ -451,14 +451,8 @@ private fun AtAGlanceCard(t: Telemetry) {
     val gpuLoad = t.gpuLoadPct
     val gpuMhz = t.gpuFreqHz?.let { it / 1_000_000L }
 
-    val context = LocalContext.current
-    val battPct = remember(t.timestampMs) {
-        runCatching {
-            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                ?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-                ?.takeIf { it >= 0 }
-        }.getOrNull()
-    }
+    // PERF-2: battPct is supplied by the ViewModel (sticky receiver), so there is
+    // no binder call on the composition thread here anymore.
 
     val tempAccent = peakTempC?.let { glanceTempAccent(it) } ?: AccentBar.Amber
 

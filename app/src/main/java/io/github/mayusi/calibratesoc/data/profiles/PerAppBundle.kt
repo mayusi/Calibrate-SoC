@@ -89,9 +89,7 @@ data class PerAppBundle(
      * False / null = do not boost.
      *
      * HONESTY: this flag calls the [GameBoostLauncher] interface defined in this
-     * file. If Wave 3a's GameBoostService is not yet available, the
-     * [NoOpGameBoostLauncher] is injected and logs a clear TODO message so the
-     * integrator can wire the real implementation.
+     * file, bound to [GameBoostLauncherImpl] (→ Wave 3a's GameBoostService).
      */
     val gameBoostOnLaunch: Boolean = false,
 )
@@ -99,17 +97,10 @@ data class PerAppBundle(
 /**
  * Minimal interface the [ForegroundAppWatcher] calls to start/stop Game Boost.
  *
- * Wave 3a owns the concrete implementation (GameBoostService entry point).
- * Until that exists this is a no-op stub so Wave 3b compiles and the per-app
- * bundle path works end-to-end for all the other fields.
- *
- * CONTRACT for Wave 3a's integrator:
- *   - Implement this interface, annotate with @Singleton.
- *   - Bind it in a Hilt @Module: `@Binds abstract fun bindGameBoostLauncher(...)`
- *   - The Wave 3b code calls [startBoost] when a bundle with [PerAppBundle.gameBoostOnLaunch]
- *     is true fires; calls [stopBoost] when the game leaves the foreground.
- *   - If the real implementation is not yet ready, leave [NoOpGameBoostLauncher]
- *     bound — a log line "GameBoostLauncher: no-op" is emitted so CI is honest.
+ * Bound to [GameBoostLauncherImpl] (which delegates to Wave 3a's GameBoostService)
+ * in [ProfilesModule]. The Wave 3b code calls [startBoost] when a bundle with
+ * [PerAppBundle.gameBoostOnLaunch] is true fires, and [stopBoost] when the game
+ * leaves the foreground.
  */
 interface GameBoostLauncher {
     /**
@@ -123,22 +114,4 @@ interface GameBoostLauncher {
      * leaves the foreground.
      */
     suspend fun stopBoost(packageName: String)
-}
-
-/** No-op stub injected until Wave 3a wires the real GameBoostService. */
-class NoOpGameBoostLauncher : GameBoostLauncher {
-    override suspend fun startBoost(packageName: String) {
-        android.util.Log.d(
-            "GameBoostLauncher",
-            "startBoost($packageName): no-op — Wave 3a GameBoostService not yet wired. " +
-                "Bind a real GameBoostLauncher implementation to activate.",
-        )
-    }
-
-    override suspend fun stopBoost(packageName: String) {
-        android.util.Log.d(
-            "GameBoostLauncher",
-            "stopBoost($packageName): no-op — Wave 3a GameBoostService not yet wired.",
-        )
-    }
 }

@@ -348,4 +348,73 @@ class AutoTdpViewModelLogicTest {
             AutoTdpRung.LIVE, AutoTdpRung.SCRIPT, AutoTdpRung.ADVISORY,
         )
     }
+
+    // ─── remainingMahFromChargeCounter (FIX 2: real mAh + honest fallback) ─────
+    //
+    // The battery-target preview used to feed a hardcoded 3000 mAh placeholder into
+    // BatteryTarget.capForTarget, so the REQUIRED CAP was wrong on every device. The
+    // ViewModel now converts the real charge-counter reading; these tests pin the
+    // conversion + the honest-unavailable contract.
+
+    @Test
+    fun `remainingMahFromChargeCounter converts uAh to mAh`() {
+        // An Odin-class 5000 mAh reading (5_000_000 µAh) → 5000 mAh, NOT the old 3000.
+        val mah = AutoTdpViewModel.remainingMahFromChargeCounter(5_000_000L)
+        assertThat(mah).isEqualTo(5000)
+        assertThat(mah).isNotEqualTo(3000) // the old fabricated constant
+    }
+
+    @Test
+    fun `remainingMahFromChargeCounter returns null when reading is unavailable`() {
+        // null = device exposes no charge counter → caller shows "estimate unavailable"
+        // instead of a number backed by a fake constant.
+        assertThat(AutoTdpViewModel.remainingMahFromChargeCounter(null)).isNull()
+    }
+
+    @Test
+    fun `remainingMahFromChargeCounter treats non-positive reading as unavailable`() {
+        assertThat(AutoTdpViewModel.remainingMahFromChargeCounter(0L)).isNull()
+        assertThat(AutoTdpViewModel.remainingMahFromChargeCounter(-1L)).isNull()
+    }
+
+    @Test
+    fun `remainingMahFromChargeCounter floors a tiny reading to at least 1 mAh`() {
+        // 500 µAh = 0.5 mAh → floored to 1 so the energy math can't go zero/negative.
+        assertThat(AutoTdpViewModel.remainingMahFromChargeCounter(500L)).isEqualTo(1)
+    }
+
+    @Test
+    fun `real-mAh path yields a different required cap than the old 3000 constant`() {
+        // End-to-end proof the fix matters: same draw/voltage/target, but the REAL
+        // 5000 mAh capacity (from the charge counter) maps to a HIGHER allowable cap
+        // than the old hardcoded 3000 mAh would have — i.e. the old constant
+        // systematically under-capped on a larger battery.
+        val caps = io.github.mayusi.calibratesoc.data.autotdp.TdpCaps(
+            primeCoreIndices = listOf(7),
+            bigPolicyId = 4,
+            bigClusterOppStepsKhz = listOf(
+                499_000, 844_000, 1_171_000, 1_536_000,
+                1_920_000, 2_323_000, 2_707_000, 2_803_000,
+            ),
+            gpuMinLevel = 0,
+            gpuMaxLevel = 6,
+            minOnlineCores = 4,
+            totalOnlineCores = 8,
+        )
+        val realMah = AutoTdpViewModel.remainingMahFromChargeCounter(5_000_000L)!!
+        val withReal = io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget.capForTarget(
+            targetHours = 4.0, remainingCapacityMah = realMah,
+            batteryVoltageMv = 4000, currentDrawMw = 5_000L, caps = caps,
+        )
+        val withOldConstant = io.github.mayusi.calibratesoc.data.autotdp.BatteryTarget.capForTarget(
+            targetHours = 4.0, remainingCapacityMah = 3000,
+            batteryVoltageMv = 4000, currentDrawMw = 5_000L, caps = caps,
+        )
+        // More remaining energy → a higher (or equal) sustainable cap; never lower.
+        val realCap = withReal.mappedCapKhz ?: 0
+        val oldCap = withOldConstant.mappedCapKhz ?: 0
+        assertThat(realCap).isAtLeast(oldCap)
+        // And the real budget is strictly larger (5000 mAh vs 3000 mAh at same V/hours).
+        assertThat(withReal.budgetW).isGreaterThan(withOldConstant.budgetW)
+    }
 }

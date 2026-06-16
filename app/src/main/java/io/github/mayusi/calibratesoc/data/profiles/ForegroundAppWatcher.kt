@@ -6,6 +6,7 @@ import android.view.accessibility.AccessibilityEvent
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
+import io.github.mayusi.calibratesoc.data.autotdp.PerAppEfficiencyMap
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
 import io.github.mayusi.calibratesoc.data.devicedb.FanAdapterKind
@@ -76,6 +77,7 @@ class ForegroundAppWatcher : AccessibilityService() {
     @Inject lateinit var deviceAdapterRegistry: DeviceAdapterRegistry
     @Inject lateinit var gameBoostLauncher: GameBoostLauncher
     @Inject lateinit var appReaper: AppReaper
+    @Inject lateinit var perAppEfficiencyMap: PerAppEfficiencyMap
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundPackage: String? = null
@@ -90,6 +92,13 @@ class ForegroundAppWatcher : AccessibilityService() {
     @Volatile private var activeBundle: PerAppBundle? = null
     @Volatile private var fanModeBeforeBundle: String? = null
     @Volatile private var activeFanModeKey: String? = null
+
+    // Track an AutoTDP daemon started by the PER-APP EFFICIENCY MAP (the separate,
+    // simpler package→AutoTdpProfile binding edited from the AutoTDP screen). Non-null
+    // = we started AutoTDP for this package via that map and must stop it when the app
+    // leaves the foreground. This is distinct from the bundle's autoTdpGoal path; the
+    // two never both start the daemon (bundle wins — see scheduleApply).
+    @Volatile private var efficiencyProfilePackage: String? = null
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -130,10 +139,23 @@ class ForegroundAppWatcher : AccessibilityService() {
                 revertBundle(prevPkg, prevBundle)
             }
 
+            // ── Revert a previous PER-APP EFFICIENCY-MAP AutoTDP start (if the app
+            //    we left had one and it is no longer foreground). This is the
+            //    separate package→AutoTdpProfile binding edited from the AutoTDP
+            //    screen; it is honoured here so it is no longer a dead toggle. ────
+            val prevEffPkg = efficiencyProfilePackage
+            if (prevEffPkg != null && prevEffPkg != pkg) {
+                Log.i(TAG, "scheduleApply($pkg): stopping per-app-efficiency AutoTDP for $prevEffPkg")
+                autoTdpController.stop()
+                efficiencyProfilePackage = null
+            }
+
             if (bundle == null) {
-                // No mapping for this package — clear active bundle tracking.
+                // No bundle for this package — clear active bundle tracking, then
+                // still consult the per-app efficiency map (the independent binding).
                 activeBundlePackage = null
                 activeBundle = null
+                applyPerAppEfficiencyProfile(pkg, bundleDroveAutoTdp = false)
                 return@launch
             }
 
@@ -210,7 +232,31 @@ class ForegroundAppWatcher : AccessibilityService() {
             // Record the active bundle so revertBundle knows what to undo on exit.
             activeBundlePackage = pkg
             activeBundle = bundle
+
+            // ── 7. Per-app efficiency map (independent binding) ─────────────────────
+            // Only when the bundle did NOT already drive AutoTDP — the bundle's
+            // autoTdpGoal is the richer system and wins. This keeps a single daemon.
+            applyPerAppEfficiencyProfile(pkg, bundleDroveAutoTdp = bundle.autoTdpGoal != null)
         }
+    }
+
+    /**
+     * Consult the [PerAppEfficiencyMap] for [pkg] and, if a profile is bound,
+     * start the AutoTDP daemon with it — making the AutoTDP-screen per-app binding
+     * actually take effect at runtime (it was previously a dead toggle).
+     *
+     * Skipped entirely when [bundleDroveAutoTdp] is true: the bundle's autoTdpGoal
+     * already started the daemon and is the authority. We never start two daemons.
+     *
+     * Records [efficiencyProfilePackage] so the next foreground change can stop the
+     * daemon when this app leaves (handled at the top of [scheduleApply]).
+     */
+    private suspend fun applyPerAppEfficiencyProfile(pkg: String, bundleDroveAutoTdp: Boolean) {
+        if (bundleDroveAutoTdp) return
+        val config = perAppEfficiencyMap.profileForApp(pkg) ?: return
+        Log.i(TAG, "scheduleApply($pkg): starting per-app-efficiency AutoTDP profile=${config.profile}")
+        autoTdpController.start(config)
+        efficiencyProfilePackage = pkg
     }
 
     /**

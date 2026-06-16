@@ -77,7 +77,13 @@ fun TuneHubScreen(
                     onOpenAdvancedTuning = { selectedTab = 1 },
                     onOpenAutoTdp = { selectedTab = 2 },
                 )
-                1 -> AdvancedTuningScreen(onBack = { selectedTab = 0 })
+                1 -> AdvancedTuningScreen(
+                    onBack = { selectedTab = 0 },
+                    // Route the Advanced "Fan curve" panel to the real Fan Curve editor
+                    // (tab 3) instead of showing a "coming soon" promise for a feature
+                    // that already ships.
+                    onOpenFanCurve = { selectedTab = 3 },
+                )
                 2 -> AutoTdpScreen(onBack = { selectedTab = 0 })
                 3 -> FanCurveScreen(onBack = { selectedTab = 0 })
                 4 -> ProfilesScreen()

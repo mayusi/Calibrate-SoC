@@ -24,11 +24,16 @@ import io.github.mayusi.calibratesoc.data.capability.FanSource
  *    present AND the app holds WRITE_SECURE_SETTINGS (VENDOR_SETTINGS tier).
  *    Full PWM curve is not available here — only presets — but we still model
  *    a duty→preset mapping so the service can pick the nearest preset.
- *  - [FanSource.VENDOR_SERVICE_INTENT] — AYANEO AYASpace binder.
- *    Similar to vendor-key: discrete levels, not raw PWM.
+ *  - [FanSource.VENDOR_SERVICE_INTENT] — AYANEO AYASpace binder. NOT treated as
+ *    controllable by THIS model: no FanProbe-driven consumer writes via a generic
+ *    service-intent source (every fan write path in the app filters on the
+ *    Settings.System key). The AYANEO binder fan editor that ships lives in
+ *    data/fancurve and gates on [CapabilityReport.ayaneoBinderLive], not on this
+ *    enum value, so it does not make this source controllable here.
  *
- * [FanSource.THERMAL_COOLING_DEVICE] and [FanSource.NONE] are NOT treated as
- * controllable by this model.  Thermal cooling devices expose only integer
+ * [FanSource.VENDOR_SERVICE_INTENT], [FanSource.THERMAL_COOLING_DEVICE] and
+ * [FanSource.NONE] are NOT treated as controllable by this model. Thermal cooling
+ * devices expose only integer
  * "levels" (0 = off, N = max); the kernel drives them automatically via the
  * thermal framework.  We do NOT override kernel thermal decisions — that would
  * risk hardware damage.
@@ -186,19 +191,30 @@ data class FanCurveModel(
 }
 
 /**
- * Whether this [FanSource] is something our model can drive.
+ * Whether this [FanSource] is something the app can ACTUALLY drive today.
  *
- * HWMON_PWM → full duty control (0–255 mapped to 0–100 %).
- * VENDOR_SETTINGS_KEY / VENDOR_SERVICE_INTENT → discrete presets; we map
- *   duty% to the closest preset in the service layer.
+ * HWMON_PWM → full duty control (0–255 mapped to 0–100 %), via the unlocked-sysfs
+ *   / root tier.
+ * VENDOR_SETTINGS_KEY → AYN / Retroid "fan_mode" Settings.System preset path. This
+ *   is the one vendor path every fan consumer in the app actually writes
+ *   (AutoTdpService / GameBoostService / ForegroundAppWatcher all gate on
+ *   FanAdapterKind.SETTINGS_KEY).
+ *
+ * VENDOR_SERVICE_INTENT → HONESTY FIX: returns FALSE. No consumer in the app drives
+ *   a fan via a generic VENDOR_SERVICE_INTENT source — every fan write path filters
+ *   on SETTINGS_KEY. (The AYANEO binder fan editor that DOES ship lives in
+ *   data/fancurve and gates on CapabilityReport.ayaneoBinderLive, NOT on this enum
+ *   value, so it does not make this source controllable here.) Advertising control
+ *   for VENDOR_SERVICE_INTENT would over-claim a capability the model cannot deliver,
+ *   so we report it as not-controllable until a real FanProbe-driven driver exists.
  *
  * THERMAL_COOLING_DEVICE → kernel-driven; we do NOT touch it.
  * NONE → no fan hardware.
  */
 fun FanSource.isControllable(): Boolean = when (this) {
     FanSource.HWMON_PWM,
-    FanSource.VENDOR_SETTINGS_KEY,
-    FanSource.VENDOR_SERVICE_INTENT -> true
+    FanSource.VENDOR_SETTINGS_KEY -> true
+    FanSource.VENDOR_SERVICE_INTENT,
     FanSource.THERMAL_COOLING_DEVICE,
     FanSource.NONE -> false
 }

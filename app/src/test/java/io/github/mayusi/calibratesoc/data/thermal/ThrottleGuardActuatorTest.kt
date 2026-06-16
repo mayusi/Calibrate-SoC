@@ -130,4 +130,45 @@ class ThrottleGuardActuatorTest {
         assertThat(r.write!!.value).isEqualTo("1920000")
         assertThat(a.activeCapKhz).isEqualTo(1_920_000)
     }
+
+    // ─── HIGH-2: OPP-snap + 40% hard floor ───────────────────────────────────────
+
+    // A real OPP table whose top is the stockCeiling; 40% of 2_803_000 = 1_121_200,
+    // so the hard floor snaps to 1_420_800 (first OPP >= 40%).
+    private val opps = listOf(
+        307_200, 614_400, 1_017_600, 1_420_800, 1_804_800,
+        2_208_000, 2_400_000, stockCeiling,
+    )
+
+    private fun actWithOpps() = ThrottleGuardActuator(bigPolicyId, stockCeiling, opps)
+
+    @Test
+    fun `snaps a between-OPP recommendation down to a real OPP`() {
+        val a = actWithOpps()
+        // 2_300_000 lands between 2_208_000 and 2_400_000 → snap DOWN to 2_208_000 so the
+        // kernel won't silently clamp and activeCapKhz stays == reality.
+        val r = a.decide(forecastAct(2_300_000), suppressed = false)
+        assertThat(r.write).isNotNull()
+        assertThat(r.write!!.value).isEqualTo("2208000")
+        assertThat(a.activeCapKhz).isEqualTo(2_208_000)
+    }
+
+    @Test
+    fun `never caps below the 40 percent hard floor`() {
+        val a = actWithOpps()
+        // A forecast recommending a collapse to ~384 MHz (the DEFECT-A class) must be raised
+        // to the shared 40%-of-top-OPP hard floor (1_420_800), never written through.
+        val r = a.decide(forecastAct(384_000), suppressed = false)
+        assertThat(r.write).isNotNull()
+        assertThat(r.write!!.value).isEqualTo("1420800")
+        assertThat(a.activeCapKhz).isEqualTo(1_420_800)
+    }
+
+    @Test
+    fun `snapped cap is always a real OPP step`() {
+        val a = actWithOpps()
+        val r = a.decide(forecastAct(1_950_000), suppressed = false)
+        val written = r.write!!.value.toInt()
+        assertThat(opps).contains(written)
+    }
 }

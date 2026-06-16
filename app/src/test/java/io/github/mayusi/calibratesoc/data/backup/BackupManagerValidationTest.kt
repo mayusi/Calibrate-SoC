@@ -195,6 +195,53 @@ class BackupManagerValidationTest {
         assertThat(err).contains("extraSysfs")
     }
 
+    // ── SEC-3: extraSysfs VALUE shell-meta rejection (mirror the OTA path) ─────
+    //
+    // For an UNKNOWN path, TunableMetadata.forId returns RAW_STRING whose
+    // validate() returns null — NO value check. Before SEC-3 a crafted backup
+    // could smuggle "0; reboot" into a value. validateProfile now rejects shell
+    // metacharacters + control chars in the value, exactly like the OTA
+    // RemoteContentValidator.validatePreset path.
+
+    @Test
+    fun `extraSysfs value with shell metacharacter on unknown path is rejected`() {
+        // The path is a valid, UNKNOWN sysfs node (RAW_STRING metadata → no value
+        // kind constraint), so only the new SHELL_META check can catch this.
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/devices/platform/vendor_knob/level" to "0; reboot")),
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("extraSysfs")
+        assertThat(err).contains("disallowed characters")
+    }
+
+    @Test
+    fun `extraSysfs value with backtick on unknown path is rejected`() {
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/devices/platform/vendor_knob/level" to "1`id`")),
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("disallowed characters")
+    }
+
+    @Test
+    fun `extraSysfs value with control char on unknown path is rejected`() {
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/devices/platform/vendor_knob/level" to "1\u0007")),
+        )
+        assertThat(err).isNotNull()
+        assertThat(err).contains("disallowed characters")
+    }
+
+    @Test
+    fun `extraSysfs plain numeric value on unknown path still passes`() {
+        // A clean value on an unknown path must NOT be rejected by the new check.
+        val err = manager.validateProfile(
+            profile(extraSysfs = mapOf("/sys/devices/platform/vendor_knob/level" to "42")),
+        )
+        assertThat(err).isNull()
+    }
+
     // ── Schema version constant ──────────────────────────────────────────────
 
     @Test
