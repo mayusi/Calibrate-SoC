@@ -112,7 +112,17 @@ object Tunables {
         shizukuProbedWritable: Boolean? = null,
     ): String? {
         if (id.kind == TunableKind.SETTINGS_SYSTEM || id.kind == TunableKind.VENDOR_INTENT) {
-            return null // always reachable
+            // The Settings ROW is always writable (given WRITE_SECURE_SETTINGS) — so
+            // there is no DENIAL to report here. HONESTY CAVEAT: a successful key
+            // write does NOT guarantee a kernel effect. On vendors that subscribe to
+            // the key (AYN/Retroid fan_mode/performance_mode) it drives the kernel;
+            // on vendors that drive fan/perf via a private binder (e.g. AYANEO) the
+            // key write is INERT. Callers that need a live KERNEL effect must verify
+            // via SettingsKeyWriter.writeAndVerifyKernelNode, NOT assume liveness from
+            // a null here. The live cpufreq path is decided entirely by
+            // WriterRegistry.isLiveWritable on the SYSFS node, which never routes a
+            // vendor key to a live cpufreq writer.
+            return null // no write-denial: the Settings row itself is reachable
         }
         // TunableKind.SYSFS path:
         if (report.sysfsDirectlyWritable && isUnlockCoveredNode(id.target)) {
@@ -121,7 +131,7 @@ object Tunables {
         }
         return when (report.privilege) {
             io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT -> null
-            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.AYN_SETTINGS ->
+            io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.VENDOR_SETTINGS ->
                 "Direct sysfs writes need root. Use Generate script and run it via your device's Settings > Run script as Root."
             io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.SHIZUKU ->
                 when (shizukuProbedWritable) {

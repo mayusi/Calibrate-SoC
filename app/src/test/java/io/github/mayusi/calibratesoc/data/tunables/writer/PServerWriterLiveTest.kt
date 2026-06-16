@@ -53,7 +53,7 @@ class PServerWriterLiveTest {
                 knownHandheldKey = "ayn_odin3",
             ),
             soc = SoCIdentity("QTI", "CQ8725S", GpuFamily.ADRENO),
-            privilege = PrivilegeTier.AYN_SETTINGS,
+            privilege = PrivilegeTier.VENDOR_SETTINGS,
             rootKind = RootKind.NONE,
             shizuku = ShizukuStatus(false, false, false, null),
             cpuPolicies = emptyList(),

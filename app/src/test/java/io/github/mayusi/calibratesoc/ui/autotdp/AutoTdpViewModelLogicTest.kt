@@ -96,155 +96,188 @@ class AutoTdpViewModelLogicTest {
         liveUnavailableReason = "sysfs not writable",
     )
 
-    // ─── resolveRung: ADVISORY ─────────────────────────────────────────────────
+    // ─── resolveRung ──────────────────────────────────────────────────────────
+    //
+    // resolveRung is now a pure function of (report, state, primeFreqLiveWritable).
+    // The mapping from tier/flags → primeFreqLiveWritable is delegated to
+    // WriterRegistry.isLiveWritable (the single source of truth) and is exercised
+    // by ShizukuWriterRegistryTest / TierResolutionOrderTest / PServerWriterLiveTest.
+    // The end-to-end "Shizuku-only reaches LIVE" path is proven in
+    // TierResolutionOrderTest.`Shizuku-only device reaches LIVE rung end-to-end`.
+    // Here we test the rung-decision logic itself given that boolean.
 
     @Test
     fun `resolveRung returns ADVISORY when report is null`() {
-        val rung = AutoTdpViewModel.resolveRung(null, idleState)
+        val rung = AutoTdpViewModel.resolveRung(null, idleState, primeFreqLiveWritable = false)
         assertThat(rung).isEqualTo(AutoTdpRung.ADVISORY)
     }
 
     @Test
-    fun `resolveRung returns SCRIPT for NONE privilege without sysfs writable`() {
-        val report = makeReport(privilege = PrivilegeTier.NONE, sysfsDirectlyWritable = false)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
+    fun `resolveRung returns SCRIPT when prime freq not live-writable`() {
+        val report = makeReport(privilege = PrivilegeTier.NONE)
+        val rung = AutoTdpViewModel.resolveRung(report, idleState, primeFreqLiveWritable = false)
         assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
     @Test
-    fun `resolveRung returns SCRIPT for AYN_SETTINGS without sysfs writable`() {
-        val report = makeReport(privilege = PrivilegeTier.AYN_SETTINGS, sysfsDirectlyWritable = false)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
+    fun `resolveRung returns SCRIPT for VENDOR_SETTINGS when prime freq not live-writable`() {
+        // VENDOR_SETTINGS alone is the vendor-preset surface, NOT a live cpufreq
+        // path — so the prime cap is NOT live-writable and we route to SCRIPT.
+        val report = makeReport(privilege = PrivilegeTier.VENDOR_SETTINGS)
+        val rung = AutoTdpViewModel.resolveRung(report, idleState, primeFreqLiveWritable = false)
         assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
     @Test
-    fun `resolveRung returns SCRIPT for SHIZUKU without sysfs writable`() {
-        val report = makeReport(privilege = PrivilegeTier.SHIZUKU, sysfsDirectlyWritable = false)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
+    fun `resolveRung returns SCRIPT for SHIZUKU when node probe denied`() {
+        // Shizuku connected but the per-node write-probe failed (vendor SELinux
+        // denial) → prime freq not live-writable → SCRIPT.
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU)
+        val rung = AutoTdpViewModel.resolveRung(report, idleState, primeFreqLiveWritable = false)
         assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
-    // ─── resolveRung: LIVE ────────────────────────────────────────────────────
+    // ─── resolveRung: LIVE when prime freq is live-writable ───────────────────
 
     @Test
-    fun `resolveRung returns LIVE for ROOT privilege`() {
-        val report = makeReport(privilege = PrivilegeTier.ROOT, sysfsDirectlyWritable = false)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
+    fun `resolveRung returns LIVE when prime freq is live-writable`() {
+        // Vendor-agnostic: this is true for ROOT, unlock-chmod, PServer, OR a
+        // Shizuku-only device whose per-node probe confirmed the write.
+        val report = makeReport(privilege = PrivilegeTier.NONE)
+        val rung = AutoTdpViewModel.resolveRung(report, idleState, primeFreqLiveWritable = true)
         assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
     }
 
     @Test
-    fun `resolveRung returns LIVE when sysfsDirectlyWritable is true regardless of privilege`() {
-        val report = makeReport(privilege = PrivilegeTier.NONE, sysfsDirectlyWritable = true)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
+    fun `resolveRung returns LIVE for SHIZUKU-only device with probe-confirmed prime freq`() {
+        // THE KEY GENERALIZATION: a no-root, no-PServer device reaches LIVE when
+        // the Shizuku shell write-probe confirmed scaling_max_freq is writable.
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU)
+        val rung = AutoTdpViewModel.resolveRung(report, idleState, primeFreqLiveWritable = true)
         assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
     }
 
     @Test
-    fun `resolveRung returns LIVE for ROOT + running state`() {
+    fun `resolveRung returns LIVE when prime freq live-writable + running state`() {
         val report = makeReport(privilege = PrivilegeTier.ROOT)
-        val rung = AutoTdpViewModel.resolveRung(report, runningState)
+        val rung = AutoTdpViewModel.resolveRung(report, runningState, primeFreqLiveWritable = true)
         assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
     }
 
     // ─── resolveRung: LIVE_UNAVAILABLE override ───────────────────────────────
 
     @Test
-    fun `resolveRung returns SCRIPT when daemon reports LIVE_UNAVAILABLE even for ROOT`() {
+    fun `resolveRung returns SCRIPT when daemon reports LIVE_UNAVAILABLE even if prime freq writable`() {
         // The daemon is the authoritative arbiter — if it says writes failed,
-        // we route to SCRIPT even though the probe said ROOT.
+        // we route to SCRIPT even though the probe said the node was writable.
         val report = makeReport(privilege = PrivilegeTier.ROOT)
-        val rung = AutoTdpViewModel.resolveRung(report, liveUnavailableState)
+        val rung = AutoTdpViewModel.resolveRung(report, liveUnavailableState, primeFreqLiveWritable = true)
         assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
-    @Test
-    fun `resolveRung returns SCRIPT when daemon reports LIVE_UNAVAILABLE for sysfsDirectlyWritable`() {
-        val report = makeReport(privilege = PrivilegeTier.NONE, sysfsDirectlyWritable = true)
-        val rung = AutoTdpViewModel.resolveRung(report, liveUnavailableState)
-        assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
-    }
-
-    // ─── resolveRung: pserverSysfsLive → LIVE ────────────────────────────────
-
-    @Test
-    fun `resolveRung returns LIVE when pserverSysfsLive is true regardless of privilege`() {
-        // PServer live path is verified: transact() confirmed working for our UID.
-        val report = makeReport(privilege = PrivilegeTier.NONE, pserverSysfsLive = true)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
-        assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
-    }
-
-    @Test
-    fun `resolveRung returns LIVE when pserverSysfsLive is true on AYN_SETTINGS tier`() {
-        val report = makeReport(privilege = PrivilegeTier.AYN_SETTINGS, pserverSysfsLive = true)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
-        assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
-    }
-
-    @Test
-    fun `resolveRung returns SCRIPT when pserverSysfsLive is false and no other live path`() {
-        // PServer binder may exist on the device but whitelist step not yet run.
-        val report = makeReport(privilege = PrivilegeTier.NONE, pserverSysfsLive = false, aynGameAssistant = true)
-        val rung = AutoTdpViewModel.resolveRung(report, idleState)
-        assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
-    }
-
-    @Test
-    fun `resolveRung honours LIVE_UNAVAILABLE even when pserverSysfsLive is true`() {
-        // The daemon is authoritative: if it reports LIVE_UNAVAILABLE, we drop to SCRIPT.
-        val report = makeReport(privilege = PrivilegeTier.NONE, pserverSysfsLive = true)
-        val rung = AutoTdpViewModel.resolveRung(report, liveUnavailableState)
-        assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
-    }
-
-    // ─── shouldShowPServerUnlockCta ──────────────────────────────────────────
+    // ─── shouldShowPServerUnlockCta (now consistent with the live check) ──────
 
     @Test
     fun `shouldShowPServerUnlockCta returns false when report is null`() {
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(null)).isFalse()
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(null, primeFreqLiveWritable = false)).isFalse()
     }
 
     @Test
     fun `shouldShowPServerUnlockCta returns true for AYN device not yet whitelisted`() {
         // AYN device with game assistant, no live path yet.
         val report = makeReport(aynGameAssistant = true, pserverSysfsLive = false)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isTrue()
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = false)).isTrue()
     }
 
     @Test
     fun `shouldShowPServerUnlockCta returns true when langerhansOdinTools is present`() {
         // Odin device with OdinTools installed (strong signal for PServer presence).
         val report = makeReport(langerhansOdinTools = true, pserverSysfsLive = false)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isTrue()
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = false)).isTrue()
     }
 
     @Test
-    fun `shouldShowPServerUnlockCta returns false when pserverSysfsLive is already true`() {
-        // Already live — no CTA needed.
-        val report = makeReport(aynGameAssistant = true, pserverSysfsLive = true)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isFalse()
+    fun `shouldShowPServerUnlockCta returns false when already live by any path`() {
+        // Already live (root / Shizuku-probed / direct sysfs / PServer) — no CTA.
+        val report = makeReport(aynGameAssistant = true)
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = true)).isFalse()
     }
 
     @Test
-    fun `shouldShowPServerUnlockCta returns false when sysfsDirectlyWritable is true`() {
-        // Already live via direct sysfs — no CTA needed.
-        val report = makeReport(aynGameAssistant = true, sysfsDirectlyWritable = true)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isFalse()
-    }
-
-    @Test
-    fun `shouldShowPServerUnlockCta returns false when ROOT tier is active`() {
-        val report = makeReport(privilege = PrivilegeTier.ROOT, aynGameAssistant = true)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isFalse()
+    fun `shouldShowPServerUnlockCta returns false when Shizuku-live on an AYN device`() {
+        // GENERALIZATION: an AYN device that is already LIVE via the Shizuku-probed
+        // path must NOT be nagged to unlock PServer it does not need.
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU, aynGameAssistant = true)
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = true)).isFalse()
     }
 
     @Test
     fun `shouldShowPServerUnlockCta returns false for non-AYN device`() {
         // No vendor apps present — PServer is unlikely to exist.
         val report = makeReport(privilege = PrivilegeTier.NONE)
-        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report)).isFalse()
+        assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = false)).isFalse()
+    }
+
+    // ─── buildUnlockLadder (vendor-neutral path ladder) ──────────────────────
+
+    @Test
+    fun `buildUnlockLadder returns null when already live`() {
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU)
+        assertThat(AutoTdpViewModel.buildUnlockLadder(report, primeFreqLiveWritable = true)).isNull()
+    }
+
+    @Test
+    fun `buildUnlockLadder returns null when report is null`() {
+        assertThat(AutoTdpViewModel.buildUnlockLadder(null, primeFreqLiveWritable = false)).isNull()
+    }
+
+    @Test
+    fun `buildUnlockLadder offers all three rungs in order for a generic no-root device`() {
+        // Generic Android handheld, no Shizuku, no root, no vendor app.
+        val report = makeReport(privilege = PrivilegeTier.NONE)
+        val ladder = AutoTdpViewModel.buildUnlockLadder(report, primeFreqLiveWritable = false)
+        assertThat(ladder).isNotNull()
+        assertThat(ladder!!.steps.map { it.kind }).containsExactly(
+            UnlockStepKind.SHIZUKU,
+            UnlockStepKind.UNLOCK_SCRIPT,
+            UnlockStepKind.ROOT,
+        ).inOrder()
+        // No vendor binder on a generic device.
+        assertThat(ladder.vendorBinderPathAvailable).isFalse()
+    }
+
+    @Test
+    fun `buildUnlockLadder marks Shizuku DONE_BUT_INSUFFICIENT when granted but kernel blocks writes`() {
+        // Shizuku granted, but the node-probe failed (vendor SELinux denial) so the
+        // device is NOT live. The ladder must honestly flag Shizuku as granted-but-
+        // insufficient and still offer the other rungs.
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU).copy(
+            shizuku = io.github.mayusi.calibratesoc.data.capability.ShizukuStatus(
+                installed = true, running = true, permissionGranted = true,
+                sysfsWriteAllowed = false,
+            ),
+        )
+        val ladder = AutoTdpViewModel.buildUnlockLadder(report, primeFreqLiveWritable = false)!!
+        val shizukuStep = ladder.steps.first { it.kind == UnlockStepKind.SHIZUKU }
+        assertThat(shizukuStep.state).isEqualTo(UnlockStepState.DONE_BUT_INSUFFICIENT)
+    }
+
+    @Test
+    fun `buildUnlockLadder lights vendor binder path on AYN`() {
+        val report = makeReport(aynGameAssistant = true)
+        val ladder = AutoTdpViewModel.buildUnlockLadder(report, primeFreqLiveWritable = false)!!
+        assertThat(ladder.vendorBinderPathAvailable).isTrue()
+    }
+
+    @Test
+    fun `buildUnlockLadder marks root AVAILABLE when root present but not opted-in`() {
+        val report = makeReport(privilege = PrivilegeTier.NONE).copy(
+            rootKind = io.github.mayusi.calibratesoc.data.capability.RootKind.MAGISK,
+        )
+        val ladder = AutoTdpViewModel.buildUnlockLadder(report, primeFreqLiveWritable = false)!!
+        val rootStep = ladder.steps.first { it.kind == UnlockStepKind.ROOT }
+        // Root present (Magisk) but privilege is not ROOT (user hasn't opted in).
+        assertThat(rootStep.state).isEqualTo(UnlockStepState.AVAILABLE)
     }
 
     // ─── resolveTriggerPrecedence: manual wins ─────────────────────────────────

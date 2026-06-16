@@ -97,6 +97,26 @@ object AutoTdpEngine {
      */
     private const val MAX_DRAW_PROXY_MW = 3_000.0
 
+    /**
+     * CAP-FLOOR (8th invariant) — the HARD cap floor as a fraction of the cluster's
+     * top OPP. The big-cluster cap may NEVER be tightened below this fraction of
+     * cpuinfo_max, regardless of goal, classification, or signal state.
+     *
+     * This is the construction-level guarantee that the 384 MHz cap→floor collapse
+     * (DEFECT A) can never recur: a null-GPU phantom-idle tick under the strongest
+     * tighten goal (BATTERY_SAVER) can no longer walk the cap to the bottom OPP. The
+     * cap stops at the first real OPP step at/above 40% of the top OPP.
+     *
+     * 40% is a CONSERVATIVE FAIL-SAFE: enough power reduction to matter for battery,
+     * but well clear of the unusable bottom that pins the cluster and stutters the
+     * game. Sanity checks on real OPP tables:
+     *   - AYN Odin 3 little (policy0), top 3 532 800 kHz → floor ≈ 1 413 120 kHz;
+     *     the snap lands on the 1 708 800 kHz step (first OPP ≥ 40%, ≈ 1.71 GHz).
+     *   - AYN Odin 3 big/prime cluster scales the same way off its own top OPP.
+     * The floor is always snapped to a REAL OPP via [hardCapFloorIndex], so MM-2 holds.
+     */
+    private const val CAP_HARD_FLOOR_FRACTION = 0.40
+
     // ── Public API ─────────────────────────────────────────────────────────────
 
     /**
@@ -178,6 +198,15 @@ object AutoTdpEngine {
             // this state change.
             signals.cpuSaturatedTrueLoad ->
                 cpuRelax(current, caps, activeGoal, signals, baseState, classification)
+
+            // ── 2.5 LOAD-BLIND HOLD (GUARDRAIL 3 — the FP-1 rule for the GPU dim) ─
+            // If this tick has NEITHER true CPU jiffie load NOR a real GPU read, the
+            // band controller is reasoning over a phantom (the null→0 GPU coercion that
+            // floored the cap in DEFECT A). A blind tick must NEVER originate a tighten.
+            // Hold safe. (Thermal pre-empt above already handled any genuine heat/throttle
+            // signal; a real CPU-saturation loosen is gated on true load by arm 2.)
+            signals.isLoadBlind ->
+                bandHoldLoadBlind(current, activeGoal, signals, baseState, classification)
 
             // ── 3. BAND CONTROL: GPU busy% vs the active goal band ───────────────
             else -> {
@@ -589,6 +618,35 @@ object AutoTdpEngine {
         }
     }
 
+    /**
+     * GUARDRAIL 3 hold: the tick is LOAD-BLIND (no true CPU load AND no real GPU read).
+     * Hold the current state and end any in-progress direction episode so a phantom
+     * blind tick can never accumulate confirm ticks toward a tighten. Emits
+     * [HoldReason.LOAD_BLIND_HOLDING] with an honest note — the controller is holding
+     * because the signals it would act on are unavailable, NOT because the device is idle.
+     */
+    private fun bandHoldLoadBlind(
+        current: TdpState,
+        goal: GoalProfile,
+        signals: WindowSignals,
+        base: ControllerState,
+        classification: ClassificationResult,
+    ): TdpDecision {
+        val held = base.copy(
+            classifier = classification.state,
+            currentDirection = null,
+            confirmTicks = 0,
+            quietTicks = (base.quietTicks + 1).coerceAtMost(QUIET_TICK_CAP),
+            activeLever = null,
+        )
+        return TdpDecision(
+            current,
+            reason("holding", goal, "LOAD_BLIND_HOLDING — signals unavailable, holding safe"),
+            HoldReason.LOAD_BLIND_HOLDING,
+            held,
+        )
+    }
+
     /** Generic hold that preserves a pending confirm/cool-down state. */
     private fun hold(
         current: TdpState,
@@ -759,15 +817,47 @@ object AutoTdpEngine {
     private data class CapStep(val cap: Int?, val changed: Boolean)
 
     /**
+     * CAP-FLOOR (8th invariant). The index of the lowest OPP step the cap is allowed
+     * to reach: the first OPP at/above [CAP_HARD_FLOOR_FRACTION] of the top OPP. This
+     * is a HARD floor — no goal, classifier, or signal state may push the cap below it.
+     *
+     * Returns 0 only for a degenerate table (empty / single step) where no real floor
+     * can be expressed. By construction the returned index is always a valid index into
+     * [steps], so [steps][hardCapFloorIndex] is a real OPP (MM-2 preserved).
+     */
+    private fun hardCapFloorIndex(steps: List<Int>): Int {
+        if (steps.size < 2) return 0
+        val top = steps.last()
+        val threshold = (top * CAP_HARD_FLOOR_FRACTION)
+        val idx = steps.indexOfFirst { it >= threshold }
+        // Clamp into [0, lastIndex - 1]: the floor is a usable working OPP, never the
+        // very top step (which would forbid all capping). If 40% somehow lands on the
+        // top OPP (a 2-step table), fall back to index 0 so capping is still possible.
+        return idx.coerceIn(0, (steps.lastIndex - 1).coerceAtLeast(0))
+    }
+
+    /** The absolute-kHz CAP-FLOOR for [steps], or null for a degenerate table. */
+    private fun hardCapFloorKhz(steps: List<Int>): Int? =
+        if (steps.isEmpty()) null else steps[hardCapFloorIndex(steps)]
+
+    /**
      * Step the big-cluster cap DOWN one OPP toward [floorKhz] (or the bottom OPP
-     * when null). Never goes below the floor. Returns changed=false at the floor.
+     * when null), but NEVER below the CAP-FLOOR hard invariant (40% of the top OPP).
+     * Returns changed=false at the effective floor.
+     *
+     * The effective floor index is `max(budget-floor, hard-floor)`: a hard-power-ceiling
+     * goal's watts-budget floor can only ever RAISE the floor, never lower it past the
+     * 40% guarantee. This is what makes the 384 MHz collapse impossible by construction.
      */
     private fun stepCapDown(currentCap: Int?, caps: TdpCaps, floorKhz: Int?): CapStep {
         val steps = caps.bigClusterOppStepsKhz
         if (steps.isEmpty()) return CapStep(currentCap, false)
-        val floorIdx = floorKhz?.let { f ->
+        val budgetFloorIdx = floorKhz?.let { f ->
             steps.indexOfFirst { it >= f }.let { if (it < 0) 0 else it }
         } ?: 0
+        // CAP-FLOOR: the cap may never decrement below 40% of the top OPP.
+        val hardFloorIdx = hardCapFloorIndex(steps)
+        val floorIdx = maxOf(budgetFloorIdx, hardFloorIdx)
         // Starting index: an uncapped cluster sits at the top OPP.
         val curIdx = currentCap?.let { c ->
             steps.indexOfFirst { it >= c }.let { if (it < 0) steps.lastIndex else it }
@@ -826,17 +916,25 @@ object AutoTdpEngine {
 
     /**
      * Lower the big-cluster min-freq FLOOR one OPP (let the cluster idle deeper for
-     * power). At the bottom OPP the floor is CLEARED (null = stock). Returns
-     * changed=false when there is no floor set (already at stock).
+     * power) — but NEVER below the CAP-FLOOR hard invariant (40% of the top OPP).
+     *
+     * Returns changed=false when there is no floor set (already at stock) OR the floor
+     * is already at the hard-floor OPP. We deliberately do NOT clear the floor to null
+     * here: null means "stock kernel min" (the bottom OPP), which is BELOW the hard
+     * floor and would defeat the collapse guarantee (DEFECT A dragged min=384 MHz in
+     * lockstep with the cap). The min lever bottoms out at the hard floor, not stock.
      */
     private fun stepMinFloorDown(current: TdpState, caps: TdpCaps): CapStep {
         val steps = caps.bigClusterOppStepsKhz
         val floor = current.bigClusterMinKhz ?: return CapStep(null, false) // already stock
         if (steps.isEmpty()) return CapStep(floor, false)
+        val hardFloorIdx = hardCapFloorIndex(steps)
         val curIdx = steps.indexOfFirst { it >= floor }.let { if (it < 0) 0 else it }
-        return when {
-            curIdx <= 0 -> CapStep(null, true)          // at/below bottom OPP → clear
-            else -> CapStep(steps[curIdx - 1], true)
+        return if (curIdx > hardFloorIdx) {
+            CapStep(steps[curIdx - 1], true)
+        } else {
+            // Already at (or below) the hard floor — cannot tighten the min further.
+            CapStep(floor, false)
         }
     }
 
@@ -895,6 +993,12 @@ object AutoTdpEngine {
      *  - **ACT-2:** {parked cores} XOR {uclamp hint}. If both are somehow set, the
      *    goal's choice wins: a uclamp goal drops any park; a parking goal drops any
      *    uclamp.
+     *  - **CAP-FLOOR (8th):** the big-cluster cap is never below 40% of the top OPP
+     *    ([CAP_HARD_FLOOR_FRACTION]). If a cap somehow arrived below the hard floor
+     *    (off-table seed, future lever bug), it is raised to the nearest OPP at/above
+     *    the floor — the cluster is NEVER floored. The min-floor is mirrored up to the
+     *    hard floor too, subordinate to MM-1 (the cap is the safety knob; the min is
+     *    the comfort knob and yields to MM-1's strict min < cap).
      */
     private fun enforceInvariants(state: TdpState, caps: TdpCaps, goal: GoalProfile): TdpState {
         var s = state
@@ -912,6 +1016,30 @@ object AutoTdpEngine {
                 if (floor !in steps) {
                     val snapped = steps.firstOrNull { it >= floor } ?: steps.last()
                     s = s.copy(bigClusterMinKhz = snapped)
+                }
+            }
+        }
+
+        // ── CAP-FLOOR (8th invariant): cap ≥ 40% of top OPP, never floor the cluster ─
+        // Defence-in-depth backstop to [stepCapDown]'s hard-floor clamp. If a cap
+        // arrived below the hard floor by ANY path (a pre-seeded off-table state, a
+        // future lever that forgot the clamp), raise it to the nearest OPP at/above the
+        // floor. This makes the 384 MHz cap→floor collapse (DEFECT A) impossible by
+        // construction at the single gate every emitted state passes through.
+        val hardFloorKhz = hardCapFloorKhz(steps)
+        if (hardFloorKhz != null) {
+            s.bigClusterCapKhz?.let { cap ->
+                if (cap < hardFloorKhz) {
+                    s = s.copy(bigClusterCapKhz = hardFloorKhz)
+                }
+            }
+            // Mirror the floor for the MIN_FREQ_FLOOR lever: a set min must not sit
+            // below the hard floor either. MM-1 below still has the final say (min must
+            // stay strictly < cap), so this only ever RAISES the min toward the hard
+            // floor when there is OPP headroom under the cap.
+            s.bigClusterMinKhz?.let { floor ->
+                if (floor < hardFloorKhz) {
+                    s = s.copy(bigClusterMinKhz = hardFloorKhz)
                 }
             }
         }
@@ -1037,9 +1165,25 @@ object AutoTdpEngine {
         val cpuSaturatedTrueLoad: Boolean,
         /** True when the CPU load dimension is proxy-only / blind (FP-1 honesty). */
         val cpuProxyOnly: Boolean,
+        /**
+         * True only when the latest window sample carried a non-null gpuLoadPct, i.e.
+         * the GPU busy% the band controller reasons over is a REAL measurement this
+         * tick — not a null read coerced to 0 (the phantom-idle that drove DEFECT A).
+         * False ⇒ the GPU signal was absent; the controller must not TIGHTEN on it.
+         */
+        val gpuSignalValid: Boolean,
         /** Derived heating trend for the AUTO→goal split. */
         val thermalTrend: ThermalTrend,
     ) {
+        /**
+         * The tick is LOAD-BLIND when there is NEITHER true CPU jiffie load (the window
+         * is proxy-only / blind) NOR a real GPU read this tick. A blind tick must hold,
+         * never tighten — it would otherwise tighten on a phantom-idle (DEFECT A). A
+         * genuine CPU-saturation LOOSEN stays gated on true load (arm 2 in decide()),
+         * so this asymmetry is honest: blind ⇒ no tighten, but real saturation ⇒ relax.
+         */
+        val isLoadBlind: Boolean get() = cpuProxyOnly && !gpuSignalValid
+
         /**
          * Thermal pre-empt = OR of:
          *  (1) smoothed die ≥ soft_target;
@@ -1070,6 +1214,12 @@ object AutoTdpEngine {
         // folded on prior ticks). On the very first tick (no carried EWMA) seed from
         // the window mean so we start from a representative value, not a single noisy
         // sample. This avoids re-smoothing the whole window every tick.
+        // gpuSignalValid: the latest sample's GPU busy% is a REAL read this tick.
+        // We KEEP the `?: 0` coercion for the EWMA accumulator (so the smoothed value
+        // and the HUD stay numeric), but the controller is told separately whether the
+        // signal was actually present — a null→0 phantom must never originate a tighten
+        // (the FP-1-for-GPU rule that closes DEFECT A's phantom-idle path).
+        val gpuSignalValid = window.last().gpuLoadPct != null
         val latestGpu = (window.last().gpuLoadPct ?: 0).toDouble()
         val gpuEwma: Double = when (val prior = state.gpuEwma) {
             null -> window.map { (it.gpuLoadPct ?: 0).toDouble() }.average()
@@ -1134,6 +1284,7 @@ object AutoTdpEngine {
             coolingMaxState = coolingMax,
             cpuSaturatedTrueLoad = cpuSatTrue,
             cpuProxyOnly = cpuProxyOnly && anyProxyOrBlind,
+            gpuSignalValid = gpuSignalValid,
             thermalTrend = trend,
         )
     }

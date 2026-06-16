@@ -8,10 +8,17 @@ import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.data.capability.RootKind
 import io.github.mayusi.calibratesoc.data.capability.ShizukuStatus
 import io.github.mayusi.calibratesoc.data.capability.SoCIdentity
+import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
+import io.github.mayusi.calibratesoc.data.capability.FreqRange
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
+import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.shizuku.ShizukuNodeCache
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
+import io.github.mayusi.calibratesoc.data.tunables.Tunables
+import io.github.mayusi.calibratesoc.ui.autotdp.AutoTdpRung
+import io.github.mayusi.calibratesoc.ui.autotdp.AutoTdpViewModel
 import io.mockk.every
 import io.mockk.mockk
 import okio.fakefilesystem.FakeFileSystem
@@ -38,7 +45,7 @@ class TierResolutionOrderTest {
     private fun aynReportWith(
         pserverSysfsLive: Boolean,
         sysfsDirectlyWritable: Boolean,
-        privilege: PrivilegeTier = PrivilegeTier.AYN_SETTINGS,
+        privilege: PrivilegeTier = PrivilegeTier.VENDOR_SETTINGS,
     ) = CapabilityReport(
         device = DeviceIdentity(
             manufacturer = "AYN",
@@ -243,6 +250,141 @@ class TierResolutionOrderTest {
         val report = aynReportWith(pserverSysfsLive = false, sysfsDirectlyWritable = true)
 
         assertThat(registry.isLiveWritable(SCALING_MAX_FREQ, report)).isTrue()
+    }
+
+    // ── Shizuku-only device reaches LIVE rung (end-to-end generalization) ──────
+
+    /**
+     * Builds a no-root, no-PServer Shizuku report WITH cpu policies so the
+     * prime-cluster cpufreq node can be resolved. This is the AYANEO / GPD /
+     * generic-Android case: Shizuku granted, but no vendor binder and no root.
+     */
+    private fun shizukuReportWithPolicies() = CapabilityReport(
+        device = DeviceIdentity(
+            manufacturer = "AYANEO", brand = "AYANEO", model = "Pocket",
+            device = "pocket", hardware = "pocket",
+            androidVersion = "13", sdkInt = 33, knownHandheldKey = null,
+        ),
+        soc = SoCIdentity("QTI", "SM8550", GpuFamily.ADRENO),
+        privilege = PrivilegeTier.SHIZUKU,
+        rootKind = RootKind.NONE,
+        shizuku = ShizukuStatus(
+            installed = true, running = true, permissionGranted = true,
+            sysfsWriteAllowed = true,
+        ),
+        cpuPolicies = listOf(
+            CpuPolicyProbe(
+                policyId = 0,
+                onlineCores = listOf(0, 1, 2, 3),
+                availableFreqsKhz = listOf(300_000, 1_500_000, 2_016_000),
+                availableGovernors = listOf("schedutil"),
+                currentMinKhz = 300_000,
+                currentMaxKhz = 2_016_000,
+                currentGovernor = "schedutil",
+                hardwareLimitsKhz = FreqRange(300_000, 2_016_000),
+            ),
+            CpuPolicyProbe(
+                policyId = 4,
+                onlineCores = listOf(4, 5, 6, 7),
+                availableFreqsKhz = listOf(700_000, 2_400_000, 3_200_000),
+                availableGovernors = listOf("schedutil"),
+                currentMinKhz = 700_000,
+                currentMaxKhz = 3_200_000,
+                currentGovernor = "schedutil",
+                hardwareLimitsKhz = FreqRange(700_000, 3_200_000),
+            ),
+        ),
+        gpu = null,
+        thermalZones = emptyList(),
+        fan = null,
+        vendorApps = VendorAppPresence(
+            aynGameAssistant = false, langerhansOdinTools = false,
+            ayaSpace = false, retroidGameAssistant = false,
+        ),
+        sysfsDirectlyWritable = false,
+        pserverSysfsLive = false,
+    )
+
+    /**
+     * THE KEY GENERALIZATION TEST: a Shizuku-only device (no root, no PServer,
+     * no chmod) reaches the LIVE AutoTDP rung when the per-node write-probe
+     * confirmed shell can write the prime-cluster scaling_max_freq AND cpu/online.
+     *
+     * Proves the full chain the production code uses:
+     *   ShizukuNodeCache probe-passed
+     *     → WriterRegistry.isLiveWritable(prime scaling_max_freq) == true
+     *     → WriterRegistry.isLiveWritable(cpu0/online) == true
+     *     → primeFreqLiveWritable == true
+     *     → AutoTdpViewModel.resolveRung(...) == LIVE
+     */
+    @Test
+    fun `Shizuku-only device reaches LIVE rung end-to-end`() {
+        val report = shizukuReportWithPolicies()
+        // Prime cluster = policy 4 (highest top OPP: 3_200_000 kHz).
+        val primeFreqId = Tunables.cpuMaxFreq(4)
+        val onlineId = Tunables.cpuOnline(0)
+
+        // Node cache: BOTH critical node families passed the shell write-probe.
+        val nodeCache = mockk<ShizukuNodeCache>().also {
+            every { it.isCachedWritable(primeFreqId.target) } returns true
+            every { it.isCachedWritable(onlineId.target) } returns true
+            every { it.isCachedWritable(any()) } returns false
+        }
+        // Re-stub the two that matter (any() above is the catch-all default).
+        every { nodeCache.isCachedWritable(primeFreqId.target) } returns true
+        every { nodeCache.isCachedWritable(onlineId.target) } returns true
+
+        val registry = makeRegistry(nodeCache = nodeCache)
+
+        // Registry routes both critical nodes to a live writer (ShizukuWriter).
+        assertThat(registry.isLiveWritable(primeFreqId, report)).isTrue()
+        assertThat(registry.isLiveWritable(onlineId, report)).isTrue()
+
+        // Mirror the VM's primeFreqLiveWritable helper using the same node families.
+        val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }!!
+        val primeFreqLiveWritable =
+            registry.isLiveWritable(onlineId, report) &&
+                registry.isLiveWritable(Tunables.cpuMaxFreq(bigPolicy.policyId), report)
+        assertThat(primeFreqLiveWritable).isTrue()
+
+        // The rung the user sees is LIVE — no root, no vendor binder.
+        val rung = AutoTdpViewModel.resolveRung(
+            report,
+            AutoTdpRunState(status = AutoTdpStatus.IDLE),
+            primeFreqLiveWritable,
+        )
+        assertThat(rung).isEqualTo(AutoTdpRung.LIVE)
+    }
+
+    /**
+     * Honesty counter-case: same Shizuku device, but the per-node probe DENIED
+     * the prime cpufreq node (vendor SELinux block). The device must NOT reach
+     * LIVE — it falls to SCRIPT.
+     */
+    @Test
+    fun `Shizuku device with probe-denied prime freq does not reach LIVE`() {
+        val report = shizukuReportWithPolicies()
+        val onlineId = Tunables.cpuOnline(0)
+
+        // online writable, but the prime cpufreq node is DENIED.
+        val nodeCache = mockk<ShizukuNodeCache>().also {
+            every { it.isCachedWritable(any()) } returns false
+            every { it.isCachedWritable(onlineId.target) } returns true
+        }
+        val registry = makeRegistry(nodeCache = nodeCache)
+
+        val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }!!
+        val primeFreqLiveWritable =
+            registry.isLiveWritable(onlineId, report) &&
+                registry.isLiveWritable(Tunables.cpuMaxFreq(bigPolicy.policyId), report)
+        assertThat(primeFreqLiveWritable).isFalse()
+
+        val rung = AutoTdpViewModel.resolveRung(
+            report,
+            AutoTdpRunState(status = AutoTdpStatus.IDLE),
+            primeFreqLiveWritable,
+        )
+        assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
     // ── Write-verify probe simulation tests ───────────────────────────────────

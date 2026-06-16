@@ -21,6 +21,7 @@ import io.github.mayusi.calibratesoc.data.autotdp.TdpCaps
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.data.capability.RootKind
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyAdvisor
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
 import io.github.mayusi.calibratesoc.data.efficiency.UndervoltCapability
@@ -31,6 +32,8 @@ import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
+import io.github.mayusi.calibratesoc.data.tunables.Tunables
+import io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -89,6 +92,7 @@ class AutoTdpViewModel @Inject constructor(
     private val userPrefs: UserPrefs,
     private val efficiencyAdvisor: EfficiencyAdvisor,
     private val undervoltCapabilityProbe: UndervoltCapabilityProbe,
+    private val writerRegistry: WriterRegistry,
 ) : ViewModel() {
 
     // ── Exposed state ─────────────────────────────────────────────────────────
@@ -97,11 +101,18 @@ class AutoTdpViewModel @Inject constructor(
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
 
-    /** Resolved rung: LIVE / SCRIPT / ADVISORY. Derived from capability + run state. */
+    /** Resolved rung: LIVE / SCRIPT / ADVISORY. Derived from capability + run state.
+     *
+     *  The "is this LIVE?" decision is delegated to [WriterRegistry.isLiveWritable]
+     *  against the ACTUAL prime-cluster cpufreq node — the SAME single source of
+     *  truth the AutoTdpService daemon uses ([AutoTdpService.liveUnavailableReason]).
+     *  This is what lets a Shizuku-only device (no root, no PServer, no chmod) reach
+     *  LIVE when the per-node write-probe confirmed shell can write scaling_max_freq,
+     *  the key generalization for AYANEO / GPD / any no-root handheld. */
     val rung: StateFlow<AutoTdpRung> = combine(
         capabilityProbe.report,
         controller.state,
-    ) { report, state -> resolveRung(report, state) }
+    ) { report, state -> resolveRung(report, state, primeFreqLiveWritable(report)) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, AutoTdpRung.ADVISORY)
 
     // ── Profile picker ────────────────────────────────────────────────────────
@@ -162,10 +173,23 @@ class AutoTdpViewModel @Inject constructor(
     private val _lastUnlockDeploy = MutableStateFlow<AdvancedPermissionsScript.Deployed?>(null)
     val lastUnlockDeploy: StateFlow<AdvancedPermissionsScript.Deployed?> = _lastUnlockDeploy.asStateFlow()
 
-    /** Whether the PServer unlock CTA should be shown. Derived from capability. */
+    /** Whether the PServer unlock CTA should be shown. Derived from capability.
+     *  Now consistent with the generalized live check: a device that is already
+     *  LIVE via ANY path (incl. Shizuku-probed) does not show the PServer CTA. */
     val showPServerUnlockCta: StateFlow<Boolean> = capabilityProbe.report
-        .map { shouldShowPServerUnlockCta(it) }
+        .map { shouldShowPServerUnlockCta(it, primeFreqLiveWritable(it)) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Vendor-neutral "how to reach LIVE" ladder, shown when AutoTDP is NOT live.
+     * Ordered best-default-first: Grant Shizuku → Run unlock script → Enable root.
+     * If a vendor binder path probes transactable (AYN PServer today), that rung
+     * lights up automatically. Honest per-device: each rung carries whether it is
+     * actually available/done on THIS device. Null when AutoTDP is already live.
+     */
+    val unlockLadder: StateFlow<UnlockLadder?> = capabilityProbe.report
+        .map { report -> buildUnlockLadder(report, primeFreqLiveWritable(report)) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // ── Idle/charge trigger toggle ─────────────────────────────────────────────
 
@@ -609,6 +633,43 @@ class AutoTdpViewModel @Inject constructor(
     //  Internal helpers
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Honest pre-start LIVE check: can AutoTDP's critical node families actually
+     * be written on this device, via ANY live write path (root / Shizuku-probed /
+     * PServer / unlock-chmod)?
+     *
+     * Delegates entirely to [WriterRegistry.isLiveWritable] — the single source of
+     * truth that encodes the full tier-resolution logic INCLUDING the Shizuku
+     * per-node probe cache. We deliberately mirror the EXACT node families the
+     * [AutoTdpService] daemon gates on ([AutoTdpService.liveUnavailableReason]):
+     *   - cpu0/online   (core-parking family proxy)
+     *   - prime-cluster scaling_max_freq  (the big-cluster cap — AutoTDP's core lever)
+     * so the rung the user sees BEFORE pressing START agrees with what the daemon
+     * will actually do AFTER. A device where scaling_max_freq is writable but
+     * cpu/online is not would self-stop with LIVE_UNAVAILABLE, so we honestly do
+     * NOT show LIVE for it up front.
+     *
+     * Returns false when the report is null (not yet probed). This is what makes a
+     * Shizuku-only device (no root, no PServer, no chmod) reach LIVE: when the
+     * no-op write probe confirmed shell can write these exact nodes,
+     * isLiveWritable routes them to ShizukuWriter (not NoopWriter) → true.
+     */
+    private fun primeFreqLiveWritable(report: CapabilityReport?): Boolean {
+        if (report == null) return false
+        // Core-parking family proxy: cpu0/online tells us whether the cpu/online
+        // family is writable at all (cpu0 itself is never parked).
+        val onlineId = Tunables.cpuOnline(0)
+        if (!writerRegistry.isLiveWritable(onlineId, report)) return false
+        // Prime-cluster cap: the policy whose top OPP is highest is the one
+        // AutoTDP caps. Same selection the daemon uses.
+        val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }
+        if (bigPolicy != null) {
+            val freqId = Tunables.cpuMaxFreq(bigPolicy.policyId)
+            if (!writerRegistry.isLiveWritable(freqId, report)) return false
+        }
+        return true
+    }
+
     private fun buildLiveSnapshot(t: Telemetry): LiveSnapshot {
         val cpuMaxMhz = t.perCoreCpuFreqKhz.maxOrNull()?.let { it / 1000 }
         val gpuMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
@@ -671,57 +732,149 @@ class AutoTdpViewModel @Inject constructor(
     companion object {
         /**
          * Pure rung-resolution logic. Determines which AutoTDP rung is active
-         * based on the capability report and current run state.
+         * based on the capability report, current run state, and whether the
+         * prime-cluster cpufreq node is actually live-writable.
          *
-         * LIVE  : sysfs is directly writable (unlock script ran), OR device has ROOT tier,
-         *         OR PServer SYSFS live writes are confirmed ([CapabilityReport.pserverSysfsLive]).
-         *         PServer is the preferred no-root live path on AYN/Odin devices: after the
-         *         one-time whitelist step, it writes every tick with root authority,
-         *         no per-boot chmod needed. VERIFIED on Odin 3 (36.5% draw cut, 53% w/ core-park).
-         * SCRIPT: no live writes possible but script generation is available (AYN_SETTINGS,
-         *         SHIZUKU, or NONE — all can generate and run a script externally).
-         * ADVISORY: fallback — no writes at all; monitor + advice only.
+         * LIVE  : at least one write path can VERIFIABLY write the prime-cluster
+         *         scaling_max_freq (+ the cpu/online family) on this device —
+         *         [primeFreqLiveWritable], computed via [WriterRegistry.isLiveWritable].
+         *         This is vendor-AGNOSTIC: it is true for ROOT, the unlock-chmod
+         *         direct-sysfs tier, the AYN PServer tier, AND a Shizuku-only device
+         *         whose per-node write-probe confirmed shell can write these exact
+         *         nodes. The Shizuku case is the key generalization — a no-root
+         *         AYANEO / GPD / generic Android handheld now reaches LIVE with no
+         *         vendor binder at all. (PServer is just an optimization on top.)
+         * SCRIPT: no live write path for the prime cap, but script generation is
+         *         available (any tier can generate + run a script externally).
+         * ADVISORY: fallback — report not yet available; monitor + advice only.
          *
          * Note: LIVE_UNAVAILABLE from the service means the daemon itself confirmed it
          * cannot write even though the probe said it should. We honour the daemon's verdict
-         * and route to SCRIPT/ADVISORY.
+         * and route to SCRIPT.
+         *
+         * @param primeFreqLiveWritable The honest live-writability of the prime cpufreq
+         *   node, computed by the instance helper from [WriterRegistry.isLiveWritable]
+         *   so this pure function stays testable without injecting the registry.
          */
-        fun resolveRung(report: CapabilityReport?, state: AutoTdpRunState): AutoTdpRung {
+        fun resolveRung(
+            report: CapabilityReport?,
+            state: AutoTdpRunState,
+            primeFreqLiveWritable: Boolean,
+        ): AutoTdpRung {
             if (report == null) return AutoTdpRung.ADVISORY
             // Daemon confirmed live writes not available for this session.
             if (state.status == AutoTdpStatus.LIVE_UNAVAILABLE) return AutoTdpRung.SCRIPT
-            val liveWritable = report.privilege == PrivilegeTier.ROOT ||
-                report.sysfsDirectlyWritable ||
-                report.pserverSysfsLive
             return when {
-                liveWritable -> AutoTdpRung.LIVE
-                // NONE / SHIZUKU / AYN_SETTINGS can all generate a script and run via vendor app.
+                primeFreqLiveWritable -> AutoTdpRung.LIVE
+                // NONE / SHIZUKU(unprobed/denied) / VENDOR_SETTINGS can all still
+                // generate a script and run it via the vendor app / root-script runner.
                 else -> AutoTdpRung.SCRIPT
             }
         }
 
         /**
-         * Returns true when this device *could* reach the LIVE rung via PServer after
-         * the one-time unlock, but has not yet done so.
+         * Returns true when this device *could* reach the LIVE rung via the AYN
+         * PServer binder after the one-time unlock, but has not yet done so.
          *
          * Condition: AYN/Odin vendor app present (confirms PServer likely exists on this
          * device) AND PServer is NOT yet whitelisted for us (pserverSysfsLive == false)
-         * AND we're not already live via another path (root or direct sysfs write).
+         * AND we're not already live via ANY path ([primeFreqLiveWritable] — which now
+         * includes the Shizuku-probed path, so a Shizuku-live AYN device won't be nagged
+         * to unlock PServer it doesn't need).
          *
-         * When this returns true, the UI should show the unlock CTA card so the user
-         * knows one script run will elevate them to LIVE with no root.
+         * This drives the AYN-specific PServer rung of the vendor-neutral unlock ladder.
+         * The ladder itself ([buildUnlockLadder]) is shown on all vendors.
+         *
+         * @param primeFreqLiveWritable Honest live-writability of the prime cpufreq node
+         *   (from [WriterRegistry.isLiveWritable]).
          */
-        fun shouldShowPServerUnlockCta(report: CapabilityReport?): Boolean {
+        fun shouldShowPServerUnlockCta(
+            report: CapabilityReport?,
+            primeFreqLiveWritable: Boolean,
+        ): Boolean {
             if (report == null) return false
-            // Already LIVE by some path — no CTA needed.
-            if (report.privilege == PrivilegeTier.ROOT ||
-                report.sysfsDirectlyWritable ||
-                report.pserverSysfsLive
-            ) return false
+            // Already LIVE by some path (root / Shizuku-probed / direct sysfs / PServer)
+            // — no PServer CTA needed.
+            if (primeFreqLiveWritable) return false
             // Show CTA only on devices where PServer is plausibly present.
             // langerhansOdinTools detects the OdinTools app (strong signal for Odin family).
             // aynGameAssistant covers the AYN game-assistant lineup.
             return report.vendorApps.aynGameAssistant || report.vendorApps.langerhansOdinTools
+        }
+
+        /**
+         * Builds the vendor-neutral "how to reach LIVE" ladder. Returns null when
+         * AutoTDP is already live (no ladder needed) or the report isn't ready.
+         *
+         * The ladder is ordered best-default-first and is HONEST per-device — each
+         * rung carries whether it is available / already done on THIS device:
+         *
+         *   1. SHIZUKU  — Grant Shizuku [no root, no reboot — the best default].
+         *                 Marked DONE when Shizuku is bound + granted. (On a device
+         *                 where the node-probe then confirms writes, AutoTDP is
+         *                 already live and this whole ladder is hidden.)
+         *   2. UNLOCK_SCRIPT — Run the unlock script once via the device's root-script
+         *                 runner [needs SELinux-permissive-during-chmod]. Available
+         *                 wherever a vendor settings "Run script as Root" path exists;
+         *                 the AYN PServer whitelist is the strongest form of this.
+         *   3. ROOT     — Enable root mode (Magisk/KernelSU) [full, vendor-independent].
+         *                 Marked AVAILABLE when root is present but not opted-in.
+         *
+         * Plus the vendor binder path (AYN PServer) lights up automatically when it
+         * probes transactable — surfaced via [shouldShowPServerUnlockCta], which is
+         * the same script as rung 2 on AYN.
+         *
+         * This is intentionally pure (no Android) so it is unit-testable.
+         */
+        fun buildUnlockLadder(
+            report: CapabilityReport?,
+            primeFreqLiveWritable: Boolean,
+        ): UnlockLadder? {
+            if (report == null) return null
+            // Already live by some path — no ladder.
+            if (primeFreqLiveWritable) return null
+
+            val shizukuDone = report.shizuku.running && report.shizuku.permissionGranted
+            val shizukuStep = UnlockStep(
+                kind = UnlockStepKind.SHIZUKU,
+                state = when {
+                    // Granted but the node-probe didn't confirm writes (vendor SELinux
+                    // denial) — Shizuku is bound yet this device blocks shell cpufreq
+                    // writes, so it is NOT a live path here. Mark BLOCKED honestly.
+                    shizukuDone -> UnlockStepState.DONE_BUT_INSUFFICIENT
+                    report.shizuku.installed -> UnlockStepState.AVAILABLE
+                    else -> UnlockStepState.AVAILABLE
+                },
+            )
+
+            // The unlock-script path exists wherever a vendor "Run script as Root"
+            // runner is plausibly present. We light it on any vendor handheld OR a
+            // device exposing a known handheld key; on a fully-generic device it is
+            // still offered but flagged as requiring an external root-script runner.
+            val hasVendorScriptRunner = report.vendorApps.anyVendorPerfApp ||
+                report.vendorApps.langerhansOdinTools ||
+                report.device.knownHandheldKey != null
+            val unlockStep = UnlockStep(
+                kind = UnlockStepKind.UNLOCK_SCRIPT,
+                state = if (hasVendorScriptRunner) UnlockStepState.AVAILABLE
+                        else UnlockStepState.AVAILABLE_NEEDS_EXTERNAL_RUNNER,
+            )
+
+            val rootPresent = report.rootKind != RootKind.NONE
+            val rootStep = UnlockStep(
+                kind = UnlockStepKind.ROOT,
+                state = when {
+                    report.privilege == PrivilegeTier.ROOT -> UnlockStepState.DONE
+                    rootPresent -> UnlockStepState.AVAILABLE        // present but not opted-in
+                    else -> UnlockStepState.AVAILABLE_NEEDS_INSTALL // user must install Magisk/KernelSU
+                },
+            )
+
+            return UnlockLadder(
+                steps = listOf(shizukuStep, unlockStep, rootStep),
+                vendorBinderPathAvailable =
+                    report.vendorApps.aynGameAssistant || report.vendorApps.langerhansOdinTools,
+            )
         }
 
         /**
@@ -772,6 +925,52 @@ class AutoTdpViewModel @Inject constructor(
             return idleChargeSignal // may be null (idle)
         }
     }
+}
+
+/**
+ * Vendor-neutral ladder of ways to reach the LIVE AutoTDP rung, ordered
+ * best-default-first. Shown only when AutoTDP is not already live.
+ *
+ * [steps] — the ordered rungs (Shizuku → unlock-script → root).
+ * [vendorBinderPathAvailable] — true when a vendor binder path (AYN PServer
+ *   today) is plausibly present, so the dedicated PServer unlock CTA also shows
+ *   as the strongest form of the unlock-script rung.
+ */
+data class UnlockLadder(
+    val steps: List<UnlockStep>,
+    val vendorBinderPathAvailable: Boolean,
+)
+
+/** One rung of the [UnlockLadder]. */
+data class UnlockStep(
+    val kind: UnlockStepKind,
+    val state: UnlockStepState,
+)
+
+/** Which kind of unlock path a [UnlockStep] represents. */
+enum class UnlockStepKind {
+    /** Grant Shizuku — no root, no reboot. The best default. */
+    SHIZUKU,
+    /** Run the unlock script once via the device's root-script runner. */
+    UNLOCK_SCRIPT,
+    /** Enable root mode (Magisk/KernelSU) — full, vendor-independent. */
+    ROOT,
+}
+
+/** Honest per-device availability of an [UnlockStep] on THIS device. */
+enum class UnlockStepState {
+    /** This path is done and sufficient for live writes. */
+    DONE,
+    /** Done, but it did NOT unlock live cpufreq on this device (e.g. Shizuku
+     *  granted yet the kernel still denies shell writes). Try the next rung. */
+    DONE_BUT_INSUFFICIENT,
+    /** Available now — the user can take this step on-device. */
+    AVAILABLE,
+    /** Available, but needs an external root-script runner (no vendor runner
+     *  detected on this generic device). */
+    AVAILABLE_NEEDS_EXTERNAL_RUNNER,
+    /** Available, but the user must first install Magisk/KernelSU. */
+    AVAILABLE_NEEDS_INSTALL,
 }
 
 /** The AutoTDP rung active on this device for this session. */

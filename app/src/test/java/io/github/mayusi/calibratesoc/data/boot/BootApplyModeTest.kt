@@ -91,7 +91,7 @@ class BootApplyModeTest {
     @Test
     fun `resolveBootApplyMode returns AUTO when pserverSysfsLive`() {
         val mode = resolveBootApplyMode(
-            report(privilege = PrivilegeTier.AYN_SETTINGS, pserverSysfsLive = true),
+            report(privilege = PrivilegeTier.VENDOR_SETTINGS, pserverSysfsLive = true),
         )
         assertThat(mode).isEqualTo(BootApplyMode.AUTO)
     }
@@ -105,13 +105,13 @@ class BootApplyModeTest {
     }
 
     @Test
-    fun `resolveBootApplyMode returns REMINDER when only AYN_SETTINGS tier`() {
-        // AYN_SETTINGS without pserverSysfsLive or sysfsDirectlyWritable means
+    fun `resolveBootApplyMode returns REMINDER when only VENDOR_SETTINGS tier`() {
+        // VENDOR_SETTINGS without pserverSysfsLive or sysfsDirectlyWritable means
         // we can only write via the app context (Settings.System).  The receiver
         // cannot do that autonomously.
         val mode = resolveBootApplyMode(
             report(
-                privilege = PrivilegeTier.AYN_SETTINGS,
+                privilege = PrivilegeTier.VENDOR_SETTINGS,
                 pserverSysfsLive = false,
                 sysfsDirectlyWritable = false,
             ),

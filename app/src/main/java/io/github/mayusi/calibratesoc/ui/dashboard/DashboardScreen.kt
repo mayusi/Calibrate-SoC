@@ -268,7 +268,7 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
         val tier = capability?.privilege ?: PrivilegeTier.NONE
         val tierAccent = when (tier) {
             PrivilegeTier.ROOT -> AccentBar.Emerald
-            PrivilegeTier.AYN_SETTINGS -> AccentBar.Emerald
+            PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
             PrivilegeTier.SHIZUKU -> AccentBar.Blue
             PrivilegeTier.NONE -> AccentBar.Neutral
         }

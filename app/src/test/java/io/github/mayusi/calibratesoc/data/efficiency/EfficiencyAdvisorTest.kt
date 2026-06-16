@@ -47,7 +47,7 @@ class EfficiencyAdvisorTest {
         device = DeviceIdentity("AYN", "AYN", "Odin3", "odin3",
             "qcom", "14", 34, "ayn"),
         soc = SoCIdentity("Qualcomm", "SM8450", GpuFamily.ADRENO),
-        privilege = PrivilegeTier.AYN_SETTINGS,
+        privilege = PrivilegeTier.VENDOR_SETTINGS,
         rootKind = RootKind.NONE,
         shizuku = ShizukuStatus(installed = false, running = false,
             permissionGranted = false, sysfsWriteAllowed = null),

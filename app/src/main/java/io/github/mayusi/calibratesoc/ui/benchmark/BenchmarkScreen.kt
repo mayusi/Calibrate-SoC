@@ -1251,10 +1251,14 @@ private fun MetricBarRow(
 @Composable
 private fun SnapshotContext(run: BenchRun) {
     // Humanize the raw tier enum captured in the snapshot. The snapshot
-    // doesn't carry the vendor brand, so AYN_SETTINGS becomes the
+    // doesn't carry the vendor brand, so VENDOR_SETTINGS becomes the
     // generic "Vendor settings" rather than misattributing a brand.
+    // NOTE: this reads a PERSISTED string from stored benchmark runs, so we
+    // keep the legacy "AYN_SETTINGS" mapping for runs captured before the
+    // PrivilegeTier rename — dropping it would show the raw enum name on old
+    // history. New runs persist "VENDOR_SETTINGS".
     val tierLabel = when (run.snapshot.privilegeTier) {
-        "AYN_SETTINGS" -> "Vendor settings"
+        "VENDOR_SETTINGS", "AYN_SETTINGS" -> "Vendor settings"
         "ROOT" -> "Root"
         "SHIZUKU" -> "Shizuku"
         "NONE" -> "No-root"
@@ -1478,8 +1482,10 @@ private fun benchShareText(run: BenchRun, rating: BenchRating.Rating?): String {
         appendLine()
 
         // Device context
+        // Persisted snapshot string — keep the legacy "AYN_SETTINGS" mapping for
+        // runs captured before the PrivilegeTier rename (see SnapshotContext).
         val tierLabel = when (run.snapshot.privilegeTier) {
-            "AYN_SETTINGS" -> "Vendor settings"
+            "VENDOR_SETTINGS", "AYN_SETTINGS" -> "Vendor settings"
             "ROOT" -> "Root"
             "SHIZUKU" -> "Shizuku"
             "NONE" -> "No-root"

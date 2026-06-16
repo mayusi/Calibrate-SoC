@@ -146,7 +146,7 @@ class TunableWriter @Inject constructor(
             when (writer.write(entry.id, prev)) {
                 is WriteResult.Success -> ok++
                 // CapabilityDenied means the current privilege tier cannot write
-                // this tunable at all (e.g. rebooted from ROOT → AYN_SETTINGS
+                // this tunable at all (e.g. rebooted from ROOT → VENDOR_SETTINGS
                 // tier). The sysfs value is unchanged — nothing was reverted but
                 // nothing was made worse either. Treat as a skip (counts toward
                 // ok) so the journal can still be cleared and the revert loop

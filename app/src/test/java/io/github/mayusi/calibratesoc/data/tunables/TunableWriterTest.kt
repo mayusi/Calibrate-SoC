@@ -150,7 +150,7 @@ class TunableWriterTest {
         val id = Tunables.cpuMaxFreq(0)
         coEvery { fakeBackend.read(id) } returns "1804800"
         // Simulate a privilege tier downgrade: the writer now returns CapabilityDenied
-        // for the revert write (e.g. rebooted into AYN_SETTINGS tier after a Root-tier write).
+        // for the revert write (e.g. rebooted into VENDOR_SETTINGS tier after a Root-tier write).
         coEvery { fakeBackend.write(id, "1804800") } returns
             WriteResult.CapabilityDenied(id, "Not enough privilege after reboot")
         writer.write(id, "2400000", REPORT, "test tune")

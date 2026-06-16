@@ -333,12 +333,12 @@ enum class PresetAction {
 private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {}) {
     val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(report)
     val tierChip = when (report.privilege) {
-        PrivilegeTier.AYN_SETTINGS -> vb.tierLabel
+        PrivilegeTier.VENDOR_SETTINGS -> vb.tierLabel
         else -> report.privilege.name
     }
     val tierAccent = when (report.privilege) {
         PrivilegeTier.ROOT -> AccentBar.Emerald
-        PrivilegeTier.AYN_SETTINGS -> AccentBar.Emerald
+        PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
         PrivilegeTier.SHIZUKU -> AccentBar.Blue
         PrivilegeTier.NONE -> AccentBar.Neutral
     }
@@ -373,7 +373,7 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
         val explainer = when (report.privilege) {
             PrivilegeTier.ROOT ->
                 "Magisk/KernelSU detected. Direct sysfs writes available — Apply works for everything."
-            PrivilegeTier.AYN_SETTINGS ->
+            PrivilegeTier.VENDOR_SETTINGS ->
                 "${vb.brand} tier active. Vendor tuning is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
             PrivilegeTier.SHIZUKU ->
                 "Shizuku bound. Custom MHz needs root or the script path. Vendor tuning pending UserService support."
@@ -384,7 +384,7 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
             explainer,
             style = MaterialTheme.typography.bodySmall,
             color = when (report.privilege) {
-                PrivilegeTier.ROOT, PrivilegeTier.AYN_SETTINGS -> Color(0xFF999999)
+                PrivilegeTier.ROOT, PrivilegeTier.VENDOR_SETTINGS -> Color(0xFF999999)
                 else -> AccentBar.Blue
             },
         )

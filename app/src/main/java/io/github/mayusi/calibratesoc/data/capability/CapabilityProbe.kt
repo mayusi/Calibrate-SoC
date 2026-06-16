@@ -21,10 +21,12 @@ import javax.inject.Singleton
  * Privilege-tier selection — order matters:
  *   1. ROOT only when (a) root is present AND (b) the user opted into
  *      root mode in Settings. Off by default.
- *   2. AYN_SETTINGS when the AYN vendor app is present AND we already
- *      hold WRITE_SECURE_SETTINGS (granted once via adb / Shizuku).
- *      This is the headline experience on Odin handhelds: same
- *      controls as AYN's own Quick Settings tile, no root.
+ *   2. VENDOR_SETTINGS when any vendor perf app (AYN/Odin, AYANEO,
+ *      Retroid, …) is present AND we already hold WRITE_SECURE_SETTINGS
+ *      (granted once via adb / Shizuku). This unlocks the vendor's
+ *      fan/perf preset keys — same controls as the vendor's own Quick
+ *      Settings tile, no root. NOTE: this tier is the vendor PRESET
+ *      surface, not a live cpufreq path (see PrivilegeTier doc).
  *   3. SHIZUKU when Shizuku is bound + permission granted. Universal.
  *   4. NONE — read-only.
  *
@@ -107,7 +109,7 @@ class CapabilityProbe @Inject constructor(
             // WRITE_SECURE_SETTINGS unlocks vendor fan/perf preset
             // switching. They all share the fan_mode / performance_mode
             // Settings.System convention.
-            vendor.anyVendorPerfApp && hasSecureSettings -> PrivilegeTier.AYN_SETTINGS
+            vendor.anyVendorPerfApp && hasSecureSettings -> PrivilegeTier.VENDOR_SETTINGS
             shizuku.running && shizuku.permissionGranted -> PrivilegeTier.SHIZUKU
             else -> PrivilegeTier.NONE
         }

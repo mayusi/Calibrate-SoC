@@ -92,6 +92,22 @@ class AutoTdpService : Service() {
     /** Battery read-out to approximate low-battery detection. */
     private var batteryManager: android.os.BatteryManager? = null
 
+    /**
+     * GUARDRAIL 2: the CapabilityReport the daemon resolved this session, hoisted to a
+     * field so EVERY exit path (stopDaemon, onDestroy, onTaskRemoved, the runDaemon
+     * `finally`) can revert against it. Null before the daemon resolves capabilities
+     * (nothing has been written yet, so there is nothing to revert).
+     */
+    @Volatile private var sessionReport: CapabilityReport? = null
+
+    /**
+     * GUARDRAIL 2: the idempotent, NonCancellable revert. A single instance per session
+     * (rebuilt at daemon start) latches so the four exit paths revert AT MOST ONCE while
+     * GUARANTEEING the revert survives the loopJob cancellation that DEFECT B silently
+     * swallowed. Lazily created so a never-started service still has a no-op to call.
+     */
+    private var revert: AutoTdpRevert? = null
+
     override fun onCreate() {
         super.onCreate()
         batteryManager = getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
@@ -116,17 +132,56 @@ class AutoTdpService : Service() {
 
     override fun onBind(intent: Intent): IBinder? = null
 
+    /**
+     * GUARDRAIL 2: revert EVERY write to stock before the service is torn down.
+     *
+     * The KDoc at the top of this class always CLAIMED onDestroy reverted — it never
+     * did (DEFECT B). It now reverts SYNCHRONOUSLY: we block here (the lifecycle callback
+     * must finish the revert before the process can be reclaimed) via runBlocking, and
+     * [AutoTdpRevert.revertNow] runs the actual writes under NonCancellable so they land
+     * even though serviceScope is about to be cancelled. Idempotent with stopDaemon /
+     * onTaskRemoved / the finally — whichever ran first wins; the rest are no-ops.
+     */
     override fun onDestroy() {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onDestroy revert failed", it) }
+        }
         loopJob?.cancel()
         loopJob = null
         serviceScope.cancel()
         super.onDestroy()
     }
 
+    /**
+     * GUARDRAIL 2: when the user swipes the app away from Recents, Android may kill the
+     * process without an orderly onDestroy in time to flush a cancelled-job revert. Revert
+     * to stock here too, before deferring to the default teardown. Without this, a swipe-
+     * away mid-session could leave the cap pinned (DEFECT B's sibling path). Idempotent.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val report = sessionReport
+        val revertHandle = revert
+        if (report != null && revertHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
+            }.onFailure { Log.w(TAG, "onTaskRemoved revert failed", it) }
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     // ── Daemon lifecycle ──────────────────────────────────────────────────────
 
     private fun startDaemon(config: AutoTdpProfileConfig) {
         if (loopJob?.isActive == true) return // already running
+
+        // GUARDRAIL 2: a fresh, single-session revert latch. Reset the session report so
+        // a stop before capabilities resolve has nothing stale to revert against.
+        sessionReport = null
+        revert = AutoTdpRevert(tunableWriter)
 
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -211,6 +266,10 @@ class AutoTdpService : Service() {
         }
 
         // ── Step 3: build device caps ──────────────────────────────────────────
+        // GUARDRAIL 2: publish the resolved report so EVERY exit path (stopDaemon /
+        // onDestroy / onTaskRemoved / the finally) can revert against it. From here on
+        // the daemon may write, so from here on a revert is meaningful.
+        sessionReport = report
         val caps = TdpCaps.from(report)
         val gpuRootPath = report.gpu?.rootPath
 
@@ -473,10 +532,22 @@ class AutoTdpService : Service() {
         } finally {
             // Stop the savings probe if it's still mid-cycle — the session is over.
             sampler.cancel()
-            // ── Revert all writes (CRITICAL) ───────────────────────────────────
-            Log.i(TAG, "Reverting all AutoTDP writes via TunableWriter")
-            val summary = tunableWriter.revertAll(report)
-            Log.i(TAG, "Revert complete: ok=${summary.ok} failed=${summary.failed}")
+            // ── Revert all writes (CRITICAL — GUARDRAIL 2) ─────────────────────
+            // DEFECT B: this finally runs on the loopJob, and EVERY stop path reaches
+            // it via loopJob.cancel(). The old direct revertAll() routed through
+            // PServerWriter's withContext(Dispatchers.IO), which throws
+            // CancellationException on the already-cancelled job → writes silently
+            // skipped → 384 MHz cap stayed pinned until reboot. Routing through
+            // revertNow() runs the revert under NonCancellable so it ACTUALLY lands even
+            // when this finally fires because the job was cancelled. Idempotent: if
+            // stopDaemon/onDestroy already reverted, this is a no-op (returns null).
+            Log.i(TAG, "Reverting all AutoTDP writes via TunableWriter (finally)")
+            val summary = revert?.revertNow(report)
+            if (summary != null) {
+                Log.i(TAG, "Revert complete: ok=${summary.ok} failed=${summary.failed}")
+            } else {
+                Log.i(TAG, "Revert already performed by an earlier exit path (no-op)")
+            }
             // ── WAVE 3a: release clock ownership (un-suppresses the throttle guard). ──
             // No-op if a later owner (Game Boost) already took over — release() checks.
             arbiter.release(io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.AUTO_TDP)
@@ -528,6 +599,24 @@ class AutoTdpService : Service() {
         return lastResult
     }
 
+    /**
+     * Stop the daemon and revert EVERY write to stock — GUARDRAIL 2.
+     *
+     * DEFECT B: the old body cancelled the loop and called stopSelf() WITHOUT awaiting a
+     * revert; the only revert was the loop's `finally`, which rode the now-cancelled job
+     * and was silently skipped (PServer's withContext(Dispatchers.IO) threw
+     * CancellationException). So the 384 MHz cap stayed pinned until a reboot.
+     *
+     * Now: launch on the service scope, run [AutoTdpRevert.revertNow] (NonCancellable +
+     * IO) to completion FIRST, THEN cancel the loop and stopSelf. The revert is on a
+     * fresh coroutine and NonCancellable internally, so it lands regardless. Idempotent
+     * with the `finally` and onDestroy paths via the revert latch. Cancelling the loop
+     * AFTER the revert avoids a write/revert race (the loop is paused on its 1 Hz
+     * telemetry suspension between ticks; the NonCancellable revert writes stock, then we
+     * cancel so no further tick can re-tighten).
+     *
+     * Thermal-kill and battery-kill paths call this same function, so they revert too.
+     */
     private fun stopDaemon(
         status: AutoTdpStatus,
         killReason: String? = null,
@@ -541,9 +630,25 @@ class AutoTdpService : Service() {
                 writeFailure = writeFailure,
             )
         )
-        loopJob?.cancel()
-        loopJob = null
-        stopSelf()
+        val report = sessionReport
+        val revertHandle = revert
+        serviceScope.launch {
+            // Revert to stock FIRST (NonCancellable inside revertNow), awaiting completion
+            // so the device is back at kernel-default clocks before we tear down.
+            if (report != null && revertHandle != null) {
+                runCatching {
+                    val summary = revertHandle.revertNow(report)
+                    if (summary != null) {
+                        Log.i(TAG, "stopDaemon revert: ok=${summary.ok} failed=${summary.failed}")
+                    }
+                }.onFailure { Log.w(TAG, "stopDaemon revert failed", it) }
+            }
+            // Now it is safe to cancel the loop (its finally's revert is a latched no-op)
+            // and stop the service.
+            loopJob?.cancel()
+            loopJob = null
+            stopSelf()
+        }
     }
 
     // ── Safety checks ─────────────────────────────────────────────────────────

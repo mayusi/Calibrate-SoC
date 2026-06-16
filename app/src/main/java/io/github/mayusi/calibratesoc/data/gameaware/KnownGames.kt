@@ -176,6 +176,15 @@ object KnownGames {
         "com.sudachi"    to Hint("Sudachi (variant)", AutoTdpProfile.BALANCED, EmulationTier.HEAVY_3D),
         // Any Citra/Azahar variant:
         "org.citra"      to Hint("Citra (variant)",   AutoTdpProfile.EFFICIENCY, EmulationTier.HANDHELD_2D),
+        // ── Windows translation-layer wrappers (GUARDRAIL 4) ──────────────────────
+        // GameNative/IIC runs the game in a Wine wrapper whose FOREGROUND package is
+        // the wrapper itself (e.g. "app.gamenative.iic"), NOT the wrapped game. Without
+        // a prefix entry the classifier could not anchor it to a game, AUTO fell to
+        // BATTERY_SAVER on a low/null-GPU tick, and the cap collapsed (DEFECT A trigger
+        // #1). Both the new "app.gamenative" family and ANY "com.winlator" variant are
+        // heavy translation layers — anchor them so the foreground/paused-game guard works.
+        "app.gamenative" to Hint("GameNative (wrapper)", AutoTdpProfile.BALANCED, EmulationTier.TRANSLATION_LAYER),
+        "com.winlator"   to Hint("Winlator (variant)",   AutoTdpProfile.BALANCED, EmulationTier.TRANSLATION_LAYER),
     )
 
     private fun prefixMatch(packageName: String): Hint? =

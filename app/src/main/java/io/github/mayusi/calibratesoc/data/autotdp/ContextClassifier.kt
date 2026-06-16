@@ -125,6 +125,40 @@ object ContextClassifier {
         smoothedGpuPct: Int,
         prior: ClassifierState,
     ): ClassificationResult {
+        val result = classifyRaw(window, smoothedGpuPct, prior)
+
+        // ── GUARDRAIL 4: foreground-game/wrapper anchor floor ─────────────────────
+        // While a KNOWN game or translation-layer wrapper (e.g. GameNative/Winlator)
+        // is in the foreground, the context AUTO maps to a goal MUST NOT fall below
+        // LIGHT_GAME — even during the hysteresis confirm window where the committed
+        // `stable` may still be a stale IDLE/VIDEO from before the wrapper came
+        // foreground. Without this floor, AUTO could route to BATTERY_SAVER's aggressive
+        // power-cap for a tick or two while a heavy game runs (DEFECT A trigger #1).
+        //
+        // HONESTY: we floor only the RETURNED context (the belief AUTO acts on); the
+        // carried hysteresis state (stable/candidate/agreeingTicks) is left untouched so
+        // the tiering stays honest and the normal upgrade/downgrade machinery is
+        // unaffected. This is a belief anchored off the foreground package, not a
+        // measurement — the DETECTED honesty tier already conveys that.
+        val fgPkg = window.lastOrNull()?.foregroundPackage
+        val fgIsGame = fgPkg != null && KnownGames.defaultHintFor(fgPkg) != null
+        if (fgIsGame && isLighterThan(result.context, WorkloadContext.LIGHT_GAME)) {
+            return result.copy(context = WorkloadContext.LIGHT_GAME)
+        }
+        return result
+    }
+
+    /**
+     * The hysteresis state machine. Returns the committed context + next carried state
+     * WITHOUT the GUARDRAIL-4 foreground floor (applied by [classify]). Kept private so
+     * the floor is always enforced for AUTO; tests that need the raw state machine call
+     * [classify] and reason about the floored result.
+     */
+    private fun classifyRaw(
+        window: List<Telemetry>,
+        smoothedGpuPct: Int,
+        prior: ClassifierState,
+    ): ClassificationResult {
         if (window.isEmpty()) {
             // No data: hold whatever was stable; do not invent a context.
             return ClassificationResult(prior.stable, prior)

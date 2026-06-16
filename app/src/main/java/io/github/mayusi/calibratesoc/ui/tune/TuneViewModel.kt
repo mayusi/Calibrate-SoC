@@ -80,7 +80,7 @@ class TuneViewModel @Inject constructor(
         }.asStateFlow()
 
     /** Matched device adapter for the current report. Null on generic /
-     *  unknown devices. Drives the AYN_SETTINGS vendor card. Tied to
+     *  unknown devices. Drives the VENDOR_SETTINGS vendor card. Tied to
      *  the capability report's StateFlow rather than a one-shot init
      *  launch — that way the adapter updates if the report ever
      *  re-resolves to a different device key (rare, but happens on

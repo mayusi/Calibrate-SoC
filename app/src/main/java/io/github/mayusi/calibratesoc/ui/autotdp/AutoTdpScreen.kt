@@ -127,6 +127,7 @@ fun AutoTdpScreen(
     val lastScriptDeploy by viewModel.lastScriptDeploy.collectAsStateWithLifecycle()
     val perAppMap by viewModel.perAppMap.collectAsStateWithLifecycle()
     val showPServerUnlockCta by viewModel.showPServerUnlockCta.collectAsStateWithLifecycle()
+    val unlockLadder by viewModel.unlockLadder.collectAsStateWithLifecycle()
     val lastUnlockDeploy by viewModel.lastUnlockDeploy.collectAsStateWithLifecycle()
     val liveSnapshot by viewModel.liveSnapshot.collectAsStateWithLifecycle()
     val efficiencyPlan by viewModel.efficiencyPlan.collectAsStateWithLifecycle()
@@ -281,7 +282,17 @@ fun AutoTdpScreen(
             item { UndervoltTierPanel(capability = cap) }
         }
 
-        // ── 11. PServer unlock CTA ─────────────────────────────────────────────
+        // ── 10b. Vendor-neutral "reach LIVE" ladder ───────────────────────────
+        // Shown on ANY device when AutoTDP is not yet live. Ordered best-first:
+        // Grant Shizuku → Run unlock script → Enable root. The AYN PServer CTA
+        // below is the strongest form of the unlock-script rung on AYN/Odin.
+        unlockLadder?.let { ladder ->
+            item {
+                UnlockLadderArsenalCard(ladder = ladder)
+            }
+        }
+
+        // ── 11. PServer unlock CTA (AYN binder — strongest unlock-script rung) ──
         if (showPServerUnlockCta) {
             item {
                 PServerUnlockArsenalCard(
@@ -1551,6 +1562,94 @@ private fun BatteryTargetArsenalCard(
                     )
                 }
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Vendor-neutral "reach LIVE" ladder
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shows the ordered, vendor-neutral path ladder to reach LIVE AutoTDP when the
+ * device is not yet live. Honest per-device: each rung is labelled with what it
+ * can actually do on THIS device. No vendor-specific assumptions — works for
+ * AYANEO / GPD / Anbernic / generic Android exactly as for AYN/Retroid.
+ */
+@Composable
+private fun UnlockLadderArsenalCard(ladder: UnlockLadder) {
+    ArsenalPanel(accent = AccentBar.Amber, title = "Reach LIVE — pick a path") {
+        Text(
+            "AutoTDP isn't doing live kernel writes yet. Any ONE of these unlocks it — " +
+                "they're ordered easiest-first.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFBBBBBB),
+        )
+        Spacer(Modifier.height(Spacing.group))
+        ladder.steps.forEachIndexed { index, step ->
+            UnlockLadderRow(stepNumber = index + 1, step = step)
+            if (index < ladder.steps.lastIndex) {
+                Spacer(Modifier.height(Spacing.dense))
+            }
+        }
+        if (ladder.vendorBinderPathAvailable) {
+            Spacer(Modifier.height(Spacing.group))
+            AlertCard(
+                type = AlertType.INFO,
+                title = "Vendor fast-path detected",
+                message = "This device has a vendor service (AYN PServer). The one-time " +
+                    "unlock below uses it for the cleanest no-root LIVE — see the card under this one.",
+            )
+        }
+    }
+}
+
+@Composable
+private fun UnlockLadderRow(stepNumber: Int, step: UnlockStep) {
+    val title = when (step.kind) {
+        UnlockStepKind.SHIZUKU -> "Grant Shizuku"
+        UnlockStepKind.UNLOCK_SCRIPT -> "Run the unlock script once"
+        UnlockStepKind.ROOT -> "Enable root mode"
+    }
+    val detail = when (step.kind) {
+        UnlockStepKind.SHIZUKU ->
+            "No root, no reboot — the best default. Bind Shizuku and grant this app permission; " +
+                "AutoTDP then probes whether the kernel allows shell writes on this device."
+        UnlockStepKind.UNLOCK_SCRIPT ->
+            "Run it once via your device's \"Run script as Root\" runner. Needs SELinux permissive " +
+                "during the chmod. Resets on reboot — re-run after each boot."
+        UnlockStepKind.ROOT ->
+            "Magisk / KernelSU — full, vendor-independent live writes that survive reboot."
+    }
+    val (pillText, pillAccent) = when (step.state) {
+        UnlockStepState.DONE -> "DONE" to AccentBar.Emerald
+        UnlockStepState.DONE_BUT_INSUFFICIENT -> "GRANTED — KERNEL STILL BLOCKS" to AccentBar.Amber
+        UnlockStepState.AVAILABLE -> "AVAILABLE" to AccentBar.Blue
+        UnlockStepState.AVAILABLE_NEEDS_EXTERNAL_RUNNER -> "NEEDS A ROOT-SCRIPT RUNNER" to AccentBar.Amber
+        UnlockStepState.AVAILABLE_NEEDS_INSTALL -> "NEEDS MAGISK / KERNELSU" to AccentBar.Amber
+    }
+    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        Text(
+            "$stepNumber.",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
+                StatusPill(text = pillText, accent = pillAccent)
+            }
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
         }
     }
 }

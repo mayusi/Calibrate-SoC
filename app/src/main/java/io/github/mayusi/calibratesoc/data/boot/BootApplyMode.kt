@@ -27,7 +27,7 @@ enum class BootApplyMode { AUTO, REMINDER, UNSUPPORTED }
  *   1. If PServer-LIVE, root, Shizuku, OR the sysfs unlock-script chmod
  *      is in effect → [BootApplyMode.AUTO].  These paths survive boot and
  *      can perform a live write without user interaction.
- *   2. Else if the device has the AYN_SETTINGS privilege tier
+ *   2. Else if the device has the VENDOR_SETTINGS privilege tier
  *      (Settings.System keys via the vendor path — does NOT survive reboot
  *      by itself; requires the app to open) → [BootApplyMode.REMINDER].
  *      This tier cannot write on its own at boot because it needs a live
@@ -58,10 +58,10 @@ fun resolveBootApplyMode(report: CapabilityReport): BootApplyMode = when {
         report.pserverSysfsLive ||
         report.sysfsDirectlyWritable -> BootApplyMode.AUTO
 
-    // AYN_SETTINGS tier: the vendor Settings.System keys are accessible but
-    // writing them requires a live PServerBinder call (which in turn needs an
-    // app context, not just a receiver context).  Post a reminder instead.
-    report.privilege == PrivilegeTier.AYN_SETTINGS -> BootApplyMode.REMINDER
+    // VENDOR_SETTINGS tier: the vendor Settings.System keys are accessible but
+    // writing them requires a live app context to call Settings.putString (not
+    // just a receiver context).  Post a reminder instead.
+    report.privilege == PrivilegeTier.VENDOR_SETTINGS -> BootApplyMode.REMINDER
 
     // NONE tier or anything else: no write path at all at boot.
     else -> BootApplyMode.UNSUPPORTED

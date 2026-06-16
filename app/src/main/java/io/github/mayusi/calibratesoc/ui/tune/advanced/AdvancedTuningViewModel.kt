@@ -46,7 +46,7 @@ import javax.inject.Inject
  * Nodes NOT covered (procfs, cgroups) switch to script-builder mode for
  * those specific controls.
  *
- * ### AYN_SETTINGS / NONE / SHIZUKU (stock, no chmod) — SCRIPT-BUILDER MODE
+ * ### VENDOR_SETTINGS / NONE / SHIZUKU (stock, no chmod) — SCRIPT-BUILDER MODE
  * Controls become ENABLED for value selection.  Each interaction calls
  * [stageAdvancedKnob] instead of [write]; the value lands in [pendingAdvanced].
  * The user then taps "Generate Script" ([generateAdvancedScript]) which

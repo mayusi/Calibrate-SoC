@@ -21,7 +21,7 @@ import io.github.mayusi.calibratesoc.data.capability.FanSource
  *    compatible handhelds (GPD, AYANEO via hwmon).
  *  - [FanSource.VENDOR_SETTINGS_KEY] — AYN / Retroid "fan_mode" Settings.System
  *    key.  Writable when the AYN game-assistant or retroid companion is
- *    present AND the app holds WRITE_SECURE_SETTINGS (AYN_SETTINGS tier).
+ *    present AND the app holds WRITE_SECURE_SETTINGS (VENDOR_SETTINGS tier).
  *    Full PWM curve is not available here — only presets — but we still model
  *    a duty→preset mapping so the service can pick the nearest preset.
  *  - [FanSource.VENDOR_SERVICE_INTENT] — AYANEO AYASpace binder.

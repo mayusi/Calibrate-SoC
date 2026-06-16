@@ -27,7 +27,7 @@ import javax.inject.Singleton
  *     ShizukuWriter (shell-UID binder write).
  *   * SYSFS on Shizuku tier AND node NOT probe-confirmed →
  *     NoopWriter with CapabilityDenied (honest: shell can't write this node).
- *   * SYSFS on AYN_SETTINGS / NONE when PServer is TRANSACTABLE (whitelist
+ *   * SYSFS on VENDOR_SETTINGS / NONE when PServer is TRANSACTABLE (whitelist
  *     step has been run) → PServerWriter. PServer runs as root and can write
  *     any sysfs node without per-boot chmod. This is the "PServer-LIVE" tier
  *     for AutoTDP on AYN Odin 2/3/Thor.
@@ -80,7 +80,7 @@ class WriterRegistry @Inject constructor(
                     // fall through to NoopWriter so the UI honestly reports denial.
                     if (nodeCache.isCachedWritable(id.target)) shizuku else noop
                 }
-                PrivilegeTier.AYN_SETTINGS,
+                PrivilegeTier.VENDOR_SETTINGS,
                 PrivilegeTier.NONE -> {
                     when {
                         // PServer-LIVE tier: AYN devices where the one-time whitelist

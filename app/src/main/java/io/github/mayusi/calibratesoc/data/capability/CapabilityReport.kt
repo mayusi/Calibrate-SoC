@@ -127,13 +127,23 @@ enum class PrivilegeTier {
      *  writes + Shizuku-shell sysfs writes (where the kernel allows them).
      *  Universal across vendors. */
     SHIZUKU,
-    /** AYN handheld with vendor "game assistant" present AND we hold
-     *  WRITE_SECURE_SETTINGS (granted once via `adb shell pm grant`).
-     *  Unlocks performance_mode / fan_mode / fan_thermal_management_area
-     *  flips — same surface AYN's own Quick Settings tile uses.
-     *  No root, no Magisk. The headline "useful out of the box" tier
-     *  on Odin 2/3 / Thor. */
-    AYN_SETTINGS,
+    /** Any vendor handheld (AYN/Odin, AYANEO, Retroid, …) whose perf
+     *  companion app is present AND we hold WRITE_SECURE_SETTINGS
+     *  (granted once via `adb shell pm grant`). Unlocks the vendor's
+     *  performance_mode / fan_mode preset flips via Settings.System keys
+     *  — the same surface the vendor's own Quick Settings tile uses.
+     *  No root, no Magisk.
+     *
+     *  HONESTY: this tier means "the vendor preset keys are writable",
+     *  NOT "live cpufreq tuning is available". On some vendors (e.g.
+     *  AYANEO, whose fan/perf ride a private binder rather than these
+     *  Settings keys) a key write succeeds but moves no kernel node — so
+     *  this tier is NEVER assumed to be a live cpufreq write path. The
+     *  live-write decision goes through [WriterRegistry.isLiveWritable]
+     *  against the actual sysfs node, which returns NoopWriter for this
+     *  tier on a SYSFS cap. The headline "useful out of the box" tier on
+     *  Odin 2/3 / Thor and Retroid, where the vendor subscribes to the keys. */
+    VENDOR_SETTINGS,
     /** Neither — monitor + benchmark + read-only. */
     NONE,
 }

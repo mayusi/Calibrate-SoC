@@ -39,7 +39,7 @@ private const val TAG = "BootRevertReceiver"
  *                  profiles are still blocked.  Posts a quiet success notification.
  *
  *      REMINDER  → post a "Tap to re-apply <name>" notification that deep-
- *                  links into MainActivity.  Used when only the AYN_SETTINGS
+ *                  links into MainActivity.  Used when only the VENDOR_SETTINGS
  *                  tier is available (Settings.System keys that need a live
  *                  app context).  Never silently fails.
  *

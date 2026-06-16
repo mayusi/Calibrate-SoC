@@ -22,9 +22,9 @@ private val Context.dataStore by preferencesDataStore(name = "user_prefs")
  * Small DataStore-backed preference bag. Currently:
  *   - oc_acknowledged:       first-write risk modal has been dismissed
  *   - root_mode_enabled:     user opted IN to Magisk/KernelSU privilege tier.
- *     OFF by default so casual users never see a root prompt; the AYN
+ *     OFF by default so casual users never see a root prompt; a vendor
  *     handheld can do everything its stock UI does via the
- *     AYN_SETTINGS tier without root.
+ *     VENDOR_SETTINGS tier without root.
  *   - accent_color:          user-chosen AccentColor enum name (default BLUE)
  *   - clock_unit:            MHz vs GHz display preference (default MHZ)
  *   - temp_unit:             °C vs °F display preference (default CELSIUS)
