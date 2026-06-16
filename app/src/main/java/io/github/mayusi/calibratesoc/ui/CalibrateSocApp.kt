@@ -180,8 +180,9 @@ fun CalibrateSocApp(
                     )
                 }
                 composable(Destination.Profiles.route) {
+                    // Profiles moved to tab index 4 when Fan Curve was inserted at 3.
                     TuneHubScreen(
-                        initialTab = 3,
+                        initialTab = 4,
                         onOpenHistory = { nav.navigate(Destination.TuneHistory.route) },
                     )
                 }

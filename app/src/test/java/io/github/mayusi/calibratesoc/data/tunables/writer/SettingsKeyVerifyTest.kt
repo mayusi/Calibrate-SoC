@@ -124,6 +124,7 @@ class SettingsKeyVerifyTest {
             noop = NoopWriter(mockk(relaxed = true)),
             unlockedFile = UnlockedFileWriter(),
             nodeCache = nodeCache,
+            ayaneo = mockk(relaxed = true),
         )
 
         val report = vendorSettingsReport()

@@ -107,7 +107,8 @@ class PServerWriterLiveTest {
         val unlockedFile = UnlockedFileWriter()
         val nodeCache = mockk<ShizukuNodeCache>()
         every { nodeCache.isCachedWritable(any()) } returns false
-        return WriterRegistry(root, shizuku, settings, pserver, noop, unlockedFile, nodeCache)
+        val ayaneo = mockk<io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoVendorWriter>(relaxed = true)
+        return WriterRegistry(root, shizuku, settings, pserver, noop, unlockedFile, nodeCache, ayaneo)
     }
 
     // ── 1. WriterRegistry tier-resolution ────────────────────────────────────

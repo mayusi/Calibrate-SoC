@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.data.capability
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +49,7 @@ class CapabilityProbe @Inject constructor(
     private val userPrefs: UserPrefs,
     private val advancedPermissionsScript: AdvancedPermissionsScript,
     private val pServerWriter: PServerWriter,
+    private val ayaneoBinderClient: AyaneoBinderClient,
 ) {
     private val _report = MutableStateFlow<CapabilityReport?>(null)
     val report: StateFlow<CapabilityReport?> = _report.asStateFlow()
@@ -67,6 +69,12 @@ class CapabilityProbe @Inject constructor(
         // diagnostic below report against a settled cache. On non-AYN devices binder() is
         // null so this returns false with no IPC.
         val pserverSysfsLive = pServerWriter.isTransactable()
+
+        // Warm the AYANEO vendor-binder availability the same way. On non-AYANEO devices
+        // `com.ayaneo.gamewindow` is absent so this returns false with NO bind/IPC (a
+        // cheap package-presence short-circuit). On an AYANEO Pocket DS it performs a real
+        // bind once and caches the result — the ZERO-SETUP live-write tier for AYANEO.
+        val ayaneoBinderLive = ayaneoBinderClient.isAvailable()
 
         val gpu = sysfsProber.probeGpu(soc.gpuFamily)
         val thermal = sysfsProber.probeThermalZones()
@@ -140,6 +148,7 @@ class CapabilityProbe @Inject constructor(
             inputBoost = inputBoost,
             sysfsDirectlyWritable = sysfsDirectlyWritable,
             pserverSysfsLive = pserverSysfsLive,
+            ayaneoBinderLive = ayaneoBinderLive,
         ).also { _report.value = it }
     }
 

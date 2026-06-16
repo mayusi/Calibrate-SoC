@@ -658,8 +658,17 @@ class AutoTdpViewModel @Inject constructor(
         if (report == null) return false
         // Core-parking family proxy: cpu0/online tells us whether the cpu/online
         // family is writable at all (cpu0 itself is never parked).
-        val onlineId = Tunables.cpuOnline(0)
-        if (!writerRegistry.isLiveWritable(onlineId, report)) return false
+        //
+        // EXCEPTION — AYANEO vendor-binder live path: the binder cannot drive cpu/online
+        // (no core-parking command), only the CPU cluster CAP, governor, GPU max, and fan.
+        // AutoTDP runs LIVE on the cap path (the engine skips the park lever when no core is
+        // parkable), so on a binder-live AYANEO the cap check alone gates LIVE. This MUST
+        // mirror AutoTdpService.liveUnavailableReason so the rung shown before START agrees
+        // with what the daemon does after.
+        if (!report.ayaneoBinderLive) {
+            val onlineId = Tunables.cpuOnline(0)
+            if (!writerRegistry.isLiveWritable(onlineId, report)) return false
+        }
         // Prime-cluster cap: the policy whose top OPP is highest is the one
         // AutoTDP caps. Same selection the daemon uses.
         val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }

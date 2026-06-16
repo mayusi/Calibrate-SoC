@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import io.github.mayusi.calibratesoc.ui.autotdp.AutoTdpScreen
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.fancurve.FanCurveScreen
 import io.github.mayusi.calibratesoc.ui.profiles.ProfilesScreen
 import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
 
@@ -38,7 +39,8 @@ import io.github.mayusi.calibratesoc.ui.tune.advanced.AdvancedTuningScreen
  *   0  TUNES     — CPU/GPU sliders + tunes (existing TuneScreen)
  *   1  ADVANCED  — governor tunables, custom sysfs (existing AdvancedTuningScreen)
  *   2  AUTO TDP  — dynamic power management (existing AutoTdpScreen)
- *   3  PROFILES  — saved tunes + per-app overrides (existing ProfilesScreen)
+ *   3  FAN CURVE — custom smart fan curve (Odin) (FanCurveScreen)
+ *   4  PROFILES  — saved tunes + per-app overrides (existing ProfilesScreen)
  *
  * AutoTDP and Advanced Tuning are now THEIR OWN TOP-LEVEL DESTINATIONS
  * accessible from the bottom bar → Tune tab. They are no longer buried
@@ -54,7 +56,7 @@ fun TuneHubScreen(
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(initialTab) }
 
-    val tabs = listOf("TUNES", "ADVANCED", "AUTO TDP", "PROFILES")
+    val tabs = listOf("TUNES", "ADVANCED", "AUTO TDP", "FAN CURVE", "PROFILES")
 
     Column(modifier = Modifier.fillMaxSize()) {
         // ── Arsenal Segmented Tab Control ──────────────────────────────────
@@ -77,7 +79,8 @@ fun TuneHubScreen(
                 )
                 1 -> AdvancedTuningScreen(onBack = { selectedTab = 0 })
                 2 -> AutoTdpScreen(onBack = { selectedTab = 0 })
-                3 -> ProfilesScreen()
+                3 -> FanCurveScreen(onBack = { selectedTab = 0 })
+                4 -> ProfilesScreen()
             }
         }
     }

@@ -78,6 +78,29 @@ data class CapabilityReport(
      * (the Odin 3 registers the service even when it blocks our UID).
      */
     val pserverSysfsLive: Boolean = false,
+    /**
+     * True when AYANEO's vendor perf binder is LIVE: `com.ayaneo.gamewindow`'s exported
+     * `AyaAidlService` is installed AND a real bind succeeded (verified live on the
+     * AYANEO Pocket DS). When true, [WriterRegistry] routes the bindable SYSFS tunables
+     * (CPU cluster scaling_max_freq / scaling_governor, GPU devfreq max_freq, fan) to
+     * [io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoVendorWriter].
+     *
+     * This is the AYANEO analog of [pserverSysfsLive] — a ZERO-SETUP live-write tier
+     * (no root, no Shizuku, no unlock script): the overlay (uid=system) actuates the
+     * privileged sysfs write on the app's behalf.
+     *
+     * Set by [CapabilityProbe] via
+     * [io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient.isAvailable].
+     * Memoised for the session; false on non-AYANEO devices (gamewindow absent → no IPC).
+     *
+     * HONESTY: only true when a REAL bind round-trip confirmed the service is bindable.
+     * "package installed" alone is NOT sufficient.
+     *
+     * NOTE: the binder cannot drive core parking (cpu/online); it drives the CPU cluster
+     * CAP, governor, GPU max, and fan. AutoTDP runs LIVE on the cap path — the engine
+     * simply never uses the park lever on this device (it skips to the cap lever).
+     */
+    val ayaneoBinderLive: Boolean = false,
 )
 
 @Serializable

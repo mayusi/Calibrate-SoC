@@ -25,7 +25,20 @@ class VendorAppDetector @Inject constructor(
         aynGameAssistant = installed("com.odin.gameassistant") ||
             installed("com.ayn.gameassistant"),
         langerhansOdinTools = installed("de.langerhans.odintools"),
-        ayaSpace = installed("com.ayaneo.ayaspace"),
+        // AYANEO devices. Older models (e.g. Pocket S) ship AYASpace
+        // (com.ayaneo.ayaspace). The Pocket DS ships a different suite:
+        // com.ayaneo.settings (system settings), com.aya.gsset (GPU/perf
+        // settings), com.ayaneo.gamewindow, com.ayaneo.gamelauncher, and
+        // com.ayaneo.home. All verified by a live probe on the Pocket DS.
+        // Checking ANY of these is sufficient to conclude "this is an AYANEO
+        // device" — the vendor's private binder owns fan/perf; Settings.System
+        // keys are inert (no live cpufreq path via this tier on the Pocket DS).
+        ayaSpace = installed("com.ayaneo.ayaspace") ||
+            installed("com.ayaneo.settings") ||
+            installed("com.aya.gsset") ||
+            installed("com.ayaneo.gamewindow") ||
+            installed("com.ayaneo.gamelauncher") ||
+            installed("com.ayaneo.home"),
         // Retroid Pocket 6: com.rp.gameassistant is the perf/fan app;
         // com.retroidpocket.gamelauncher is the launcher. Verified live
         // on RP6 firmware.

@@ -690,10 +690,19 @@ class AutoTdpService : Service() {
         // Check cpu0/online as a proxy for all cpu$N/online nodes (same privilege).
         // cpu0 is never parked, but its writability tells us if the cpu/online family
         // is accessible. If it's not, parking any other core will fail too.
-        val onlineId = Tunables.cpuOnline(0)
-        if (!writerRegistry.isLiveWritable(onlineId, report)) {
-            val why = Tunables.whyWriteDenied(onlineId, report)
-            return "cpu online/offline not writable — ${why ?: "writer would deny"}"
+        //
+        // EXCEPTION — AYANEO vendor-binder live path: the binder drives the CPU cluster
+        // CAP (scaling_max_freq), governor, GPU max, and fan, but has NO command for core
+        // parking (cpu/online). That is fine: the engine's PARK lever skips itself when no
+        // core can be parked and walks to the CAP lever, so AutoTDP runs LIVE purely on the
+        // cap path. So on a binder-live AYANEO we do NOT require cpu/online — the cap check
+        // below is the live gate. (The hard cap floor + revert-on-exit still apply equally.)
+        if (!report.ayaneoBinderLive) {
+            val onlineId = Tunables.cpuOnline(0)
+            if (!writerRegistry.isLiveWritable(onlineId, report)) {
+                val why = Tunables.whyWriteDenied(onlineId, report)
+                return "cpu online/offline not writable — ${why ?: "writer would deny"}"
+            }
         }
         // Check the first policy's scaling_max_freq.
         val bigPolicy = report.cpuPolicies.maxByOrNull { it.availableFreqsKhz.maxOrNull() ?: 0 }

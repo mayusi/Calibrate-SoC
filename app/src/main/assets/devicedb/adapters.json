@@ -138,6 +138,14 @@
     "notes": "Pocket 4 is passively cooled."
   },
   {
+    "key": "ayaneo_pocket_ds",
+    "displayName": "AYANEO Pocket DS",
+    "vendorAppPackage": "com.ayaneo.settings",
+    "fanAdapter": null,
+    "perfPresetAdapter": null,
+    "notes": "Snapdragon G3x Gen 2 (SG8275, QTI), Android 13. SELinux Permissive (unusual) but DAC perms still deny cpufreq writes to the app UID — scaling_max_freq is system:system mode 660. THREE CPU clusters: policy0 (little), policy3 (gold), policy7 (prime) — same topology as AYN Thor / RP6. Prime cluster determined at runtime by maxByOrNull on available freqs (policy7 on this device). GPU Adreno (kgsl-3d0, devfreq present, 124.8–680 MHz). NO PServerBinder — vendor binder absent. Present vendor binders: vendor.perfservice, IGameManagerService, IHintManager, IThermalService. Vendor apps: com.ayaneo.settings, com.aya.gsset, com.ayaneo.gamewindow, com.ayaneo.gamelauncher, com.ayaneo.home. Fan and perf are driven by vendor apps via a private binder — NOT via Settings.System fan_mode/performance_mode keys (writing those keys is INERT on this device, confirmed by readback-verify in 0.1.30). No Shizuku installed on the probe device. Intended live path: install Shizuku + grant permission → SHIZUKU tier → live sysfs writes."
+  },
+  {
     "key": "ayaneo_pocket_s",
     "displayName": "AYANEO Pocket S",
     "vendorAppPackage": "com.ayaneo.ayaspace",

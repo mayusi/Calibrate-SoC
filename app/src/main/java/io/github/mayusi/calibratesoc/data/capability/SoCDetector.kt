@@ -92,6 +92,9 @@ class SoCDetector @Inject constructor(
             "moorechip" in m && (matches("pocket 6") || "pocket6" in collapsed) -> "retroid_pocket6"
             "moorechip" in m -> "retroid"
             "ayaneo" in m && matches("pocket s") -> "ayaneo_pocket_s"
+            // Pocket DS: ro.product.model="Pocket DS", ro.product.device="PocketDS".
+            // Match both the spaced model name and the collapsed device codename.
+            "ayaneo" in m && (matches("pocket ds") || "pocketds" in collapsed) -> "ayaneo_pocket_ds"
             "ayaneo" in m -> "ayaneo"
             "anbernic" in m && "rg556" in m -> "anbernic_rg556"
             "anbernic" in m && "ds" in m -> "anbernic_ds"

@@ -121,7 +121,8 @@ class TierResolutionOrderTest {
         val settings = mockk<SettingsKeyWriter>(relaxed = true)
         val noop = NoopWriter(mockk(relaxed = true))
         val unlockedFile = UnlockedFileWriter()
-        return WriterRegistry(root, shizuku, settings, pserver, noop, unlockedFile, nodeCache)
+        val ayaneo = mockk<io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoVendorWriter>(relaxed = true)
+        return WriterRegistry(root, shizuku, settings, pserver, noop, unlockedFile, nodeCache, ayaneo)
     }
 
     private val SCALING_MAX_FREQ = TunableId(

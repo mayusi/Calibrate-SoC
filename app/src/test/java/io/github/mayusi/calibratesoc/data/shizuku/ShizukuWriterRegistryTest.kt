@@ -67,6 +67,7 @@ class ShizukuWriterRegistryTest {
             noop = noop,
             unlockedFile = unlockedFile,
             nodeCache = nodeCache,
+            ayaneo = mockk(relaxed = true),
         )
     }
 

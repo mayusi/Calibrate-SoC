@@ -6,6 +6,7 @@ import io.github.mayusi.calibratesoc.data.shizuku.ShizukuNodeCache
 import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
+import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoVendorWriter
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -57,6 +58,7 @@ class WriterRegistry @Inject constructor(
     private val noop: NoopWriter,
     private val unlockedFile: UnlockedFileWriter,
     private val nodeCache: ShizukuNodeCache,
+    private val ayaneo: AyaneoVendorWriter,
 ) {
     fun writerFor(id: TunableId, report: CapabilityReport): SysfsWriter =
         when (id.kind) {
@@ -71,17 +73,33 @@ class WriterRegistry @Inject constructor(
                 if (report.vendorApps.anyVendorPerfApp && pserver.binder() != null) pserver else settings
             }
             TunableKind.VENDOR_INTENT -> settings
-            TunableKind.SYSFS -> when (report.privilege) {
-                PrivilegeTier.ROOT -> root
-                PrivilegeTier.SHIZUKU -> {
-                    // Only route to ShizukuWriter when the per-node probe confirmed
-                    // shell can actually write this path on this device. If the node
-                    // hasn't passed the probe (vendor SELinux denial or not yet probed),
-                    // fall through to NoopWriter so the UI honestly reports denial.
-                    if (nodeCache.isCachedWritable(id.target)) shizuku else noop
-                }
-                PrivilegeTier.VENDOR_SETTINGS,
-                PrivilegeTier.NONE -> {
+            TunableKind.SYSFS -> {
+                // AYANEO VENDOR-BINDER LIVE tier (ZERO-SETUP, no root/Shizuku/script):
+                // when the gamewindow AyaAidlService is bindable, route the BINDABLE node
+                // families (CPU cluster scaling_max_freq / scaling_governor, GPU devfreq
+                // max_freq, fan pwm) to AyaneoVendorWriter. The overlay (uid=system)
+                // actuates the privileged write; AyaneoVendorWriter reads the node back to
+                // verify. This takes precedence over the privilege-tier ladder below
+                // because it is the device's NATIVE live path and needs no setup.
+                //
+                // HONESTY: only BINDABLE nodes route here. Non-bindable SYSFS (cpu/online
+                // core-parking, min-freq floor, GPU pwrlevel, devfreq min, uclamp, /proc)
+                // fall through to the tier ladder → NoopWriter, so isLiveWritable honestly
+                // reports them as not live-writable on AYANEO. ayaneoBinderLive is only
+                // true when a REAL bind round-trip confirmed the service is bindable.
+                if (report.ayaneoBinderLive && AyaneoVendorWriter.isBindableNode(id.target)) {
+                    ayaneo
+                } else when (report.privilege) {
+                    PrivilegeTier.ROOT -> root
+                    PrivilegeTier.SHIZUKU -> {
+                        // Only route to ShizukuWriter when the per-node probe confirmed
+                        // shell can actually write this path on this device. If the node
+                        // hasn't passed the probe (vendor SELinux denial or not yet probed),
+                        // fall through to NoopWriter so the UI honestly reports denial.
+                        if (nodeCache.isCachedWritable(id.target)) shizuku else noop
+                    }
+                    PrivilegeTier.VENDOR_SETTINGS,
+                    PrivilegeTier.NONE -> {
                     when {
                         // PServer-LIVE tier: AYN devices where the one-time whitelist
                         // step has been run. PServer executes our shell commands as root,
@@ -102,6 +120,7 @@ class WriterRegistry @Inject constructor(
                             unlockedFile
 
                         else -> noop
+                    }
                     }
                 }
             }

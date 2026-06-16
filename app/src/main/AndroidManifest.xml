@@ -107,6 +107,14 @@
         <package android:name="com.ayn.gameassistant" />
         <package android:name="de.langerhans.odintools" />
         <package android:name="com.ayaneo.ayaspace" />
+        <!-- AYANEO Pocket DS vendor apps. Verified by live probe on the
+             physical device. AYASpace is absent on this model; these are
+             the actual vendor packages that fulfil the same role. -->
+        <package android:name="com.ayaneo.settings" />
+        <package android:name="com.aya.gsset" />
+        <package android:name="com.ayaneo.gamewindow" />
+        <package android:name="com.ayaneo.gamelauncher" />
+        <package android:name="com.ayaneo.home" />
         <!-- Retroid Pocket 6 vendor apps (verified live on RP6).
              com.rp.settings hosts the "run script as root" runner
              (same com.ro.* firmware base as Odin). -->
@@ -239,6 +247,26 @@
             android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          DE-RISK PROBE (debug-only, removable). Lets us fire AyaneoBindProbe
+          from adb to answer one question: can a normal app bind AYANEO's
+          exported AyaAidlService and drive a GPU-max change on Pocket DS?
+
+          Disabled + un-exported here so it is INERT in release builds. The
+          debug-only manifest overlay (src/debug/AndroidManifest.xml) flips it
+          to enabled + exported for debug builds. onReceive() also hard-returns
+          unless BuildConfig.DEBUG as a second guard. Delete this block, the
+          overlay, and the debug/ package once the probe has served its purpose.
+        -->
+        <receiver
+            android:name=".debug.AyaneoProbeReceiver"
+            android:enabled="false"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="io.github.mayusi.calibratesoc.debug.PROBE_AYANEO" />
             </intent-filter>
         </receiver>
 
