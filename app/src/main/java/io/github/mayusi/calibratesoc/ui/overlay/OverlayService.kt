@@ -4,9 +4,12 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.PixelFormat
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
@@ -14,6 +17,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -122,11 +126,37 @@ class OverlayService :
     override val viewModelStore get() = _viewModelStore
 
     private var windowManager: WindowManager? = null
-    private var composeView: ComposeView? = null
+    // The view actually attached to the WindowManager — an [UnboundedWidthHost]
+    // FrameLayout that wraps the ComposeView and forces an UNSPECIFIED width
+    // measure (see UnboundedWidthHost for the full root-cause writeup). Drag +
+    // clampToScreen operate on this host, since it is the window's content view.
+    private var hostView: View? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var dragHandler: DragHandler? = null
 
     private val frameRateSampler = HudFrameRateSampler()
+
+    /**
+     * Sticky ACTION_BATTERY_CHANGED receiver — the honest, ANR-safe source of the
+     * battery % shown in the HUD. Mirrors the Dashboard's PERF-2 pattern: register
+     * once with the sticky filter (the framework returns the current level
+     * synchronously, subsequent changes arrive via [onReceive]), so we NEVER do a
+     * per-tick binder/registerReceiver call from a composable. Battery % changes a
+     * few times an hour, not every frame. Null stays null → HUD shows "—".
+     */
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            assembler.feedBatteryPct(readBatteryPct(intent))
+        }
+    }
+    private var batteryReceiverRegistered = false
+
+    /** Parse a 0–100 level from an ACTION_BATTERY_CHANGED intent, or null. */
+    private fun readBatteryPct(intent: Intent?): Int? {
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) (level * 100 / scale).coerceIn(0, 100) else null
+    }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -153,6 +183,19 @@ class OverlayService :
 
         // Kick off all telemetry + AutoTDP observation in the assembler.
         assembler.start(serviceScope)
+
+        // Register the sticky battery receiver and seed the first level. The
+        // sticky Intent is returned synchronously by registerReceiver, so the HUD
+        // has a real % on the first frame without any polling. runCatching guards
+        // a framework refusal (e.g. headless context) — null then renders as "—".
+        runCatching {
+            val sticky = registerReceiver(
+                batteryReceiver,
+                IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            )
+            batteryReceiverRegistered = true
+            assembler.feedBatteryPct(readBatteryPct(sticky))
+        }
 
         attachOverlay()
         observeProfile()
@@ -185,7 +228,7 @@ class OverlayService :
         // Refresh rate → WindowManager preferred display mode ID.
         serviceScope.launch {
             refreshRateController.preferredHz.collect { hz ->
-                val view = composeView ?: return@collect
+                val view = hostView ?: return@collect
                 val params = layoutParams ?: return@collect
                 val newId = hz?.let { refreshRateController.resolveModeIdForHz(it) } ?: 0
                 if (params.preferredDisplayModeId != newId) {
@@ -237,6 +280,10 @@ class OverlayService :
     override fun onBind(intent: Intent): IBinder? = null
 
     override fun onDestroy() {
+        if (batteryReceiverRegistered) {
+            runCatching { unregisterReceiver(batteryReceiver) }
+            batteryReceiverRegistered = false
+        }
         frameRateSampler.stop()
         gameFpsSampler.stop()
         // Detach the FPS bridge — the overlay-layer sampler is going away.
@@ -244,8 +291,8 @@ class OverlayService :
             io.github.mayusi.calibratesoc.data.autotdp.RealFpsSupplier.NONE
         dragHandler?.stop()
         dragHandler = null
-        runCatching { composeView?.let { windowManager?.removeView(it) } }
-        composeView = null
+        runCatching { hostView?.let { windowManager?.removeView(it) } }
+        hostView = null
         _viewModelStore.clear()
 
         // CRITICAL (UI) ANR + C-3 FIX: the two persistence writes onDestroy must perform —
@@ -343,8 +390,13 @@ class OverlayService :
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 0
+            // Spawn INSET from the top-left corner (not flush at 0,0) so the very
+            // first frame — before the async saved-position read below lands —
+            // already floats as an intentional HUD instead of being jammed into
+            // the screen corner. Matches HudPrefs.DEFAULT_X/Y_DP (the persisted
+            // first-run default), so first frame and post-read placement agree.
+            x = (HudPrefs.DEFAULT_X_DP * density).roundToInt()
+            y = (HudPrefs.DEFAULT_Y_DP * density).roundToInt()
         }
         layoutParams = params
 
@@ -354,10 +406,15 @@ class OverlayService :
         serviceScope.launch {
             val savedXDp = hudPrefs.xDp.first()
             val savedYDp = hudPrefs.yDp.first()
-            val view = composeView ?: return@launch
+            val view = hostView ?: return@launch
             val p = layoutParams ?: return@launch
             p.x = (savedXDp * density).roundToInt()
             p.y = (savedYDp * density).roundToInt()
+            // Clamp so a position saved near (or past) the right/bottom edge can't
+            // place the WRAP_CONTENT bar partly off-screen. The view may not be
+            // measured yet on this first pass, so also re-clamp after layout once
+            // its real width is known (see view.post below).
+            windowManager?.let { wm -> clampToScreen(p, view, wm) }
             runCatching { windowManager?.updateViewLayout(view, p) }
                 .onFailure { e ->
                     hudEventLog.add(
@@ -365,9 +422,19 @@ class OverlayService :
                         "initial position updateViewLayout failed: ${e.message}",
                     )
                 }
+            // Re-clamp once the bar has measured its real (dynamic) width, so the
+            // trailing BAT + swap + close cells are guaranteed fully visible.
+            view.post {
+                val wm = windowManager ?: return@post
+                val before = p.x to p.y
+                clampToScreen(p, view, wm)
+                if (p.x to p.y != before) {
+                    runCatching { wm.updateViewLayout(view, p) }
+                }
+            }
         }
 
-        val view = ComposeView(this).apply {
+        val composeView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@OverlayService)
             setViewTreeSavedStateRegistryOwner(this@OverlayService)
             setViewTreeViewModelStoreOwner(this@OverlayService)
@@ -449,30 +516,75 @@ class OverlayService :
                 }
             }
         }
-        composeView = view
+        // Wrap the ComposeView in a host that forces an UNSPECIFIED-width measure
+        // so the WRAP_CONTENT overlay window sizes to the bar's FULL intrinsic
+        // width (root-cause fix — see [UnboundedWidthHost]). The host is the view
+        // attached to the WindowManager and the one dragged/clamped; the inner
+        // ComposeView owns the composition + lifecycle wiring above.
+        val host = UnboundedWidthHost(this).apply {
+            // CRITICAL: the host is the view actually attached to the WindowManager,
+            // and Compose resolves ViewTreeLifecycleOwner / SavedStateRegistry /
+            // ViewModelStore by walking UP from the ComposeView through its parents.
+            // The owners MUST be set on this host (not only the inner ComposeView),
+            // otherwise AbstractComposeView throws "ViewTreeLifecycleOwner not found"
+            // when it creates its recomposer on attach → crash on HUD show.
+            setViewTreeLifecycleOwner(this@OverlayService)
+            setViewTreeSavedStateRegistryOwner(this@OverlayService)
+            setViewTreeViewModelStoreOwner(this@OverlayService)
+            addView(
+                composeView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        hostView = host
 
-        val handler = DragHandler(params, wm, view, density) { xDp, yDp ->
+        val handler = DragHandler(params, wm, host, density) { xDp, yDp ->
             lifecycleScope.launch { hudPrefs.setPosition(xDp, yDp) }
         }
         dragHandler = handler
-        view.setOnTouchListener(handler)
-        wm.addView(view, params)
+        host.setOnTouchListener(handler)
+        wm.addView(host, params)
     }
 
     // ── Observers ─────────────────────────────────────────────────────────────
 
     private fun observeProfile() {
         lifecycleScope.launch {
-            hudPrefs.profile.collect { assembler.feedProfile(it) }
+            hudPrefs.profile.collect { profile ->
+                assembler.feedProfile(profile)
+                // RE-CLAMP ON EXPAND (verbose visibility fix): COMPACT→VERBOSE grows
+                // the WRAP_CONTENT window from a thin bar to a tall ~330dp card. The
+                // window keeps the bar's (x,y), so a bar sitting near the bottom/right
+                // edge would push the expanded panel mostly OFF-SCREEN — which read as
+                // "verbose doesn't show". Re-clamp after the view re-measures to the
+                // new size so the whole panel is pulled back on-screen. view.post runs
+                // after the next layout pass, when view.width/height reflect the new
+                // profile; clampToScreen no-ops when the size is unchanged.
+                val view = hostView ?: return@collect
+                view.post {
+                    val wm = windowManager ?: return@post
+                    val p = layoutParams ?: return@post
+                    val before = p.x to p.y
+                    clampToScreen(p, view, wm)
+                    if (p.x to p.y != before) {
+                        runCatching { wm.updateViewLayout(view, p) }
+                    }
+                }
+            }
         }
         lifecycleScope.launch {
             val density = resources.displayMetrics.density
             combine(hudPrefs.xDp, hudPrefs.yDp) { x, y -> x to y }
                 .collect { (xDp, yDp) ->
                     val p = layoutParams ?: return@collect
-                    val view = composeView ?: return@collect
+                    val view = hostView ?: return@collect
                     p.x = (xDp * density).roundToInt()
                     p.y = (yDp * density).roundToInt()
+                    // Keep the dynamic-width bar fully on-screen (RP6 right-edge clip).
+                    windowManager?.let { wm -> clampToScreen(p, view, wm) }
                     runCatching { windowManager?.updateViewLayout(view, p) }
                         .onFailure { e ->
                             hudEventLog.add(
@@ -534,6 +646,7 @@ class OverlayService :
                     if (dragging) {
                         params.x = initialX + dx.toInt()
                         params.y = initialY + dy.toInt()
+                        clampToScreen(params, view, wm)
                         scheduleLayout()
                         return true
                     }
@@ -586,6 +699,95 @@ class OverlayService :
 }
 
 /**
+ * A [FrameLayout] host that measures its single child (the HUD [ComposeView]) at
+ * its FULL INTRINSIC width.
+ *
+ * ── Why this exists (the compact-bar "broken layout" root cause) ──────────────
+ * The HUD lives in a `WRAP_CONTENT × WRAP_CONTENT` overlay window. When Android's
+ * `ViewRootImpl` measures the content of a `WRAP_CONTENT` window, it hands the
+ * root view a width [View.MeasureSpec] of mode **`AT_MOST`**, bounded by the
+ * available window/display width — NOT `UNSPECIFIED`. A plain `ComposeView`
+ * faithfully propagates that bounded `AT_MOST` width into the Compose layout, so
+ * the bar's `Row(wrapContentWidth())` is told "you may be at most N px wide". On a
+ * dense handheld (RP6) the bar's true intrinsic width can exceed that bound, so
+ * Compose squeezes the LAST children to fit: the BAT cell's "92%" collapses to
+ * stacked vertical characters ("9"/"2"/"%") and the trailing CONTROLS cell
+ * (AUTO·TDP pill + expand + close) overflows and is clipped away. That is exactly
+ * the on-device symptom.
+ *
+ * `ComposeView`/`AbstractComposeView.onMeasure` are `final`, so we cannot subclass
+ * the ComposeView itself. Instead this thin FrameLayout wraps it and re-issues the
+ * width spec as **`UNSPECIFIED`** to the child whenever the incoming spec is
+ * `AT_MOST` (the `WRAP_CONTENT` window case). `UNSPECIFIED` lets the Compose
+ * hierarchy report the bar's full desired width with NO upper bound, so every cell
+ * measures at its natural size on a single row. This host then reports that same
+ * width upward, the `WRAP_CONTENT` window sizes to it, and [clampToScreen] keeps
+ * the (now correctly-sized) bar fully on-screen. An `EXACTLY` spec (never used by
+ * our WRAP_CONTENT window, but possible in tests/previews) is passed through
+ * untouched so a fixed-size host is still honoured. Height is left as-is — only
+ * width was being starved.
+ *
+ * This is the minimal, correct measurement fix: no `widthIn`, no `weight`, no
+ * `fillMaxWidth` anywhere on the bar (all of which would re-introduce a bound).
+ * The verbose panel is unaffected — it pins its own width via `widthIn(min=max=)`,
+ * which under an `UNSPECIFIED` spec simply resolves to that fixed width.
+ */
+private class UnboundedWidthHost(context: Context) : FrameLayout(context) {
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val widthMode = View.MeasureSpec.getMode(widthMeasureSpec)
+        val effectiveWidthSpec = if (widthMode == View.MeasureSpec.AT_MOST) {
+            // Bounded WRAP_CONTENT window → measure unbounded so the bar reports its
+            // full intrinsic width and no trailing cell is width-starved.
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        } else {
+            // EXACTLY (fixed host) or already UNSPECIFIED → leave untouched.
+            widthMeasureSpec
+        }
+        super.onMeasure(effectiveWidthSpec, heightMeasureSpec)
+    }
+}
+
+/**
+ * Clamp the overlay window position so the (WRAP_CONTENT) HUD always stays fully
+ * ON-SCREEN.
+ *
+ * RP6 clipping fix: the overlay window is `WRAP_CONTENT` width with
+ * `FLAG_LAYOUT_NO_LIMITS` (so it can be dragged freely). The compact bar grows
+ * RIGHTWARD from its top-left origin as cells are added; with no clamp, a bar
+ * dragged toward — or restored near — the right edge pushed its trailing cells
+ * (BAT + swap + close) past the physical screen edge, where they were clipped and
+ * the game bled through behind the off-screen window region. Clamping the origin
+ * to `[0, screen − measuredSize]` (top-left gravity) keeps the whole bar visible
+ * regardless of its dynamic width.
+ *
+ * Uses the view's already-measured pixel size (`view.width`/`view.height`), so it
+ * must run AFTER the view has been laid out at least once — on a drag MOVE (always
+ * laid out) and on a position restore (guarded by a non-zero width). When the view
+ * hasn't measured yet (width == 0) we only floor the origin at 0 and leave the
+ * upper bound to the next layout pass, so we never clamp against a stale 0 width.
+ */
+private fun clampToScreen(
+    params: WindowManager.LayoutParams,
+    view: View,
+    wm: WindowManager,
+) {
+    val metrics = android.util.DisplayMetrics()
+    @Suppress("DEPRECATION")
+    wm.defaultDisplay.getRealMetrics(metrics)
+    val screenW = metrics.widthPixels
+    val screenH = metrics.heightPixels
+    val viewW = view.width
+    val viewH = view.height
+
+    // Right/bottom bound only applies once we know the measured size; otherwise
+    // just keep the origin non-negative and let the next layout pass tighten it.
+    val maxX = if (viewW > 0) (screenW - viewW).coerceAtLeast(0) else Int.MAX_VALUE
+    val maxY = if (viewH > 0) (screenH - viewH).coerceAtLeast(0) else Int.MAX_VALUE
+    params.x = params.x.coerceIn(0, maxX)
+    params.y = params.y.coerceIn(0, maxY)
+}
+
+/**
  * Immutable snapshot of HUD display state.
  *
  * All fields are primitives, enums, nullable value types, or read-only
@@ -619,7 +821,17 @@ data class HudUiState(
     val batteryTempC: Float? = null,
     val maxTempC: Float = 0f,
     val batteryW: Double? = null,
+    /** Battery state-of-charge percent (0–100), fed from a sticky
+     *  ACTION_BATTERY_CHANGED receiver. Null = sensor unavailable (render "—"). */
+    val batteryPct: Int? = null,
     val ramUsedPct: Int? = null,
+    /** True when [perCoreLoadPct] is a frequency-ratio PROXY (not a true
+     *  /proc/stat read). Drives the "~" honesty prefix on load values so an
+     *  estimate never reads as a measured utilisation. */
+    val loadIsProxy: Boolean = false,
+    /** Kernel cooling-device max cur_state this tick. > 0 = actively throttling
+     *  NOW (honest "am I being throttled?" signal). Null = not probed on device. */
+    val coolingDeviceMaxState: Int? = null,
     val zones: List<Pair<String, Float>> = emptyList(),
     /** id → display label for chips. Empty = no chips row. */
     val quickProfiles: List<Pair<String, String>> = emptyList(),

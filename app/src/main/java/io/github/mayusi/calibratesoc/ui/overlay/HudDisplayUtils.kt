@@ -89,6 +89,75 @@ object HudDisplayUtils {
     }
 
     /**
+     * Compact GPU clock label, scaled by magnitude so it reads like the CPU clock:
+     *
+     *  - sub-GHz  → "220M"  (MHz with an "M" suffix; the common GPU range)
+     *  - 1 GHz+   → "1.10G" (GHz with two decimals, mirroring [formatGhzFromMhz])
+     *  - null/0   → "—"     (honest absence — never a fabricated value)
+     *
+     * The input is GPU clock in **MHz** (the HUD's `gpuMhz`, already converted from
+     * the kgsl/devfreq `cur_freq` Hz value upstream in [HudStateAssembler]). The
+     * GHz branch matters because some GPUs (and any future 1 GHz+ part) would
+     * otherwise render an unreadable "1100M"; switching to "1.10G" at the GHz
+     * boundary keeps the GPU cell as glanceable as the CPU's "1.46G".
+     */
+    @JvmStatic
+    fun formatGpuClock(mhz: Int?): String =
+        mhz?.takeIf { it > 0 }?.let {
+            if (it >= 1000) "%.2fG".format(it / 1000.0) else "${it}M"
+        } ?: "—"
+
+    /**
+     * Compact load-percent label with the honest "~" proxy prefix.
+     *
+     * [pct] null → "—" (no reading); otherwise "{pct}%" prefixed by "~" when the
+     * value is a frequency-ratio PROXY (so an estimate never reads as a measured
+     * utilisation). Examples: (88,false) → "88%", (88,true) → "~88%", (null,_) → "—".
+     */
+    @JvmStatic
+    fun formatLoadPct(pct: Int?, isProxy: Boolean): String =
+        pct?.let { "${if (isProxy) "~" else ""}${it.coerceIn(0, 100)}%" } ?: "—"
+
+    /**
+     * Like [formatLoadPct] but returns NULL (not "—") when there is no reading, so
+     * the compact bar can DROP the load sub-line entirely instead of showing a
+     * dead dash. Examples: (88,false) → "88%", (88,true) → "~88%", (null,_) → null.
+     */
+    @JvmStatic
+    fun formatLoadPctOrNull(pct: Int?, isProxy: Boolean): String? =
+        pct?.let { "${if (isProxy) "~" else ""}${it.coerceIn(0, 100)}%" }
+
+    /**
+     * Small secondary "Hz tag" for the compact bar's no-game state.
+     *
+     * When [gameFps] is NOT a real in-game framerate, the bar must NOT show a
+     * giant FPS hero — it shows this tiny tag instead so a meaningless panel
+     * refresh-rate never dominates. Example: 60 → "60HZ". Null → "—HZ" (sensor
+     * unavailable — still honest, never a fabricated number).
+     */
+    @JvmStatic
+    fun formatHzTag(gameFps: Int?): String = "${gameFps ?: "—"}HZ"
+
+    /**
+     * Frame-time string derived from a REAL game FPS, for the verbose hero's
+     * "fps · 17.2 ms" line. Honest: only meaningful for a true in-game framerate,
+     * so the caller must gate on [HudUiState.gameFpsIsReal]; a null/≤0 fps yields
+     * null so the row is HIDDEN (never a fabricated frame time).
+     * Examples: 60 → "16.7 ms", 144 → "6.9 ms", null/0 → null.
+     */
+    @JvmStatic
+    fun formatFrameMs(fps: Int?): String? =
+        fps?.takeIf { it > 0 }?.let { "%.1f ms".format(1000f / it) }
+
+    /**
+     * Verbose-hero refresh label for the NO-game state: "REFRESH 60Hz" (or
+     * "REFRESH —Hz" when the panel rate is unknown). Used in place of a giant FPS
+     * number so a meaningless panel-refresh value never dominates the panel.
+     */
+    @JvmStatic
+    fun formatRefreshTag(gameFps: Int?): String = "REFRESH ${gameFps ?: "—"}Hz"
+
+    /**
      * Format the per-cluster cap label for a stepper button row.
      *
      * Example: "2918MHz" or "—" when null.
@@ -113,27 +182,117 @@ object HudDisplayUtils {
     fun formatTemp(tempC: Float?): String = tempC?.let { "%.0f°C".format(it) } ?: "—"
 
     /**
+     * Format a temperature with NO unit suffix — used for the dense inline
+     * "clock + temp" pairing where space is at a premium and the degree symbol
+     * is implied by context. Examples: "72°", "—".
+     */
+    @JvmStatic
+    fun formatTempBare(tempC: Float?): String = tempC?.let { "%.0f°".format(it) } ?: "—"
+
+    // ── cool → hot temperature colour tiers ───────────────────────────────────
+    // The single most glanceable signal on a gaming HUD: each temperature is
+    // coloured by magnitude so the user reads thermal state without parsing the
+    // number. Three honest bands, mapped to Arsenal-theme accents by the caller:
+    //   COOL  (< 70°C)  → cool accent (emerald/blue)
+    //   WARM  (70–90°C) → amber accent
+    //   HOT   (≥ 90°C)  → red/error accent
+    // A NULL temperature has no tier (NONE) so the caller renders the muted "—"
+    // colour — never a fabricated "cool" green for missing data.
+
+    /** Lower bound (inclusive) of the WARM band, in °C. */
+    const val TEMP_WARM_C = 70f
+
+    /** Lower bound (inclusive) of the HOT band, in °C. */
+    const val TEMP_HOT_C = 90f
+
+    enum class TempTier { NONE, COOL, WARM, HOT }
+
+    /**
+     * Classify a temperature into its colour tier.
+     *
+     * Null → [TempTier.NONE] (render muted "—"); never coerced to a real band so
+     * a missing sensor can never *look* cool. Thresholds: < 70 COOL, 70–<90 WARM,
+     * ≥ 90 HOT.
+     */
+    @JvmStatic
+    fun tempTier(tempC: Float?): TempTier = when {
+        tempC == null        -> TempTier.NONE
+        tempC >= TEMP_HOT_C  -> TempTier.HOT
+        tempC >= TEMP_WARM_C -> TempTier.WARM
+        else                 -> TempTier.COOL
+    }
+
+    /**
+     * Format a battery state-of-charge percent for the HUD.
+     *
+     * Honest: null (sensor unavailable) → "—", never a default like "100%".
+     * Examples: 87 → "87%", null → "—".
+     */
+    @JvmStatic
+    fun formatBatteryPct(pct: Int?): String = pct?.let { "${it.coerceIn(0, 100)}%" } ?: "—"
+
+    /**
+     * Whether a running clock exceeds its cap — the "boost" condition. Appends a
+     * `+` to the clock display when true (no extra horizontal space).
+     *
+     * Both arguments are MHz. Returns false when either is null (can't prove
+     * boost) or when the running clock is at/below the cap. A small tolerance
+     * (25 MHz) absorbs OPP-table rounding so we don't flag a phantom boost when
+     * the core is merely sitting one OPP step under an exact cap.
+     */
+    @JvmStatic
+    fun isBoosting(runningMhz: Int?, capMhz: Int?): Boolean {
+        if (runningMhz == null || capMhz == null) return false
+        return runningMhz > capMhz + 25
+    }
+
+    /**
+     * Compose a clock label with an optional trailing boost `+`.
+     * E.g. running 3010 over cap 2918 → "3.01G+"; otherwise just the GHz string.
+     */
+    @JvmStatic
+    fun formatClockWithBoost(runningMhz: Int?, capMhz: Int?): String {
+        val base = formatGhzFromMhz(runningMhz?.takeIf { it > 0 })
+        return if (isBoosting(runningMhz, capMhz)) "$base+" else base
+    }
+
+    /**
+     * Whether the kernel is actively throttling right now.
+     *
+     * Driven by the honest [io.github.mayusi.calibratesoc.data.monitor.Telemetry.coolingDeviceMaxState]
+     * signal: any cooling device with cur_state > 0 means a mitigation is engaged
+     * NOW. Null (not probed on this device) → false (we never *claim* throttling we
+     * can't observe). This is the single most useful gaming-HUD signal: "am I being
+     * throttled?".
+     */
+    @JvmStatic
+    fun isThrottlingNow(coolingDeviceMaxState: Int?): Boolean =
+        (coolingDeviceMaxState ?: 0) > 0
+
+    /**
      * Format a GHz value from MHz — returns e.g. "2.92G" or "—".
      */
     @JvmStatic
     fun formatGhzFromMhz(mhz: Int?): String = mhz?.let { "%.2fG".format(it / 1000.0) } ?: "—"
 
     /**
-     * Full HUD panel width in dp for a given size index.
+     * Verbose HUD panel width in dp for a given size index.
      *
-     * The full panel lays the FPS hero block and the 4-wide metric-tile row out
-     * HORIZONTALLY, so it needs real width to keep all four tiles on one row
-     * beside the framerate block instead of wrapping into a cramped column.
+     * The rebuilt verbose panel is a VERTICAL structured card (header → FPS hero →
+     * 2×2 metric grid → thermal → per-core → AutoTDP footer → controls), so it no
+     * longer needs the very wide footprint the old single-row 4-tile layout did.
+     * The approved design calls for a ~330dp panel; these presets bracket that so
+     * the panel reads as a compact premium card, not a sprawling banner.
      *
-     * 0 = small  (420dp)
-     * 1 = medium (480dp, default)
-     * 2 = large  (540dp)
+     * 0 = small  (300dp)
+     * 1 = medium (330dp, default — the approved width)
+     * 2 = large  (372dp)
      */
     @JvmStatic
     fun hudWidthDp(sizeIndex: Int): Int = when (sizeIndex.coerceIn(0, 2)) {
-        0 -> 420
-        1 -> 480
-        else -> 540
+        0 -> 300
+        1 -> 330
+        else -> 372
     }
 
     /**

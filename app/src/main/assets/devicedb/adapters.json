@@ -119,15 +119,16 @@
     "displayName": "Retroid Pocket 6",
     "vendorAppPackage": "com.rp.gameassistant",
     "fanAdapter": {
-      "kind": "SETTINGS_KEY",
-      "target": "fan_mode",
+      "kind": "SERVICE_INTENT",
+      "target": "SettingsController/FanProvider (com.ro.settings.IFanControlProvider)",
       "supportsCurve": false,
-      "presets": ["Off", "Quiet", "Smart", "Sport"]
+      "supportsCustomSpeed": true,
+      "presets": ["Off", "Quiet", "Smart", "Sport", "Custom"]
     },
     "perfPresetAdapter": null,
     "perfDaemonsToStopOnWrite": ["perfd"],
     "chmodLockCpuFreqWrites": true,
-    "notes": "Snapdragon 8 Gen 2 (QCS8550 / kalama, mfr Moorechip), Android 13. SAME 3-cluster topology as AYN Thor: policy0 (cores 0-2, little, 2016 MHz), policy3 (cores 3-6, gold, 2803 MHz), policy7 (core 7, prime, 3187 MHz). GPU Adreno 740 (max 680 MHz). Storage YMTC YMUS9B4TF2D1C1 (UFS 4.0). fan_mode Settings.System key VERIFIED present (value 4). Vendor app com.rp.gameassistant owns perf presets (no performance_mode key). scaling_max_freq is mode 660 owned system:system — per-file SELinux denial observed (policy0 max denied, policy3/7 allowed) so monitor falls back to OPP bounds; live tuning needs root or one-shot script via the device's own runner."
+    "notes": "Snapdragon 8 Gen 2 (QCS8550 / kalama, mfr Moorechip), Android 13. SAME 3-cluster topology as AYN Thor: policy0 (cores 0-2, little, 2016 MHz), policy3 (cores 3-6, gold, 2803 MHz), policy7 (core 7, prime, 3187 MHz). GPU Adreno 740 (max 680 MHz). Storage YMTC YMUS9B4TF2D1C1 (UFS 4.0). FAN (ZERO-SETUP, no root): a normal app binds the registered 'SettingsController' service via ServiceManager, asks it for the 'FanProvider' binder (txn 1, token com.ro.settings.IExternalControlManager), then drives the fan on FanProvider (token com.ro.settings.IFanControlProvider): txn 5 c(int)=set mode, txn 7 r(int)=set CUSTOM fan SPEED (a single scalar on a ~25000 duty/RPM scale, NOT a temp curve and NOT 0-255 PWM), txn 2 b()=read current value (readback-verify, returned 25000). VERIFIED on-device (RP6 13f60c13): bind + txn 7 accepted + txn 2 read 25000. This is a custom held SPEED, not a temperature-reactive curve like Odin/AYANEO. The exact CUSTOM-mode int + working speed range are calibrated live (RetroidFanConfig). Vendor app com.rp.gameassistant owns the legacy fan_mode Settings.System key (value 4) but the FanProvider binder is the real control path. scaling_max_freq is mode 660 owned system:system — per-file SELinux denial observed (policy0 max denied, policy3/7 allowed) so monitor falls back to OPP bounds; live cpufreq tuning needs root or a one-shot script."
   },
   {
     "key": "retroid_pocket4",

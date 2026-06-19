@@ -7,6 +7,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient
+import io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanBinderClient
+import io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanConfig
 import io.github.mayusi.calibratesoc.data.util.readSysfsString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -37,8 +39,14 @@ private const val TAG = "CalibrateSoC-FanCurve"
  *     command via [AyaneoFanCurveMapper], send it (fire-and-forget) through
  *     [AyaneoBinderClient], and verify HONESTLY by reading back the app-readable
  *     `pwm1` node ([AyaneoFanCurveVerifier]). No config.xml, no root, no script.
+ *   - [FanCurveVendor.RETROID] — ZERO-SETUP: map the curve to ONE representative held
+ *     SPEED via [RetroidFanSpeedMapper] (Retroid has no curve-array transaction — its
+ *     FanProvider takes a single scalar), enter CUSTOM mode + set the speed through
+ *     [RetroidFanBinderClient], and verify HONESTLY via the FanProvider readback
+ *     ([RetroidFanVerifier]). HONEST that this is a fixed held speed, not a
+ *     temp-reactive curve. No config.xml, no root, no script.
  *
- * The Odin path is unchanged — only a vendor branch was added around it.
+ * The Odin path is unchanged — only vendor branches were added around it.
  *
  * HONESTY: [applyCurve] never reports success it didn't verify. On Odin an
  * UNVERIFIED result means the config readback couldn't prove the apply landed; on
@@ -52,14 +60,24 @@ class FanCurveController @Inject constructor(
     private val capabilityProbe: CapabilityProbe,
     private val pServer: PServerWriter,
     private val ayaneoBinder: AyaneoBinderClient,
+    private val retroidBinder: RetroidFanBinderClient,
     private val fs: FileSystem,
     private val store: FanCurveStore,
 ) {
 
-    /** Resolve current availability from the cached/refreshed capability report. */
+    /**
+     * Resolve current availability from the cached/refreshed capability report.
+     *
+     * The gate is a pure function, so the two non-report inputs are supplied here:
+     * whether the Odin settings package is installed, and whether the Retroid
+     * FanProvider binder is live. The Retroid liveness is probed lazily and ONLY when
+     * the device is actually a Retroid — on every other device we short-circuit to
+     * false with no IPC, so non-Retroid devices never pay a bind cost.
+     */
     suspend fun availability(): FanCurveAvailability {
         val report = capabilityProbe.report.first() ?: runCatching { capabilityProbe.refresh() }.getOrNull()
-        return FanCurveGate.resolve(report, odinSettingsInstalled())
+        val retroidLive = report != null && FanCurveGate.isRetroid(report) && retroidBinder.isAvailable()
+        return FanCurveGate.resolve(report, odinSettingsInstalled(), retroidBinderLive = retroidLive)
     }
 
     /** The resolved vendor for the active device, or null when unavailable. */
@@ -80,12 +98,18 @@ class FanCurveController @Inject constructor(
      * "Load device curve" affordance is hidden on AYANEO accordingly.)
      */
     suspend fun readCurrentCurve(): ReadCurveResult = withContext(Dispatchers.IO) {
-        if (activeVendor() == FanCurveVendor.AYANEO) {
-            return@withContext ReadCurveResult.Error(
+        when (activeVendor()) {
+            FanCurveVendor.AYANEO -> return@withContext ReadCurveResult.Error(
                 "AYANEO applies the fan curve through its system overlay, which doesn't " +
                     "expose the active curve for reading back. Pick a preset or edit the " +
                     "curve and apply it instead.",
             )
+            FanCurveVendor.RETROID -> return@withContext ReadCurveResult.Error(
+                "Retroid holds a single custom fan speed through its vendor fan service " +
+                    "(not a temperature curve), and doesn't expose a curve to read back. " +
+                    "Pick a preset or edit the curve and apply it instead.",
+            )
+            else -> Unit // ODIN reads config.xml below.
         }
         val xml = privilegedRead(FanCurveScript.readConfigCommand())
             ?: return@withContext ReadCurveResult.Error(
@@ -151,6 +175,7 @@ class FanCurveController @Inject constructor(
         when (avail.vendor) {
             FanCurveVendor.ODIN -> applyCurveOdin(curve)
             FanCurveVendor.AYANEO -> applyCurveAyaneo(curve)
+            FanCurveVendor.RETROID -> applyCurveRetroid(curve)
         }
     }
 
@@ -209,6 +234,79 @@ class FanCurveController @Inject constructor(
                 ApplyResult.Unverified(v.reason)
             }
             // verify(accepted=true, …) never returns NotApplied; handle defensively.
+            is FanCurveVerification.NotApplied -> ApplyResult.Failed(v.reason)
+        }
+    }
+
+    /**
+     * RETROID apply (ZERO-SETUP FanProvider-binder path). Retroid has NO curve-array
+     * transaction — its `FanProvider` exposes a single `r(int speed)` scalar — so we
+     * map the (already-validated) curve to ONE representative held SPEED via
+     * [RetroidFanSpeedMapper] (which clamps UP to the hard safety floor), enter CUSTOM
+     * mode (txn 5), set the speed (txn 7), settle, read the value back (txn 2), and
+     * verify HONESTLY via [RetroidFanVerifier].
+     *
+     * HONESTY: this is a fixed held speed, NOT a temp-reactive curve like Odin/AYANEO.
+     * The CUSTOM-mode integer + speed range are CALIBRATE-LIVE constants
+     * ([RetroidFanConfig]); if the read-back proves the value didn't move (the most
+     * likely cause being the wrong CUSTOM-mode int for this firmware), we report
+     * Unverified with that exact reason — never a faked success.
+     */
+    private suspend fun applyCurveRetroid(curve: FanCurve): ApplyResult {
+        val targetSpeed = RetroidFanSpeedMapper.curveToSpeed(curve)
+        Log.i(TAG, "applyCurveRetroid(): repDuty=${RetroidFanSpeedMapper.representativeDutyPct(curve)}% → speed=$targetSpeed")
+
+        // Snapshot the pre-apply fan value so the verifier can tell "moved toward
+        // target" from "stuck at the previous/stock value" (the wrong-custom-mode signal).
+        val previousValue = runCatching { retroidBinder.readFanValue() }.getOrNull()
+
+        // 1) Enter CUSTOM mode so the manual speed takes effect (in Smart/auto the
+        //    governor ignores r(int)). 2) Set the mapped, clamped speed.
+        val modeAccepted = runCatching { retroidBinder.setMode(RetroidFanConfig.CUSTOM_MODE) }.getOrElse { t ->
+            Log.w(TAG, "applyCurveRetroid(): setMode threw ${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
+        val speedAccepted = runCatching { retroidBinder.setSpeed(targetSpeed) }.getOrElse { t ->
+            Log.w(TAG, "applyCurveRetroid(): setSpeed threw ${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
+
+        if (!modeAccepted && !speedAccepted) {
+            return ApplyResult.Failed(
+                "The Retroid fan service did not accept the custom-fan commands (the " +
+                    "FanProvider binder was unavailable or refused them). Your fan setting " +
+                    "was NOT applied.",
+            )
+        }
+
+        // Settle, then read back the fan value to verify it moved to the target.
+        delay(SETTLE_MS)
+        val readBack = runCatching { retroidBinder.readFanValue() }.getOrNull()
+
+        return when (
+            val v = RetroidFanVerifier.verify(
+                modeAccepted = modeAccepted,
+                speedAccepted = speedAccepted,
+                targetSpeed = targetSpeed,
+                readBack = readBack,
+                previousValue = previousValue,
+            )
+        ) {
+            is FanCurveVerification.Applied -> {
+                store.saveCustomCurve(curve)
+                ApplyResult.Applied(
+                    liveConfirmed = v.liveConfirmed, // true on Retroid when readback ≈ target
+                    fanDuty = v.fanDuty,
+                    fanPeriod = v.fanPeriod, // null on Retroid (no period node)
+                )
+            }
+            is FanCurveVerification.Unverified -> {
+                // Accepted but the readback couldn't confirm (most likely the CUSTOM-mode
+                // int differs on this firmware — the live-calibration signal). Persist so
+                // re-apply works after calibration, but report honestly.
+                store.saveCustomCurve(curve)
+                ApplyResult.Unverified(v.reason)
+            }
             is FanCurveVerification.NotApplied -> ApplyResult.Failed(v.reason)
         }
     }
@@ -311,6 +409,7 @@ class FanCurveController @Inject constructor(
     suspend fun readLiveFanDuty(): LiveFanReading = withContext(Dispatchers.IO) {
         when (activeVendor()) {
             FanCurveVendor.AYANEO -> readLiveFanDutyAyaneo()
+            FanCurveVendor.RETROID -> readLiveFanDutyRetroid()
             // ODIN (and the null/unavailable case) use the Odin gpio nodes.
             else -> {
                 val duty = privilegedRead(FanCurveScript.readFanDutyCommand())?.trim()?.toIntOrNull()
@@ -336,6 +435,45 @@ class FanCurveController @Inject constructor(
             periodRaw = rawPwm?.let { AyaneoPwm.PWM_MAX },
             fanMode = null,
         )
+    }
+
+    /**
+     * RETROID live readout: read the current fan value over the FanProvider binder
+     * (txn 2) — the SAME ~25000 scale the speed uses. We put the raw value in
+     * [LiveFanReading.dutyRaw] and [RetroidFanConfig.SPEED_MAX] in
+     * [LiveFanReading.periodRaw] so the existing [LiveFanReading.dutyPct] getter
+     * (`duty*100/period`) renders a meaningful percentage with no duplicate math.
+     * Retroid has no fan_mode node we read here, so [LiveFanReading.fanMode] is null.
+     *
+     * NOTE: this is a suspend binder call (not a sysfs read), so unlike the AYANEO/Odin
+     * helpers it is itself suspending. Null fields on read failure (honest — no fake 0).
+     */
+    private suspend fun readLiveFanDutyRetroid(): LiveFanReading {
+        val raw = runCatching { retroidBinder.readFanValue() }.getOrNull()
+        return LiveFanReading(
+            dutyRaw = raw,
+            periodRaw = raw?.let { RetroidFanConfig.SPEED_MAX },
+            fanMode = null,
+        )
+    }
+
+    /**
+     * Restore the device's STOCK fan governor — the "turn custom fan off" path.
+     *
+     * ODIN/AYANEO already restore Smart/auto inside their apply/revert flows (Odin via
+     * the fan_mode bounce, AYANEO via the overlay holding the last curve until a preset
+     * is re-sent). On RETROID, custom mode HOLDS a fixed speed, so turning it off must
+     * actively hand control back to the stock governor: set the fan mode back to
+     * [RetroidFanConfig.SMART_MODE] (txn 5). Returns true when the restore command was
+     * accepted at the binder layer. No-op (false) on non-Retroid vendors — they have
+     * nothing held to restore here. Never throws.
+     */
+    suspend fun restoreAutoFan(): Boolean = withContext(Dispatchers.IO) {
+        if (activeVendor() != FanCurveVendor.RETROID) return@withContext false
+        runCatching { retroidBinder.setMode(RetroidFanConfig.SMART_MODE) }.getOrElse { t ->
+            Log.w(TAG, "restoreAutoFan(): setMode(SMART) threw ${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
     }
 
     /**
@@ -371,7 +509,8 @@ class FanCurveController @Inject constructor(
         /** How long to wait after the apply script before re-reading the live
          *  PWM nodes — the controller needs a moment to re-read the curve and
          *  re-enter Smart mode. Also used by the AYANEO path before the pwm1
-         *  readback so the overlay has settled the fan after the binder send. */
+         *  readback, and by the RETROID path before the FanProvider txn-2 readback,
+         *  so the vendor governor has settled the fan after the binder send. */
         const val SETTLE_MS = 1_200L
 
         /** The AYANEO hwmon PWM fan node — app-readable (verified live on the

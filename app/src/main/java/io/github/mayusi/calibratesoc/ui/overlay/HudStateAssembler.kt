@@ -3,7 +3,9 @@ package io.github.mayusi.calibratesoc.ui.overlay
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
+import io.github.mayusi.calibratesoc.data.monitor.CpuLoadReading
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
+import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.TempAlertMonitor
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.session.SessionRecorder
@@ -65,61 +67,36 @@ class HudStateAssembler @Inject constructor(
         // Assemble telemetry fields into HudUiState.
         scope.launch {
             sharedTelemetry.collect { t ->
-                val cpuMaxKhz = t.perCoreCpuFreqKhz.maxOrNull() ?: 0
-                val cpuLoadPct = if (t.perCoreLoadPct.isEmpty()) 0
-                    else t.perCoreLoadPct.average().toInt()
-                val gpuMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
-                val cpuTemps = t.zoneTempsMilliC
-                    .filter { it.label.startsWith("cpu", ignoreCase = true) }
-                    .map { it.tempMilliC / 1000f }
-                val cpuTempC = if (cpuTemps.isEmpty()) null
-                    else cpuTemps.average().toFloat()
-                val cpuPeakTempC = cpuTemps.maxOrNull()
-                val gpuTempC = t.zoneTempsMilliC
-                    .filter {
-                        it.label.contains("gpu", ignoreCase = true) ||
-                            it.label.contains("kgsl", ignoreCase = true)
-                    }
-                    .maxOfOrNull { it.tempMilliC / 1000f }
-                val batteryW: Double? = run {
-                    val ua = t.batteryCurrentUa ?: return@run null
-                    val uv = t.batteryVoltageUv ?: return@run null
-                    val absUa = if (ua < 0) -ua else ua
-                    val mw = (absUa * uv) / 1_000_000_000L
-                    mw / 1000.0
-                }
-                val ramUsedPct = if (t.ramTotalKb > 0) {
-                    (100.0 * (t.ramTotalKb - t.ramAvailableKb) / t.ramTotalKb).toInt()
-                        .coerceIn(0, 100)
-                } else null
-                val batteryTempC = t.batteryTempDeciC?.let { it / 10f }
+                val f = assembleTelemetryFields(t)
                 _state.value = _state.value.copy(
-                    cpuMaxMhz = cpuMaxKhz / 1000,
-                    cpuLoadPct = cpuLoadPct,
-                    perCoreMhz = t.perCoreCpuFreqKhz.map { it / 1000 },
+                    cpuMaxMhz = f.cpuMaxMhz,
+                    cpuLoadPct = f.cpuLoadPct,
+                    perCoreMhz = f.perCoreMhz,
                     perCoreLoadPct = t.perCoreLoadPct,
-                    gpuMhz = gpuMhz,
+                    gpuMhz = f.gpuMhz,
                     gpuLoadPct = t.gpuLoadPct,
-                    cpuTempC = cpuTempC,
-                    cpuPeakTempC = cpuPeakTempC,
-                    gpuTempC = gpuTempC,
-                    batteryTempC = batteryTempC,
-                    maxTempC = t.zoneTempsMilliC.maxOfOrNull { it.tempMilliC / 1000f } ?: 0f,
-                    batteryW = batteryW,
-                    ramUsedPct = ramUsedPct,
-                    zones = t.zoneTempsMilliC.map { it.label to it.tempMilliC / 1000f },
+                    cpuTempC = f.cpuTempC,
+                    cpuPeakTempC = f.cpuPeakTempC,
+                    gpuTempC = f.gpuTempC,
+                    batteryTempC = f.batteryTempC,
+                    maxTempC = f.maxTempC,
+                    batteryW = f.batteryW,
+                    ramUsedPct = f.ramUsedPct,
+                    loadIsProxy = f.loadIsProxy,
+                    coolingDeviceMaxState = t.coolingDeviceMaxState,
+                    zones = f.zones,
                 )
                 // Feed session recorder (Mode A: HUD-driven).
                 if (sessionRecorder.isRecording.value) {
                     sessionRecorder.feedHudSample(
                         absoluteTimestampMs = t.timestampMs,
                         fps = _state.value.gameFps,
-                        cpuMaxMhz = cpuMaxKhz / 1000,
-                        gpuMhz = gpuMhz,
-                        cpuTempC = cpuTempC,
-                        gpuTempC = gpuTempC,
-                        batteryW = batteryW,
-                        cpuLoadPct = cpuLoadPct,
+                        cpuMaxMhz = f.cpuMaxMhz,
+                        gpuMhz = f.gpuMhz,
+                        cpuTempC = f.cpuTempC,
+                        gpuTempC = f.gpuTempC,
+                        batteryW = f.batteryW,
+                        cpuLoadPct = f.cpuLoadPct,
                     )
                 }
             }
@@ -251,5 +228,108 @@ class HudStateAssembler @Inject constructor(
 
     fun feedHudOpacity(opacity: Float) {
         _state.value = _state.value.copy(hudOpacity = opacity.coerceIn(0.1f, 1f))
+    }
+
+    /**
+     * Battery state-of-charge percent (0–100), or null when the sensor is
+     * unavailable. Fed by [OverlayService] from a sticky ACTION_BATTERY_CHANGED
+     * receiver — NEVER from a per-tick binder read in a composable (honours the
+     * 0.1.33 ANR rule and the Dashboard's PERF-2 pattern). Null stays null so the
+     * HUD shows "—", never a fabricated default.
+     */
+    fun feedBatteryPct(pct: Int?) {
+        _state.value = _state.value.copy(batteryPct = pct?.coerceIn(0, 100))
+    }
+
+    /**
+     * Derived HUD telemetry fields. Pure value holder so the per-tick mapping can
+     * be unit-tested on the JVM without a coroutine/Android harness.
+     */
+    data class TelemetryFields(
+        val cpuMaxMhz: Int,
+        val cpuLoadPct: Int,
+        val perCoreMhz: List<Int>,
+        val gpuMhz: Int?,
+        val cpuTempC: Float?,
+        val cpuPeakTempC: Float?,
+        val gpuTempC: Float?,
+        val batteryTempC: Float?,
+        val maxTempC: Float,
+        val batteryW: Double?,
+        val ramUsedPct: Int?,
+        val loadIsProxy: Boolean,
+        val zones: List<Pair<String, Float>>,
+    )
+
+    companion object {
+        /**
+         * Pure telemetry → HUD-field mapping. Extracted from the collect loop so
+         * the load-bearing honesty rules are unit-testable:
+         *
+         *  - [TelemetryFields.cpuTempC] is the AVERAGE cpu-zone temp (steady gauge),
+         *    while [TelemetryFields.cpuPeakTempC] is the MAX cpu-zone temp — the HUD
+         *    renders the PEAK so the hottest core is never hidden behind an average.
+         *  - [TelemetryFields.gpuTempC] prefers a gpu/kgsl THERMAL ZONE, and FALLS
+         *    BACK to the engine's [Telemetry.gpuDieTempMilliC] when no such zone
+         *    exists (die-only devices) so GPU temp isn't blank.
+         *  - Every field stays null when its sensor is absent — never a sentinel.
+         */
+        @JvmStatic
+        fun assembleTelemetryFields(t: Telemetry): TelemetryFields {
+            val cpuMaxKhz = t.perCoreCpuFreqKhz.maxOrNull() ?: 0
+            val cpuLoadPct = if (t.perCoreLoadPct.isEmpty()) 0
+                else t.perCoreLoadPct.average().toInt()
+            val gpuMhz = t.gpuFreqHz?.let { (it / 1_000_000L).toInt() }
+            val cpuTemps = t.zoneTempsMilliC
+                .filter { it.label.startsWith("cpu", ignoreCase = true) }
+                .map { it.tempMilliC / 1000f }
+            val cpuTempC = if (cpuTemps.isEmpty()) null
+                else cpuTemps.average().toFloat()
+            val cpuPeakTempC = cpuTemps.maxOrNull()
+            // Prefer a real gpu/kgsl thermal zone; fall back to the engine's GPU
+            // die-temp probe so die-only devices (no gpu thermal_zone) aren't blank.
+            val gpuZoneTempC = t.zoneTempsMilliC
+                .filter {
+                    it.label.contains("gpu", ignoreCase = true) ||
+                        it.label.contains("kgsl", ignoreCase = true)
+                }
+                .maxOfOrNull { it.tempMilliC / 1000f }
+            val gpuTempC = gpuZoneTempC ?: t.gpuDieTempMilliC?.let { it / 1000f }
+            // Power honesty (RP6 fix): some devices' /sys/.../current_now reads a
+            // literal 0 while the device is actively running — a true 0 W draw is
+            // physically impossible there, so 0 means "unreadable", not "idle".
+            // Treat 0 (and null) current as UNAVAILABLE → batteryW stays null → the
+            // HUD renders "--", never a misleading "0.0W". A non-zero current
+            // (either sign) is a real measurement and produces a real wattage.
+            val batteryW: Double? = run {
+                val ua = t.batteryCurrentUa ?: return@run null
+                val uv = t.batteryVoltageUv ?: return@run null
+                val absUa = if (ua < 0) -ua else ua
+                if (absUa == 0L) return@run null
+                val mw = (absUa * uv) / 1_000_000_000L
+                mw / 1000.0
+            }
+            val ramUsedPct = if (t.ramTotalKb > 0) {
+                (100.0 * (t.ramTotalKb - t.ramAvailableKb) / t.ramTotalKb).toInt()
+                    .coerceIn(0, 100)
+            } else null
+            val batteryTempC = t.batteryTempDeciC?.let { it / 10f }
+            val loadIsProxy = t.cpuLoadSource == CpuLoadReading.Source.FREQ_PROXY
+            return TelemetryFields(
+                cpuMaxMhz = cpuMaxKhz / 1000,
+                cpuLoadPct = cpuLoadPct,
+                perCoreMhz = t.perCoreCpuFreqKhz.map { it / 1000 },
+                gpuMhz = gpuMhz,
+                cpuTempC = cpuTempC,
+                cpuPeakTempC = cpuPeakTempC,
+                gpuTempC = gpuTempC,
+                batteryTempC = batteryTempC,
+                maxTempC = t.zoneTempsMilliC.maxOfOrNull { it.tempMilliC / 1000f } ?: 0f,
+                batteryW = batteryW,
+                ramUsedPct = ramUsedPct,
+                loadIsProxy = loadIsProxy,
+                zones = t.zoneTempsMilliC.map { it.label to it.tempMilliC / 1000f },
+            )
+        }
     }
 }

@@ -17,19 +17,24 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.FiberManualRecord
+import androidx.compose.material.icons.outlined.UnfoldLess
+import androidx.compose.material.icons.outlined.UnfoldMore
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,44 +68,93 @@ import io.github.mayusi.calibratesoc.ui.components.CutCorner
 import io.github.mayusi.calibratesoc.ui.components.CutCornerShape
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
 
-// ── Arsenal-aligned HUD palette ───────────────────────────────────────────────
-// Mirrors AccentBar tokens exactly. Kept private for fast local lookup.
+// ── Approved HUD palette ──────────────────────────────────────────────────────
+// The user-approved gaming-HUD tokens. Solid near-black surfaces, a bold red
+// Arsenal accent edge, and category-keyed metric colours (CPU blue / GPU purple /
+// BAT emerald / power amber) so the dense bar reads at a glance over busy
+// gameplay. Numbers render in monospace so the HUD reads as a precise tech tool.
 
-private val HudBg        = Color(0xFF0B1220)
-private val HudSurface   = Color(0xFF111827)
-private val HudBorder    = Color(0xFF1C2740)
-private val HudBarBg     = Color(0xFF1E293B)
-private val HudLabel     = Color(0xFF64748B)
-private val HudValue     = Color(0xFFE2E8F0)
-private val HudDim       = Color(0xFF475569)
+// Solid panel/bar backing — near-black so the surface always wins against bright
+// game content behind it (high opacity floor + this dark base = no bleed-through).
+private val HudBgSolid   = Color(0xFF0D1320)
+// Raised surface for the FPS hero cell, header bar, trailing controls and the
+// AutoTDP footer — one step lighter than the base so those zones read as framed.
+private val HudRaised    = Color(0xFF11192A)
+// Per-cell fill for the COMPACT bar's CPU/GPU/BAT metric cells. Same family as
+// [HudRaised] but a hair deeper so each metric reads as its own recessed boxed
+// chip (distinct tiles, never flat text on the bar). 0xFF0E1626 sits between the
+// bar base (0xFF0D1320) and the raised hero (0xFF11192A).
+private val HudCellBg    = Color(0xFF0E1626)
+// Hairline divider between cells / sections.
+private val HudBorder    = Color(0xFF1C2638)
+// Sparkline / per-core track backing.
+private val HudBarBg     = Color(0xFF18233A)
 
-private val HudRed       = Color(0xFFFF4D6D)
-private val HudBlue      = Color(0xFF5C93F0)
-private val HudPurple    = Color(0xFFA98BF5)
-private val HudAmber     = Color(0xFFE0A93D)
-private val HudEmerald   = Color(0xFF2EE6A6)
+// Effective-alpha floor for the COMPACT bar only. The user's opacity slider goes
+// as low as 0.10, which left the dense bar nearly invisible. The bar floats over
+// fast game content and must read as a SOLID intentional strip, so we clamp its
+// effective alpha to a high readable minimum. The user can still dial it *down*
+// from fully opaque, just never below glanceability.
+private const val COMPACT_BAR_MIN_ALPHA = 0.88f
 
-private val HudAutoTdpBg     = Color(0xFF081A12)
-private val HudAutoTdpBorder = Color(0xFF0F3020)
+// Text tones.
+private val HudValue     = Color(0xFFDFE6F2) // primary value text
+private val HudMuted     = Color(0xFF7D8AA0) // muted sub-text / labels
+private val HudLabel     = HudMuted          // alias: section/cell label tone
+private val HudDim       = Color(0xFF4A586E) // dimmest (disabled / parked / "—")
+// Parked-core dim fill (per the approved per-core spec).
+private val HudParked    = Color(0xFF384358)
+
+// Accents.
+private val HudRed       = Color(0xFFE0455E) // accent edge + throttle + record
+private val HudBlue      = Color(0xFF5B8DEF) // CPU
+private val HudPurple    = Color(0xFFA78BFA) // GPU
+private val HudAmber     = Color(0xFFF0A93E) // power / warm temp
+private val HudEmerald   = Color(0xFF5FD0A8) // FPS / battery / good / live
+
+// AutoTDP footer surface (slightly green-tinted near-black + emerald-tinted edge).
+private val HudAutoTdpBg     = Color(0xFF0A1A14)
+private val HudAutoTdpBorder = Color(0xFF14352A)
+
+// Thickness of the bold red Arsenal accent edge on the leading side of both the
+// compact bar and the verbose panel.
+private val ACCENT_EDGE = 3.dp
+
+// ── cool → hot temperature colour mapping ─────────────────────────────────────
+// Maps the pure [HudDisplayUtils.TempTier] (thresholds 70 / 90 °C) onto the
+// Arsenal palette so every temperature on the HUD is coloured by magnitude:
+//   COOL → emerald   WARM → amber   HOT → red   NONE (null) → muted "—" colour
+// The tier decision is pure + unit-tested; this is only the visual binding.
+private fun tempColor(tempC: Float?): Color = when (HudDisplayUtils.tempTier(tempC)) {
+    HudDisplayUtils.TempTier.COOL -> HudEmerald
+    HudDisplayUtils.TempTier.WARM -> HudAmber
+    HudDisplayUtils.TempTier.HOT  -> HudRed
+    HudDisplayUtils.TempTier.NONE -> HudDim
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Root composable
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Horizontal HUD overlay.
+ * Floating performance HUD overlay — rebuilt to the approved design.
  *
- * COMPACT mode: a single thin horizontal bar that hugs a screen edge.
- *   [ 60 FPS ] | dot CPU  dot GPU  dot POWER  dot TEMP | [TDP pill]
+ * COMPACT (always-visible): a horizontal strip of LABELED CELLS on a solid
+ * near-black bg with a bold red Arsenal accent edge. Left→right:
+ *   [FPS hero | CPU | GPU | BAT | controls].
+ * The FPS hero is a big emerald number ONLY when a REAL game framerate exists;
+ * otherwise a small muted "60Hz" tag. Whole cells DROP when their data is
+ * unavailable (never a dead "—" cell). Tap the expand icon → VERBOSE.
  *
- * FULL mode: a wider horizontal panel (~480dp):
- *   Header row: CALIBRATE + AutoTDP pill | layout-swap + close
- *   Body:  LEFT = FPS block  |  RIGHT = 4-wide metric grid (CPU/GPU/POWER/TEMP)
- *   AutoTDP control strip at the bottom.
+ * VERBOSE (tap to expand): a ~330dp structured card, solid bg, accent edge:
+ *   Header → FPS hero (+ frame-ms) → 2×2 metric grid → THERMAL row →
+ *   PER-CORE bars → AutoTDP proof footer → opacity + display-Hz controls.
+ * The card scrolls so every control stays reachable on short screens.
  *
  * All callbacks are wired in [OverlayService.attachOverlay]. Only the existing
  * [onToggleAutoTdp] and [onSetAutoTdpProfile] callbacks touch AutoTDP -- no new
- * controller calls are introduced here.
+ * controller calls are introduced here. The COMPACT↔VERBOSE swap is driven by
+ * [onCycleLayout], which flips the persisted [HudProfile] (COMPACT⇄VERBOSE).
  */
 @Composable
 fun HudOverlayContent(
@@ -165,13 +219,28 @@ private fun rememberHudNowMs(): Long {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  COMPACT mode -- single thin horizontal bar
+//  COMPACT mode -- horizontal strip of labeled cells
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Thin horizontal bar:
- *   [ 60 FPS ] | dot 3.28G  dot 88%  dot 6.4W  dot 61deg | [TDP]
- * All on one row. Near-black bg, rounded 10dp, ~8px vertical padding.
+ * The always-visible compact bar — a horizontal strip of LABELED CELLS on a
+ * solid near-black bg with a bold red Arsenal accent edge, sized to wrap its
+ * content. Left → right:
+ *
+ *   REAL game FPS:  ‖ [58 fps] │ CPU 2.81G·68° / 87% │ GPU 540M·62° / 74% │ BAT 87%·31° / 6.4W │ AUTO·TDP  ⤢ ✕
+ *   No game (Hz):   ‖ [60Hz]   │ CPU … │ GPU … │ BAT … │ …
+ *
+ * FPS-hero rule: a BIG emerald number ONLY when [HudUiState.gameFpsIsReal] &&
+ * gameFps != null; otherwise a small muted "60Hz" tag so a meaningless
+ * panel-refresh value never dominates.
+ *
+ * Cell-drop rules (honesty + density — never a dead "—" cell):
+ *  - GPU cell dropped whole when clock AND temp AND load are all unavailable;
+ *    if load is unavailable but clock is, the load sub-line is dropped.
+ *  - BAT power sub-line ("6.4 W") dropped when power is null/0 (keeps %+temp).
+ *
+ * Trailing controls cell (raised bg): an AUTO·TDP pill (only while running),
+ * a THROT pill (only while throttling now), then expand + close icons.
  */
 @Composable
 private fun HudCompactBar(
@@ -183,12 +252,16 @@ private fun HudCompactBar(
     // when no other field recomposes. (Previously captured once at composition,
     // which froze the verdict.) Mirrors AutoTdpScreen.AutoTdpProofOfEffectPanels.
     val nowMs = rememberHudNowMs()
+    val throttling = HudDisplayUtils.isThrottlingNow(state.coolingDeviceMaxState)
     val a11y = buildString {
         append(if (state.gameFps != null) "${state.gameFps} ${if (state.gameFpsIsReal) "FPS" else "Hz"}" else "FPS unavailable")
-        append(", CPU ${HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 })}")
-        append(", GPU ${state.gpuMhz?.let { "${it}M" } ?: "N/A"}")
-        append(", ${HudDisplayUtils.formatWatts(state.batteryW)}")
-        append(", ${HudDisplayUtils.formatTemp(state.cpuTempC)}")
+        append(", CPU ${HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 })} ${state.cpuLoadPct}% ${HudDisplayUtils.formatTemp(state.cpuTempC)}")
+        append(", GPU ${state.gpuMhz?.let { "${it}M" } ?: "N/A"} ${HudDisplayUtils.formatTemp(state.gpuTempC)}")
+        append(", battery ${HudDisplayUtils.formatBatteryPct(state.batteryPct)} ${HudDisplayUtils.formatTemp(state.batteryTempC)}")
+        // Mirror the visible bar: power is only announced when it has a real value
+        // (it's hidden, not shown as "--", when the device can't read current).
+        if (state.batteryW != null) append(", ${HudDisplayUtils.formatWatts(state.batteryW)}")
+        if (throttling) append(", THROTTLING")
         if (state.autoTdpRunning) {
             val capWord = if (state.autoTdpBigCapMhz != null) {
                 "cap ${HudDisplayUtils.formatProofChipCap(state.autoTdpBigCapMhz)}"
@@ -198,180 +271,354 @@ private fun HudCompactBar(
         }
     }
 
+    // Readability floor (RP6 fix): the dense compact bar sits over busy game
+    // content, so an over-transparent backing makes it read as broken/empty.
+    // We still honour the user's opacity preference, but clamp the EFFECTIVE
+    // bar alpha to a high readable minimum so the populated metrics always stay
+    // crisp and the bar reads as a solid strip. The verbose panel keeps the raw
+    // user opacity (it's larger and not edge-hugging over gameplay), so this
+    // floor is scoped to the compact bar.
+    val barAlpha = state.hudOpacity.coerceAtLeast(COMPACT_BAR_MIN_ALPHA)
+
     Row(
         modifier = Modifier
-            .alpha(state.hudOpacity)
-            .clip(RoundedCornerShape(10.dp))
-            .background(HudBg)
-            .border(0.5.dp, HudBorder, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .wrapContentWidth()
+            .alpha(barAlpha)
+            .clip(RoundedCornerShape(13.dp))
+            .background(HudBgSolid)
+            // Bold red Arsenal accent edge on the leading side so the bar reads as
+            // an intentional Calibrate surface, not stray text floating on the game.
+            .drawBehind { drawRect(HudRed, size = size.copy(width = ACCENT_EDGE.toPx())) }
+            .border(0.8.dp, HudBorder, RoundedCornerShape(13.dp))
+            // Generous outer padding so the boxed cells breathe inside the bar —
+            // the row of polished tiles reads as a premium HUD, not a cramped strip.
+            .padding(start = ACCENT_EDGE + 7.dp, end = 7.dp, top = 7.dp, bottom = 7.dp)
             .semantics { contentDescription = a11y },
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(0.dp),
+        // Each cell now carries its OWN recessed background, so they read as
+        // separate chips with a comfortable gap between them — no hairline rules
+        // needed (the gap + per-cell fill IS the separation, like the mockup).
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // FPS hero -- big green mono number
-        val fpsColor = if (state.gameFpsIsReal) HudEmerald else HudDim
-        Text(
-            text = state.gameFps?.toString() ?: "--",
-            color = fpsColor,
-            fontSize = 22.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 22.sp,
-        )
-        Spacer(Modifier.width(3.dp))
-        Text(
-            text = if (state.gameFpsIsReal) "FPS" else "HZ",
-            color = fpsColor,
-            fontSize = 8.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.5.sp,
-        )
-
-        // Thin vertical divider
-        CompactDivider()
-
-        // 4 inline metrics with colored dot prefix
-        CompactMetric(
-            dot = HudBlue,
-            value = HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 }),
-        )
-        Spacer(Modifier.width(8.dp))
-        CompactMetric(
-            dot = HudPurple,
-            value = state.gpuMhz?.let { "${it}M" } ?: "--",
-        )
-        Spacer(Modifier.width(8.dp))
-        CompactMetric(
-            dot = HudAmber,
-            value = HudDisplayUtils.formatWatts(state.batteryW),
-        )
-        Spacer(Modifier.width(8.dp))
-        val tempHot = state.cpuTempC != null && state.cpuTempC >= 80f
-        CompactMetric(
-            dot = if (tempHot) HudAmber else HudEmerald,
-            value = HudDisplayUtils.formatTemp(state.cpuTempC),
-        )
-
-        // AutoTDP proof chip.
-        // RUNNING  → live proof chip: current cap (or STOCK) + heartbeat pulse dot.
-        //            Dot is emerald + pulsing when a write landed within the live
-        //            window; muted + static "stalled" otherwise. This is the honest
-        //            "is it REALLY working" signal — a stalled daemon shows as muted,
-        //            never as a fake "live".
-        // STOPPED  → plain muted "TDP" pill (unchanged affordance).
-        CompactDivider()
-        if (state.autoTdpRunning) {
-            CompactProofChip(state = state)
-        } else {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(HudDim.copy(alpha = 0.07f))
-                    .border(0.5.dp, HudDim.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 5.dp, vertical = 2.dp),
-            ) {
-                Text(
-                    text = "TDP",
-                    color = HudDim,
-                    fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                )
+        // ── FPS / Hz hero cell (raised bg) ────────────────────────────────────
+        // HERO only when a REAL game framerate exists; otherwise a tiny tag so a
+        // meaningless panel-refresh "60" never dominates the bar. The hero is the
+        // visual anchor — the biggest, brightest element on the bar.
+        CompactHeroCell {
+            if (state.gameFpsIsReal && state.gameFps != null) {
+                CompactFpsHero(fps = state.gameFps)
+            } else {
+                CompactHzTag(gameFps = state.gameFps)
             }
         }
 
-        // Layout swap -- tap to expand to FULL
-        Spacer(Modifier.width(6.dp))
+        // ── CPU cell — always shown (cpuMaxMhz is the core signal) ────────────
+        CompactMetricCell(
+            label = "CPU",
+            labelColor = HudBlue,
+            value = HudDisplayUtils.formatClockWithBoost(
+                state.cpuMaxMhz.takeIf { it > 0 }, state.autoTdpBigCapMhz,
+            ),
+            tempC = state.cpuTempC,
+            sub = "${HudDisplayUtils.formatLoadPct(state.cpuLoadPct, state.loadIsProxy)} load",
+        )
+
+        // ── GPU cell — dropped whole when clock AND temp AND load all absent ──
+        val gpuLoad = HudDisplayUtils.formatLoadPctOrNull(state.gpuLoadPct, isProxy = false)
+        val showGpu = (state.gpuMhz != null && state.gpuMhz > 0) ||
+            state.gpuTempC != null || gpuLoad != null
+        if (showGpu) {
+            CompactMetricCell(
+                label = "GPU",
+                labelColor = HudPurple,
+                value = HudDisplayUtils.formatGpuClock(state.gpuMhz),
+                tempC = state.gpuTempC,
+                // If load is unavailable but clock is, drop just the load sub-line.
+                sub = gpuLoad?.let { "$it load" },
+            )
+        }
+
+        // ── BAT cell — % + inline coloured temp; power sub-line dropped at 0 ───
+        CompactMetricCell(
+            label = "BAT",
+            labelColor = HudEmerald,
+            value = HudDisplayUtils.formatBatteryPct(state.batteryPct),
+            tempC = state.batteryTempC,
+            // Power null/0 → drop just the W sub-line, keep %+temp.
+            sub = state.batteryW?.takeIf { it > 0.0 }?.let { HudDisplayUtils.formatWatts(it) },
+        )
+
+        // ── Trailing controls cell (raised bg) ────────────────────────────────
+        CompactControlsCell(
+            state = state,
+            throttling = throttling,
+            onCycleLayout = onCycleLayout,
+            onClose = onClose,
+        )
+    }
+}
+
+/**
+ * Raised hero-cell frame for the FPS/Hz lead — the VISUAL ANCHOR of the bar. One
+ * shade lighter than the bar (HudRaised) with a faint emerald hairline so the box
+ * frames the big FPS number, and generous padding to match the metric cells so it
+ * sits as a peer tile (just brighter + bigger). This is the most prominent cell
+ * whenever a real game framerate exists.
+ */
+@Composable
+private fun CompactHeroCell(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(HudRaised)
+            .border(0.8.dp, HudEmerald.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/**
+ * The FPS HERO — big emerald mono number + small "fps" tag. Rendered ONLY when a
+ * real in-game framerate exists, so the most useful number during play is the
+ * most prominent. (When there's no game, [CompactHzTag] is shown instead.)
+ */
+@Composable
+private fun CompactFpsHero(fps: Int) {
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(
+            text = fps.toString(),
+            color = HudEmerald,
+            fontSize = 20.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            lineHeight = 20.sp,
+            maxLines = 1,
+            softWrap = false,
+        )
+        Spacer(Modifier.width(3.dp))
+        Text(
+            text = "fps",
+            color = HudEmerald.copy(alpha = 0.85f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+    }
+}
+
+/**
+ * The tiny no-game Hz tag — a muted "60Hz", NOT a hero. Shown when the FPS value
+ * is just the panel refresh rate so it stays small and secondary; the actual
+ * metrics get the visual weight instead.
+ */
+@Composable
+private fun CompactHzTag(gameFps: Int?) {
+    Text(
+        text = "${gameFps ?: "—"}Hz",
+        color = HudMuted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        fontFamily = FontFamily.Monospace,
+        letterSpacing = 0.3.sp,
+        maxLines = 1,
+        softWrap = false,
+    )
+}
+
+/**
+ * A labeled compact metric cell — a DISTINCT BOXED CHIP (its own recessed
+ * [HudCellBg] fill, 7 dp corners, hairline border, generous padding) so CPU / GPU
+ * / BAT each read as their own polished tile, never flat text on the bar. Three
+ * stacked lines, matching the approved mockup:
+ *   top:  LABEL                         (coloured, letter-spaced)
+ *   main: VALUE (clock/%/...)  temp°    (mono value + inline cool→hot temp)
+ *   sub:  optional muted line           (load / power)
+ *
+ * The coloured [label] makes the metric instantly identifiable. [value] is the
+ * hero number (boost `+` included by the caller). [tempC], when present, sits on
+ * the main line coloured by tier. [sub] is dropped when null so the cell stays
+ * honest + dense (e.g. GPU with no load reading, BAT with no power reading).
+ */
+@Composable
+private fun CompactMetricCell(
+    label: String,
+    labelColor: Color,
+    value: String,
+    tempC: Float?,
+    sub: String?,
+) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(HudCellBg)
+            .border(0.8.dp, HudBorder, RoundedCornerShape(7.dp))
+            .padding(horizontal = 13.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        // Top line: the coloured category label, on its own row above the value.
+        Text(
+            text = label,
+            color = labelColor,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp,
+            lineHeight = 11.sp,
+            maxLines = 1,
+            softWrap = false,
+        )
+        // Main line: big mono value + inline temp coloured by tier.
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                text = value,
+                color = HudValue,
+                fontSize = 15.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 15.sp,
+                maxLines = 1,
+                softWrap = false,
+            )
+            if (tempC != null) {
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    text = HudDisplayUtils.formatTempBare(tempC),
+                    color = tempColor(tempC),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 12.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.padding(bottom = 1.dp),
+                )
+            }
+        }
+        // Sub line: muted load / power, dropped entirely when null.
+        if (sub != null) {
+            Text(
+                text = sub,
+                color = HudMuted,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 11.sp,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+    }
+}
+
+/**
+ * Trailing controls cell (raised bg): AUTO·TDP pill (only while running) +
+ * THROT pill (only while throttling now) + expand + close icons.
+ */
+@Composable
+private fun CompactControlsCell(
+    state: HudUiState,
+    throttling: Boolean,
+    onCycleLayout: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(HudRaised)
+            .border(0.8.dp, HudBorder, RoundedCornerShape(7.dp))
+            .padding(start = 7.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (state.autoTdpRunning) {
+            CompactAutoTdpPill(state = state)
+        }
+        if (throttling) {
+            CompactThrottleChip()
+        }
+        // Expand → VERBOSE
         Box(
             modifier = Modifier
-                .size(20.dp)
-                .clip(RoundedCornerShape(3.dp))
+                .size(24.dp)
+                .clip(RoundedCornerShape(5.dp))
                 .clickable(onClick = onCycleLayout),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                Icons.Outlined.SwapHoriz,
-                contentDescription = "Expand HUD",
-                tint = HudDim,
-                modifier = Modifier.size(13.dp),
+                Icons.Outlined.UnfoldMore,
+                contentDescription = "Expand HUD to detailed panel",
+                tint = HudValue,
+                modifier = Modifier.size(16.dp),
             )
         }
         // Close
         Box(
             modifier = Modifier
-                .size(20.dp)
-                .clip(RoundedCornerShape(3.dp))
+                .size(24.dp)
+                .clip(RoundedCornerShape(5.dp))
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 Icons.Outlined.Close,
                 contentDescription = "Hide overlay",
-                tint = HudDim,
-                modifier = Modifier.size(12.dp),
+                tint = HudMuted,
+                modifier = Modifier.size(15.dp),
             )
         }
     }
 }
 
+/**
+ * "THROT" flag pill — shown only when the kernel cooling-device state proves a
+ * mitigation is engaged right now. Red, the honest answer to "am I throttled?".
+ */
 @Composable
-private fun CompactDivider() {
-    Spacer(Modifier.width(8.dp))
+private fun CompactThrottleChip() {
     Box(
         modifier = Modifier
-            .width(0.5.dp)
-            .height(14.dp)
-            .background(HudBorder),
-    )
-    Spacer(Modifier.width(8.dp))
-}
-
-@Composable
-private fun CompactMetric(dot: Color, value: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
+            .clip(RoundedCornerShape(5.dp))
+            .background(HudRed.copy(alpha = 0.20f))
+            .border(0.8.dp, HudRed.copy(alpha = 0.7f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+            .semantics { contentDescription = "Thermal throttling active" },
     ) {
-        Box(
-            modifier = Modifier
-                .size(5.dp)
-                .clip(RoundedCornerShape(50))
-                .background(dot),
-        )
         Text(
-            text = value,
-            color = HudValue,
-            fontSize = 11.sp,
+            text = "THROT",
+            color = HudRed,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.4.sp,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
 
 /**
- * COMPACT-bar live AutoTDP proof chip (only rendered while running):
- *   [pulse-dot]  3.0G   (or "STOCK" when uncapped)
+ * COMPACT-bar AUTO·TDP pill (only rendered while running):
+ *   [pulse-dot] AUTO·TDP
  *
- * The pulse dot proves the daemon is alive: emerald + animated when a write
- * landed within the live window, muted + static when stalled (age > ~3s). The
- * cap value is a DERIVED fact (live immediately), so it never hides; "STOCK" is
- * the honest label for "no cap applied".
+ * Green-bordered. The pulse dot proves the daemon is alive: emerald + animated
+ * when a write landed within the live window, muted + static when stalled
+ * (age > ~3s). Matches the approved "AUTO·TDP pill" spec.
  */
 @Composable
-private fun CompactProofChip(state: HudUiState) {
-    // Live 1 s clock so the pulse-dot's live/stalled verdict keeps ticking even
-    // when no other field recomposes (was captured once at composition → froze).
+private fun CompactAutoTdpPill(state: HudUiState) {
     val nowMs = rememberHudNowMs()
     val live = HudDisplayUtils.heartbeatIsLive(state.autoTdpLastAppliedEpochMs, nowMs)
     val accent = if (live) HudEmerald else HudDim
-
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(accent.copy(alpha = if (live) 0.15f else 0.07f))
-            .border(0.5.dp, accent.copy(alpha = if (live) 0.5f else 0.25f), RoundedCornerShape(4.dp))
-            .padding(horizontal = 5.dp, vertical = 2.dp),
+            .clip(RoundedCornerShape(5.dp))
+            .background(accent.copy(alpha = if (live) 0.16f else 0.08f))
+            .border(0.8.dp, accent.copy(alpha = if (live) 0.6f else 0.3f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+            .semantics {
+                contentDescription = "AutoTDP ${if (live) "live" else "stalled"}"
+            },
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -379,11 +626,14 @@ private fun CompactProofChip(state: HudUiState) {
         ) {
             HeartbeatDot(live = live, size = 5.dp)
             Text(
-                text = HudDisplayUtils.formatProofChipCap(state.autoTdpBigCapMhz),
+                text = "AUTO·TDP",
                 color = accent,
-                fontSize = 8.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
+                letterSpacing = 0.3.sp,
+                maxLines = 1,
+                softWrap = false,
             )
         }
     }
@@ -440,23 +690,21 @@ private fun HudFullPanel(
     onClose: () -> Unit,
 ) {
     val widthDp: Dp = HudDisplayUtils.hudWidthDp(state.hudSizeIndex).dp
+    val scroll = rememberScrollState()
 
+    // The verbose card: solid bg + bold red accent edge. The BODY scrolls (capped
+    // height) so every section — incl. the opacity + display-Hz controls at the
+    // bottom — stays reachable even on short screens, while the header stays put.
     Column(
         modifier = Modifier
             .widthIn(min = widthDp, max = widthDp)
             .alpha(state.hudOpacity)
-            .clip(RoundedCornerShape(10.dp))
-            .background(HudBg)
-            .border(0.5.dp, HudBorder, RoundedCornerShape(10.dp))
-            .drawBehind {
-                // Red left-edge accent bar
-                val barW = 2.dp.toPx()
-                drawRect(HudRed, size = size.copy(width = barW))
-            }
-            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .background(HudBgSolid)
+            .border(0.8.dp, HudBorder, RoundedCornerShape(12.dp))
+            .drawBehind { drawRect(HudRed, size = size.copy(width = ACCENT_EDGE.toPx())) },
     ) {
-        // ── Header row ──────────────────────────────────────────────────────
+        // ── Header bar (raised, bottom border) ──────────────────────────────
         FullPanelHeader(
             state = state,
             onCycleLayout = onCycleLayout,
@@ -465,45 +713,114 @@ private fun HudFullPanel(
             onClose = onClose,
         )
 
-        HudDivider()
+        // ── Scrolling body ──────────────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .heightIn(max = 520.dp)
+                .verticalScroll(scroll)
+                .padding(start = ACCENT_EDGE + 7.dp, end = 9.dp, top = 8.dp, bottom = 9.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // FPS hero (+ frame-ms when real).
+            FullFpsHero(state)
 
-        // ── Body: FPS block | Metric grid ───────────────────────────────────
-        FullPanelBody(state)
+            // THROTTLE banner — only when the kernel is mitigating NOW.
+            if (HudDisplayUtils.isThrottlingNow(state.coolingDeviceMaxState)) {
+                ThrottleBanner()
+            }
 
-        // ── AutoTDP proof-of-effect section ──────────────────────────────────
-        HudDivider()
-        AutoTdpProofSection(
-            state = state,
-            onToggleAutoTdp = onToggleAutoTdp,
-            onSetAutoTdpProfile = onSetAutoTdpProfile,
-        )
+            // 2×2 metric grid: CPU / GPU / POWER / BATTERY.
+            FullMetricGrid(state)
 
-        // ── Quick profiles (optional) ────────────────────────────────────────
-        // Kept inline because it's a one-tap in-game action. Refresh-rate,
-        // opacity, per-core bars and the thermal breakdown were intentionally
-        // REMOVED from the always-visible full panel — they made it tall and
-        // cramped. The horizontal panel now stays compact: header → metrics →
-        // AutoTDP → (optional) saved-profile chips. Opacity/size live on the
-        // header size chip; per-core/thermal detail lives in the app's Dashboard.
-        if (state.quickProfiles.isNotEmpty()) {
+            // THERMAL breakdown: CPU PEAK / GPU / BATT, each coloured. Uses
+            // cpuPeakTempC — the HOTTEST cpu zone, never the average.
             HudDivider()
-            FullProfileChips(
-                chips = state.quickProfiles,
-                onApplyProfile = onApplyProfile,
-                onCycleNextProfile = onCycleNextProfile,
+            FullThermalRow(
+                cpuTempC = state.cpuPeakTempC ?: state.cpuTempC,
+                gpuTempC = state.gpuTempC,
+                batteryTempC = state.batteryTempC,
             )
-        }
 
-        // ── Flash message ────────────────────────────────────────────────────
-        state.lastActionMessage?.let { msg ->
-            Text(
-                text = msg,
-                color = HudAmber,
-                fontSize = 9.sp,
-                lineHeight = 12.sp,
-                fontFamily = FontFamily.Monospace,
+            // PER-CORE load bars (parked cores dimmed). Hidden until data exists.
+            if (state.perCoreMhz.isNotEmpty()) {
+                HudDivider()
+                FullPerCoreSection(state)
+            }
+
+            // AutoTDP proof footer (KEEP — strongest part). Reused verbatim,
+            // styled to match by its own emerald-edged surface.
+            HudDivider()
+            AutoTdpProofSection(
+                state = state,
+                onToggleAutoTdp = onToggleAutoTdp,
+                onSetAutoTdpProfile = onSetAutoTdpProfile,
             )
+
+            // Quick profiles (optional).
+            if (state.quickProfiles.isNotEmpty()) {
+                HudDivider()
+                FullProfileChips(
+                    chips = state.quickProfiles,
+                    onApplyProfile = onApplyProfile,
+                    onCycleNextProfile = onCycleNextProfile,
+                )
+            }
+
+            // Display-Hz picker + opacity controls — always reachable (scrolls).
+            HudDivider()
+            if (state.availableHzOptions.isNotEmpty()) {
+                FullRefreshRateSection(
+                    availableHz = state.availableHzOptions,
+                    pinnedHz = state.pinnedHz,
+                    onSetRefreshHz = onSetRefreshHz,
+                )
+            }
+            FullOpacityRow(
+                hudOpacity = state.hudOpacity,
+                onSetOpacity = onSetOpacity,
+            )
+
+            // Flash message.
+            state.lastActionMessage?.let { msg ->
+                Text(
+                    text = msg,
+                    color = HudAmber,
+                    fontSize = 9.sp,
+                    lineHeight = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
+    }
+}
+
+/**
+ * Full-width red banner that surfaces active thermal throttling — the single
+ * most useful gaming-HUD signal ("am I being throttled?"). Only rendered when the
+ * kernel cooling-device state proves a mitigation is engaged; never speculative.
+ */
+@Composable
+private fun ThrottleBanner() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(HudRed.copy(alpha = 0.12f))
+            .border(0.5.dp, HudRed.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 7.dp, vertical = 4.dp)
+            .semantics { contentDescription = "Thermal throttling active — clocks limited by the kernel" },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Icon(Icons.Outlined.Bolt, null, tint = HudRed, modifier = Modifier.size(11.dp))
+        Text(
+            text = "THROTTLING — clocks limited by thermal mitigation",
+            color = HudRed,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            letterSpacing = 0.3.sp,
+        )
     }
 }
 
@@ -518,184 +835,219 @@ private fun FullPanelHeader(
     onClose: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(HudRaised)
+            .drawBehind {
+                // Bottom hairline border separating the header from the body.
+                drawRect(
+                    HudBorder,
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, size.height - 1.dp.toPx()),
+                    size = size.copy(height = 1.dp.toPx()),
+                )
+            }
+            .padding(start = ACCENT_EDGE + 7.dp, end = 4.dp, top = 5.dp, bottom = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Brand label
         Text(
             text = "CALIBRATE",
             color = HudRed,
-            fontSize = 9.sp,
+            fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp,
+            letterSpacing = 1.0.sp,
         )
-        Spacer(Modifier.width(5.dp))
+        Spacer(Modifier.width(7.dp))
 
-        // AutoTDP status pill
+        // AutoTDP goal/mode pill — shows the GOAL the engine actually runs, so the
+        // header matches the picker + main AutoTDP screen.
         val tdpAccent = when (state.autoTdpStatus) {
             AutoTdpStatus.RUNNING -> HudEmerald
             AutoTdpStatus.KILLED_BY_SAFETY, AutoTdpStatus.WRITE_DENIED -> HudRed
             else -> HudDim
         }
-        // Show the GOAL the engine actually runs (goal-mapped), so the header
-        // matches the picker + the main AutoTDP screen instead of the legacy
-        // EFF/BAL/TGT names.
         val tdpLabel = if (state.autoTdpRunning) {
-            "AUTOTDP - ${GoalProfileUi.goalShortLabel(GoalProfile.fromLegacyProfile(state.autoTdpActiveProfile))}"
-        } else "AUTOTDP OFF"
+            GoalProfileUi.goalShortLabel(GoalProfile.fromLegacyProfile(state.autoTdpActiveProfile))
+        } else "TDP OFF"
         StatusPill(text = tdpLabel, accent = tdpAccent)
 
         Spacer(Modifier.weight(1f))
 
-        // Size toggle
-        HudIconChip(label = HudDisplayUtils.hudSizeLabel(state.hudSizeIndex), onClick = onCycleHudSize)
-        Spacer(Modifier.width(2.dp))
-
-        // Recording dot
-        Box(
-            modifier = Modifier
-                .size(22.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .clickable(onClick = onToggleRecord)
-                .padding(4.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            // The recording badge is always "R" (the elapsed m:ss is shown in the
-            // adjacent Text below when recording). Removed a dead m/s computation
-            // here that produced "R" regardless — the label is coherent now.
-            Text(
-                text = "R",
-                color = if (state.isRecording) HudRed else HudDim,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        // Recording dot (+ elapsed m:ss when recording).
         if (state.isRecording) {
             val m = state.recordingElapsedSeconds / 60
             val s = state.recordingElapsedSeconds % 60
             Text(
                 text = "%d:%02d".format(m, s),
                 color = HudRed,
-                fontSize = 8.sp,
+                fontSize = 9.sp,
                 fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
             )
-            Spacer(Modifier.width(3.dp))
+            Spacer(Modifier.width(2.dp))
+        }
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .clickable(onClick = onToggleRecord)
+                .semantics {
+                    contentDescription = if (state.isRecording) "Stop recording" else "Start recording"
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.FiberManualRecord,
+                contentDescription = null,
+                tint = if (state.isRecording) HudRed else HudDim,
+                modifier = Modifier.size(12.dp),
+            )
         }
 
-        // Layout swap (to compact)
-        IconButton(onClick = onCycleLayout, modifier = Modifier.size(22.dp)) {
+        // Size toggle (SM/MD/LG)
+        HudIconChip(label = HudDisplayUtils.hudSizeLabel(state.hudSizeIndex), onClick = onCycleHudSize)
+        Spacer(Modifier.width(3.dp))
+
+        // Collapse → COMPACT
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .clickable(onClick = onCycleLayout),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
-                Icons.Outlined.SwapHoriz,
-                contentDescription = "Collapse to compact",
+                Icons.Outlined.UnfoldLess,
+                contentDescription = "Collapse to compact bar",
                 tint = HudValue,
-                modifier = Modifier.size(13.dp),
+                modifier = Modifier.size(16.dp),
             )
         }
 
         // Close
-        IconButton(onClick = onClose, modifier = Modifier.size(22.dp)) {
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center,
+        ) {
             Icon(
                 Icons.Outlined.Close,
                 contentDescription = "Hide overlay",
-                tint = HudDim,
-                modifier = Modifier.size(13.dp),
+                tint = HudMuted,
+                modifier = Modifier.size(15.dp),
             )
         }
     }
 }
 
-// ── Full panel: Body (FPS block left | 4-metric grid right) ─────────────────
+// ── Full panel: FPS hero ────────────────────────────────────────────────────
 
+/**
+ * The verbose FPS hero. A big emerald number + "fps · 17.2 ms" frame-time ONLY
+ * when a REAL game framerate exists; otherwise a dim "REFRESH 60Hz" line and NO
+ * frame-ms (a panel-refresh value has no meaningful frame time).
+ */
 @Composable
-private fun FullPanelBody(state: HudUiState) {
-    val fpsColor = if (state.gameFpsIsReal) HudEmerald else HudDim
-    val frameMs = state.gameFps?.takeIf { it > 0 }?.let { "%.1fms".format(1000f / it) }
-    val fpsLabel = if (state.gameFpsIsReal) "FPS" else "REFRESH"
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // LEFT -- FPS hero block
-        Column(
-            modifier = Modifier
-                .width(90.dp)
-                .semantics {
-                    contentDescription = if (state.gameFps != null) {
-                        "${state.gameFps} ${if (state.gameFpsIsReal) "game frames per second" else "refresh Hz"}"
-                    } else "FPS unavailable"
-                },
-        ) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    text = state.gameFps?.toString() ?: "--",
-                    color = fpsColor,
-                    fontSize = 40.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 40.sp,
-                )
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    text = fpsLabel,
-                    color = fpsColor,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp,
-                    modifier = Modifier.padding(bottom = 5.dp),
-                )
-            }
-            if (frameMs != null) {
-                Text(
-                    text = "$frameMs",
-                    color = HudLabel,
-                    fontSize = 8.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-        }
-
-        // Thin vertical rule
-        Box(
-            modifier = Modifier
-                .width(0.5.dp)
-                .height(60.dp)
-                .background(HudBorder),
-        )
-
-        // RIGHT -- 4-wide metric grid
+private fun FullFpsHero(state: HudUiState) {
+    val isReal = state.gameFpsIsReal && state.gameFps != null
+    if (isReal) {
+        val fps = state.gameFps!!
+        val frameMs = HudDisplayUtils.formatFrameMs(fps)
         Row(
-            modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription =
+                        "$fps frames per second${frameMs?.let { ", $it frame time" } ?: ""}"
+                },
+            verticalAlignment = Alignment.Bottom,
         ) {
+            Text(
+                text = fps.toString(),
+                color = HudEmerald,
+                fontSize = 38.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 38.sp,
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = if (frameMs != null) "fps · $frameMs" else "fps",
+                color = HudMuted,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
+    } else {
+        Text(
+            text = HudDisplayUtils.formatRefreshTag(state.gameFps),
+            color = HudDim,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.5.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription = state.gameFps?.let { "Display refresh $it Hz" }
+                        ?: "Refresh rate unavailable"
+                },
+        )
+    }
+}
+
+// ── Full panel: 2×2 metric grid ─────────────────────────────────────────────
+
+/**
+ * The 2×2 metric grid: CPU / GPU on the top row, POWER / BATTERY on the bottom,
+ * separated by hairline dividers. Each tile pairs its big value with a coloured
+ * temp (cool→hot) and a muted sub-line. Honest "—"/omit when unavailable.
+ */
+@Composable
+private fun FullMetricGrid(state: HudUiState) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             FullMetricTile(
                 label = "CPU",
-                value = HudDisplayUtils.formatGhzFromMhz(state.cpuMaxMhz.takeIf { it > 0 }),
-                subLine = "${state.cpuLoadPct}%",
                 accent = HudBlue,
+                value = HudDisplayUtils.formatClockWithBoost(
+                    state.cpuMaxMhz.takeIf { it > 0 }, state.autoTdpBigCapMhz,
+                ),
+                tempC = state.cpuTempC,
+                sub = "${HudDisplayUtils.formatLoadPct(state.cpuLoadPct, state.loadIsProxy)} load",
                 modifier = Modifier.weight(1f),
             )
             FullMetricTile(
                 label = "GPU",
-                value = state.gpuMhz?.let { "${it}M" } ?: "--",
-                subLine = state.gpuLoadPct?.let { "${it}%" } ?: "--",
                 accent = HudPurple,
+                value = HudDisplayUtils.formatGpuClock(state.gpuMhz),
+                tempC = state.gpuTempC,
+                sub = HudDisplayUtils.formatLoadPctOrNull(state.gpuLoadPct, isProxy = false)
+                    ?.let { "$it load" },
                 modifier = Modifier.weight(1f),
             )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             FullMetricTile(
                 label = "POWER",
-                value = HudDisplayUtils.formatWatts(state.batteryW),
-                subLine = state.ramUsedPct?.let { "RAM ${it}%" } ?: "--",
                 accent = HudAmber,
+                // Power null/0 → honest "—" (device can't read current_now).
+                value = state.batteryW?.takeIf { it > 0.0 }
+                    ?.let { HudDisplayUtils.formatWatts(it) } ?: "—",
+                tempC = null,
+                sub = state.ramUsedPct?.let { "RAM ${it}%" },
                 modifier = Modifier.weight(1f),
             )
-            val tempHot = state.cpuTempC != null && state.cpuTempC >= 80f
             FullMetricTile(
-                label = "TEMP",
-                value = HudDisplayUtils.formatTemp(state.cpuTempC),
-                subLine = state.gpuTempC?.let { "gpu %.0f".format(it) } ?: "--",
-                accent = if (tempHot) HudAmber else HudEmerald,
+                label = "BATTERY",
+                accent = HudEmerald,
+                value = HudDisplayUtils.formatBatteryPct(state.batteryPct),
+                tempC = state.batteryTempC,
+                sub = null,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -703,55 +1055,86 @@ private fun FullPanelBody(state: HudUiState) {
 }
 
 /**
- * Full-panel metric tile: label (9sp muted) + big mono value + tiny sub-line + 2dp accent bar.
+ * One grid tile: left accent bar + label, big mono value, then a sub-line that
+ * pairs an optional muted [sub] (load / RAM) with an optional coloured temp.
+ * The temp is coloured by its [HudDisplayUtils.tempTier] (cool→hot); a null temp
+ * is simply omitted (POWER has none) — never a fabricated band.
  */
 @Composable
 private fun FullMetricTile(
     label: String,
-    value: String,
-    subLine: String,
     accent: Color,
+    value: String,
+    tempC: Float?,
+    sub: String?,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    val showTemp = label != "POWER"
+    Row(
         modifier = modifier
-            .background(Color(0xFF0B1525), RoundedCornerShape(4.dp))
-            .border(0.5.dp, HudBorder, RoundedCornerShape(4.dp)),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .clip(RoundedCornerShape(7.dp))
+            // Same recessed chip fill as the COMPACT bar's metric cells so the
+            // verbose 2×2 grid reads as the same family of polished boxed tiles,
+            // not a flatter/darker variant.
+            .background(HudCellBg)
+            .border(0.8.dp, HudBorder, RoundedCornerShape(7.dp))
+            .semantics {
+                contentDescription =
+                    "$label $value" + (if (showTemp) " ${HudDisplayUtils.formatTemp(tempC)}" else "") +
+                        (sub?.let { ", $it" } ?: "")
+            },
     ) {
+        // Bold left accent bar — the category key, matching the bar's red edge.
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(52.dp)
+                .background(accent),
+        )
         Column(
-            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 3.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(start = 10.dp, end = 9.dp, top = 8.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Text(
                 text = label,
-                color = HudLabel,
-                fontSize = 7.sp,
+                color = accent,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp,
+                letterSpacing = 0.6.sp,
             )
-            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = value,
+                    color = HudValue,
+                    fontSize = 17.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 17.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                if (showTemp) {
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = HudDisplayUtils.formatTempBare(tempC),
+                        color = tempColor(tempC),
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(bottom = 1.dp),
+                    )
+                }
+            }
             Text(
-                text = value,
-                color = HudValue,
+                text = sub ?: "",
+                color = HudMuted,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = subLine,
-                color = HudDim,
-                fontSize = 7.sp,
-                fontFamily = FontFamily.Monospace,
+                lineHeight = 11.sp,
             )
         }
-        // 2dp colored accent bar
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(2.dp)
-                .background(accent, RoundedCornerShape(bottomStart = 4.dp, bottomEnd = 4.dp)),
-        )
     }
 }
 
@@ -1314,14 +1697,13 @@ private fun FullProfileChips(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  FUTURE: detached VERBOSE-panel sections (scaffolding — intentionally uncalled)
+//  VERBOSE-panel detail sections — all MOUNTED by HudFullPanel.
 //
-//  The four composables below (FullRefreshRateSection, FullOpacityRow,
-//  FullPerCoreSection, FullThermalRow) were extracted for a denser VERBOSE HUD
-//  layout that is not wired into HudFullPanel yet. They are kept as ready-to-mount
-//  building blocks, NOT dead code to delete: when the denser layout lands they
-//  drop straight in. Until then they are deliberately not referenced — do not
-//  treat the "unused" warning as a bug.
+//  FullRefreshRateSection, FullOpacityRow, FullPerCoreSection and FullThermalRow
+//  were detached/dead in 0.1.33 (the data they show — display Hz, opacity,
+//  per-core freq/load, and the thermal breakdown incl. battery temp — rendered
+//  nowhere). They are now wired back into the redesigned verbose panel so every
+//  field is reachable again.
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Full panel: Refresh rate section ────────────────────────────────────────
@@ -1387,77 +1769,95 @@ private fun FullOpacityRow(
     }
 }
 
-// ── Full panel: Per-core bars ─────────────────────────────────────────────────
+// ── Full panel: Per-core bars (vertical load columns) ────────────────────────
 
+/**
+ * PER-CORE detail — a horizontal row of VERTICAL load columns (one per core),
+ * each column's filled height = the core's load%. Cores AutoTDP has parked render
+ * dimmed (a flat [HudParked] stub), the power-user signal that those cores are
+ * offline. The fill is coloured by load tier (cool blue → busy amber → pegged
+ * red) so a hot core jumps out. The core index sits under each column.
+ */
 @Composable
 private fun FullPerCoreSection(state: HudUiState) {
     VerboseSectionLabel("PER-CORE", HudBlue)
-    Spacer(Modifier.height(3.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Spacer(Modifier.height(5.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
         state.perCoreMhz.forEachIndexed { idx, mhz ->
             val loadPct = state.perCoreLoadPct.getOrNull(idx) ?: 0
             val isParked = idx != 0 && idx in state.autoTdpParkedCores
-            PerCoreBar(idx = idx, mhz = mhz, loadPct = loadPct, isParked = isParked)
+            PerCoreColumn(
+                idx = idx,
+                mhz = mhz,
+                loadPct = loadPct,
+                isParked = isParked,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
 
-@Composable
-private fun PerCoreBar(idx: Int, mhz: Int, loadPct: Int, isParked: Boolean) {
-    val loadFrac = (loadPct / 100f).coerceIn(0f, 1f)
-    val textColor = if (isParked) HudDim else HudValue
-    val barFillColor = if (isParked) Color.Transparent else HudBlue
+/** Per-core load tier colour: cool → busy → pegged. */
+private fun loadColor(loadPct: Int): Color = when {
+    loadPct >= 85 -> HudRed
+    loadPct >= 55 -> HudAmber
+    else          -> HudBlue
+}
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics {
-                contentDescription = if (isParked) "Core $idx parked"
-                else "Core $idx $mhz MHz $loadPct percent load"
-            },
+@Composable
+private fun PerCoreColumn(
+    idx: Int,
+    mhz: Int,
+    loadPct: Int,
+    isParked: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val loadFrac = (loadPct / 100f).coerceIn(0f, 1f)
+    Column(
+        modifier = modifier.semantics {
+            contentDescription = if (isParked) "Core $idx parked"
+            else "Core $idx $mhz megahertz $loadPct percent load"
+        },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Text(
-            text = "c$idx",
-            color = textColor,
-            fontSize = 8.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(18.dp),
-        )
-        Spacer(Modifier.width(3.dp))
+        // Vertical track (28dp tall); fill grows up from the bottom = load%.
         Box(
             modifier = Modifier
-                .weight(1f)
-                .height(6.dp)
-                .clip(RoundedCornerShape(1.dp))
-                .background(HudBarBg),
+                .fillMaxWidth()
+                .height(28.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (isParked) HudParked.copy(alpha = 0.25f) else HudBarBg),
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            if (!isParked && loadFrac > 0f) {
+            if (isParked) {
+                // A small dim stub marks the core as parked (offline), not loaded.
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(loadFrac)
-                        .height(6.dp)
-                        .drawBehind {
-                            val skew = if (loadFrac < 1f) 3f else 0f
-                            val path = Path().apply {
-                                moveTo(0f, 0f)
-                                lineTo(size.width - skew, 0f)
-                                lineTo(size.width, size.height)
-                                lineTo(0f, size.height)
-                                close()
-                            }
-                            drawPath(path, HudBlue)
-                        },
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(HudParked),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp * loadFrac)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(loadColor(loadPct)),
                 )
             }
         }
-        Spacer(Modifier.width(5.dp))
         Text(
-            text = if (isParked) "PARKED" else "$mhz-$loadPct%",
-            color = textColor,
+            text = "$idx",
+            color = if (isParked) HudParked else HudMuted,
             fontSize = 8.sp,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(66.dp),
+            fontWeight = FontWeight.Bold,
         )
     }
 }
@@ -1476,7 +1876,9 @@ private fun FullThermalRow(
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        ThermalMini(label = "CPU", tempC = cpuTempC, modifier = Modifier.weight(1f))
+        // CPU shows the PEAK zone (hottest core), not the average — the caller
+        // passes cpuPeakTempC. Labelled "CPU▲" to make the peak explicit.
+        ThermalMini(label = "CPU▲", tempC = cpuTempC, modifier = Modifier.weight(1f))
         ThermalMini(label = "GPU", tempC = gpuTempC, modifier = Modifier.weight(1f))
         ThermalMini(label = "BATT", tempC = batteryTempC, modifier = Modifier.weight(1f))
     }
@@ -1484,18 +1886,24 @@ private fun FullThermalRow(
 
 @Composable
 private fun ThermalMini(label: String, tempC: Float?, modifier: Modifier = Modifier) {
-    val hot = tempC != null && tempC >= 80f
+    // Border + value colour both follow the cool→hot tier so a hot reading glows
+    // amber/red and a cool one stays calm — the value is the honest source.
+    val accent = tempColor(tempC)
+    val tier = HudDisplayUtils.tempTier(tempC)
+    val borderColor = if (tier == HudDisplayUtils.TempTier.NONE) HudBorder
+        else accent.copy(alpha = 0.4f)
     Column(
         modifier = modifier
             .background(HudBarBg, RoundedCornerShape(4.dp))
-            .border(0.5.dp, if (hot) HudAmber.copy(alpha = 0.4f) else HudBorder, RoundedCornerShape(4.dp))
-            .padding(horizontal = 5.dp, vertical = 4.dp),
+            .border(0.5.dp, borderColor, RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 4.dp)
+            .semantics { contentDescription = "$label ${HudDisplayUtils.formatTemp(tempC)}" },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(label, color = HudLabel, fontSize = 7.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
         Text(
             text = HudDisplayUtils.formatTemp(tempC),
-            color = if (hot) HudAmber else HudValue,
+            color = if (tier == HudDisplayUtils.TempTier.NONE) HudValue else accent,
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold,

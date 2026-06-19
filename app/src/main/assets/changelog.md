@@ -1,3 +1,20 @@
+## [0.1.34-alpha] — 2026-06-18
+
+A big HUD rework, plus zero-setup fan curves for the Retroid Pocket 6.
+
+### Fixed — the floating HUD
+- **The HUD no longer crashes when you show it.** A layout-hosting bug could force-close the app the moment the overlay appeared — fixed.
+- **The compact bar is fully reworked.** Clean boxed cells (FPS · CPU · GPU · BAT) with labels, a solid background, and a bold accent edge — readable at a glance over a game. No more cramped, half-empty strip.
+- **Every value shows correctly now.** GPU clock and load read properly on devices that need privileged access (was blank/`--`); battery % and battery temperature are back; GPU clock no longer mis-scales; a wrong negative GPU-load reading is gone.
+- **Power shows honestly** — devices that can't report live wattage show nothing instead of a fake "0.0 W".
+- The bar now sizes to its full width (no more squished/cut-off last cell) and spawns inset from the screen corner.
+
+### Added — Retroid Pocket 6 fan curves (experimental)
+- **Custom fan speed on the Retroid Pocket 6, zero setup** — no root, no Shizuku. Calibrate talks to the Retroid's own system service to set a custom fan speed. Marked experimental while we gather device feedback; the safe minimum and honest verification still apply.
+
+### Also
+- Various overlay reliability fixes (no main-thread stalls, reliable restore).
+
 ## [0.1.33-alpha] — 2026-06-16
 
 A deep full-app audit pass: safety, honesty, a new feature, and battery savings.

@@ -67,9 +67,11 @@ class FanCurveGateTest {
     }
 
     @Test
-    fun `a non-Odin device is Unavailable even with PServer`() {
+    fun `a non-handheld device is Unavailable even with PServer`() {
+        // A generic device that is none of Odin/AYANEO/Retroid falls to the "none"
+        // branch even when PServer is live (PServer doesn't grant a fan path on its own).
         val result = FanCurveGate.resolve(
-            report("retroid_pocket6", pserverLive = true),
+            report("anbernic_rg556", pserverLive = true),
             odinSettingsInstalled = false,
         )
         assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
@@ -88,15 +90,20 @@ class FanCurveGateTest {
     }
 
     @Test
-    fun `M1 - settings package on a NON-AYN device does NOT qualify`() {
-        // A sideloaded com.odin.settings on, say, a Retroid must NOT light up the
-        // feature (it would write hardcoded Odin-3 paths to the wrong device).
+    fun `M1 - settings package on a NON-AYN device does NOT take the Odin path`() {
+        // A sideloaded com.odin.settings on, say, a Retroid must NOT light up the ODIN
+        // config.xml path (it would write hardcoded Odin-3 paths to the wrong device).
+        // The Retroid resolves to its OWN binder path instead — and without a live
+        // Retroid binder it is Unavailable with a Retroid-specific reason, never ODIN.
         val result = FanCurveGate.resolve(
             report(handheldKey = "retroid_pocket6", pserverLive = true),
             odinSettingsInstalled = true,
+            retroidBinderLive = false,
         )
         assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
-        assertThat((result as FanCurveAvailability.Unavailable).reason).contains("Odin")
+        assertThat((result as FanCurveAvailability.Unavailable).reason).contains("Retroid fan service")
+        // The crux of M1: a sideloaded Odin settings pkg never grants the Odin path here.
+        assertThat(FanCurveGate.isOdin(report("retroid_pocket6", pserverLive = true), odinSettingsInstalled = true)).isFalse()
     }
 
     @Test
@@ -179,11 +186,82 @@ class FanCurveGateTest {
     }
 
     @Test
-    fun `a device that is neither Odin nor AYANEO is Unavailable`() {
+    fun `a device that is neither Odin nor AYANEO nor Retroid is Unavailable`() {
         val result = FanCurveGate.resolve(
-            report("retroid_pocket6", pserverLive = true, ayaneoBinderLive = false),
+            report("anbernic_rg556", pserverLive = true, ayaneoBinderLive = false),
             odinSettingsInstalled = false,
+            retroidBinderLive = false,
         )
         assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+    }
+
+    // ── RETROID (SettingsController/FanProvider-binder path) ───────────────────
+
+    @Test
+    fun `Retroid with a LIVE FanProvider binder is Available as RETROID vendor`() {
+        val result = FanCurveGate.resolve(
+            report("retroid_pocket6", pserverLive = false),
+            odinSettingsInstalled = false,
+            retroidBinderLive = true,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Available::class.java)
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.RETROID)
+    }
+
+    @Test
+    fun `Retroid WITHOUT a live binder is Unavailable with a binder-specific reason`() {
+        // A Retroid whose FanProvider isn't reachable (passive model / firmware variant)
+        // is honestly unavailable — no setup can enable it.
+        val result = FanCurveGate.resolve(
+            report("retroid_pocket6", pserverLive = false),
+            odinSettingsInstalled = false,
+            retroidBinderLive = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+        assertThat((result as FanCurveAvailability.Unavailable).reason).contains("Retroid fan service")
+    }
+
+    @Test
+    fun `Retroid does NOT use the Odin config-xml path even with PServer live`() {
+        // Even if PServer somehow reported live on a Retroid, the vendor resolves to
+        // RETROID (binder), never ODIN — the config.xml path is Odin-only, and the M1
+        // corroboration guard already blocks a sideloaded com.odin.settings here.
+        val result = FanCurveGate.resolve(
+            report("retroid_pocket6", pserverLive = true),
+            odinSettingsInstalled = false,
+            retroidBinderLive = true,
+        )
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.RETROID)
+    }
+
+    @Test
+    fun `a passive Retroid (Pocket 5) without a live binder is Unavailable`() {
+        val result = FanCurveGate.resolve(
+            report("retroid_pocket5", pserverLive = false),
+            odinSettingsInstalled = false,
+            retroidBinderLive = false,
+        )
+        assertThat(result).isInstanceOf(FanCurveAvailability.Unavailable::class.java)
+    }
+
+    @Test
+    fun `Odin stays ODIN even when the Retroid binder flag is somehow set`() {
+        // Defensive: an Odin device key resolves to ODIN first; a stray retroidBinderLive
+        // is irrelevant on an Odin (the two paths never cross).
+        val result = FanCurveGate.resolve(
+            report("ayn_odin3", pserverLive = true),
+            odinSettingsInstalled = true,
+            retroidBinderLive = true,
+        )
+        assertThat((result as FanCurveAvailability.Available).vendor).isEqualTo(FanCurveVendor.ODIN)
+    }
+
+    @Test
+    fun `isRetroid matches retroid keys and nothing else`() {
+        assertThat(FanCurveGate.isRetroid(report("retroid_pocket6", pserverLive = false))).isTrue()
+        assertThat(FanCurveGate.isRetroid(report("retroid_pocket5", pserverLive = false))).isTrue()
+        assertThat(FanCurveGate.isRetroid(report("ayn_odin3", pserverLive = false))).isFalse()
+        assertThat(FanCurveGate.isRetroid(report("ayaneo_pocket_ds", pserverLive = false))).isFalse()
+        assertThat(FanCurveGate.isRetroid(report(null, pserverLive = false))).isFalse()
     }
 }

@@ -28,7 +28,20 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
  *    touched. Requires the binder to be live; "AYANEO device" alone is not enough
  *    (a firmware variant without the gamewindow service degrades honestly).
  *
- * On a device matching NEITHER path → [Unavailable] with an honest reason.
+ *  - [FanCurveVendor.RETROID] — a Retroid model (`retroid_*`) whose vendor fan
+ *    binder is LIVE: the registered `SettingsController` service yields a
+ *    `FanProvider` binder (verified on the RP6). The apply path sets a single
+ *    CUSTOM fan SPEED over that binder (ZERO-SETUP — no root, no script). Unlike
+ *    Odin/AYANEO this is NOT a temp-reactive curve: the governor HOLDS a fixed
+ *    speed (the decompile showed no curve-array transaction), so the curve is
+ *    mapped to one representative held speed and the UI is honest about that.
+ *    The live-binder check is passed in as [retroidBinderLive] (the controller
+ *    supplies [io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanBinderClient.isAvailable]),
+ *    keeping this gate a pure function — exactly like [odinSettingsInstalled].
+ *    "Retroid device" alone is not enough (a firmware without the FanProvider
+ *    degrades honestly).
+ *
+ * On a device matching NONE of these paths → [Unavailable] with an honest reason.
  */
 sealed interface FanCurveAvailability {
     /** Feature is usable; the controller may read + apply curves. */
@@ -42,18 +55,23 @@ sealed interface FanCurveAvailability {
 
 /**
  * Which vendor's fan-curve mechanism applies.
- *  - [ODIN]   — config.xml rewrite + fan_mode bounce via the privileged shell.
- *  - [AYANEO] — `com_set_fan_speed_strategy` over the gamewindow binder (zero-setup).
+ *  - [ODIN]    — config.xml rewrite + fan_mode bounce via the privileged shell.
+ *  - [AYANEO]  — `com_set_fan_speed_strategy` over the gamewindow binder (zero-setup).
+ *  - [RETROID] — a single CUSTOM fan SPEED over the SettingsController/FanProvider
+ *    binder (zero-setup). NOT a temp-reactive curve — a fixed held speed.
  */
-enum class FanCurveVendor { ODIN, AYANEO }
+enum class FanCurveVendor { ODIN, AYANEO, RETROID }
 
 object FanCurveGate {
 
     /**
      * Resolve availability + the vendor to dispatch on, from the live [report]
      * plus a cheap check of whether the Odin settings package is installed
-     * ([odinSettingsInstalled] — the controller passes the `packageManager`
-     * result; kept as a param so this stays a pure function).
+     * ([odinSettingsInstalled]) and whether the Retroid FanProvider binder is live
+     * ([retroidBinderLive]). Both are passed in (the controller supplies the
+     * `packageManager` result and the
+     * [io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanBinderClient.isAvailable]
+     * result) so this stays a PURE, unit-testable function.
      *
      * Resolution order:
      *   1. ODIN device (recognized key / corroboration) → require a privileged
@@ -61,11 +79,15 @@ object FanCurveGate {
      *   2. AYANEO device whose gamewindow binder is live → Available(AYANEO)
      *      (binder path). An AYANEO device WITHOUT the live binder is Unavailable
      *      with a binder-specific reason (honest: the zero-setup path isn't reachable).
-     *   3. Neither → Unavailable.
+     *   3. RETROID device whose FanProvider binder is live → Available(RETROID)
+     *      (binder path, single custom SPEED). A Retroid device WITHOUT the live
+     *      binder is Unavailable with a binder-specific reason.
+     *   4. None → Unavailable.
      */
     fun resolve(
         report: CapabilityReport?,
         odinSettingsInstalled: Boolean,
+        retroidBinderLive: Boolean = false,
     ): FanCurveAvailability {
         if (report == null) {
             return FanCurveAvailability.Unavailable("Still detecting device capabilities…")
@@ -98,10 +120,23 @@ object FanCurveGate {
             return FanCurveAvailability.Available(FanCurveVendor.AYANEO)
         }
 
-        // ── 3. Neither ──────────────────────────────────────────────────────
+        // ── 3. RETROID (SettingsController/FanProvider-binder path) ─────────
+        if (isRetroid(report)) {
+            if (!retroidBinderLive) {
+                return FanCurveAvailability.Unavailable(
+                    "Custom fan control on Retroid needs the Retroid fan service " +
+                        "(SettingsController/FanProvider), which isn't reachable on this " +
+                        "device (it may be a passively-cooled model or a firmware variant " +
+                        "without it). No setup can enable it here.",
+                )
+            }
+            return FanCurveAvailability.Available(FanCurveVendor.RETROID)
+        }
+
+        // ── 4. None ─────────────────────────────────────────────────────────
         return FanCurveAvailability.Unavailable(
-            "Custom fan curves are available on AYN Odin and AYANEO handhelds. This " +
-                "device stores its fan curve differently and isn't supported yet.",
+            "Custom fan control is available on AYN Odin, AYANEO, and Retroid handhelds. " +
+                "This device controls its fan differently and isn't supported yet.",
         )
     }
 
@@ -142,4 +177,19 @@ object FanCurveGate {
      */
     internal fun isAyaneo(report: CapabilityReport): Boolean =
         report.device.knownHandheldKey.orEmpty().startsWith("ayaneo")
+
+    /**
+     * Retroid detection for the FanProvider binder path. Any Retroid handheld key
+     * (`retroid_*`) qualifies as the DEVICE half; the gate ALSO requires the live
+     * binder (`retroidBinderLive`) before reporting Available, so a loose
+     * `startsWith("retroid")` here is safe — the live-acquire requirement (not a
+     * device-key allowlist) is what actually gates the apply. Like AYANEO and unlike
+     * Odin, the Retroid apply touches no hardcoded per-model sysfs paths: it drives
+     * the FanProvider binder, so the same code works across the Retroid line wherever
+     * the SettingsController/FanProvider chain is reachable. Passively-cooled Retroids
+     * (Pocket 4/5) simply never have a live FanProvider, so they degrade honestly
+     * upstream with a binder-specific reason.
+     */
+    internal fun isRetroid(report: CapabilityReport): Boolean =
+        report.device.knownHandheldKey.orEmpty().startsWith("retroid")
 }

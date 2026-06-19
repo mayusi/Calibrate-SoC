@@ -251,6 +251,32 @@
         </receiver>
 
         <!--
+          DE-RISK PROBE (debug-only, removable). Answers one question: can a
+          normal (non-system) app bind SettingsController → FanProvider on the
+          Retroid Pocket 6 and drive the fan? Used ONLY to de-risk the RP6 fan-
+          curve feature before building the full RetroidVendorWriter.
+
+          Disabled + un-exported here so it is COMPLETELY INERT in release
+          builds — the receiver is never instantiated, never receives intents,
+          and appears in the merged release manifest as a dead entry only. The
+          debug-only manifest overlay (src/debug/AndroidManifest.xml) flips it
+          to enabled=true + exported=true for debug builds via tools:replace.
+          RetroidFanProbeReceiver.onReceive() also hard-returns unless
+          BuildConfig.DEBUG as a second guard.
+
+          Delete this block, src/debug/AndroidManifest.xml, RetroidFanProbe.kt,
+          and RetroidFanProbeReceiver.kt once the probe question is answered.
+        -->
+        <receiver
+            android:name=".debug.RetroidFanProbeReceiver"
+            android:enabled="false"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="io.github.mayusi.calibratesoc.debug.PROBE_RETROID_FAN" />
+            </intent-filter>
+        </receiver>
+
+        <!--
           Floating HUD overlay. TYPE_APPLICATION_OVERLAY foreground
           service so the panel survives the user backgrounding our
           app and switching into a game. SPECIAL_USE category — no

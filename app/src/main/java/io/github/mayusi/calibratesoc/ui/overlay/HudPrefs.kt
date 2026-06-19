@@ -34,8 +34,13 @@ class HudPrefs @Inject constructor(
             ?: HudProfile.COMPACT
     }
 
-    val xDp: Flow<Int> = context.hudDataStore.data.map { it[KEY_X_DP] ?: 16 }
-    val yDp: Flow<Int> = context.hudDataStore.data.map { it[KEY_Y_DP] ?: 64 }
+    // First-run placement is INSET from the screen corner (not flush) so the
+    // premium boxed bar reads as an intentional, floating HUD rather than jammed
+    // into the top-left edge. clampToScreen() still keeps it on-screen if the bar
+    // is wider than expected. Mirror this default in [OverlayService] so the very
+    // first frame (before this async read lands) also spawns inset.
+    val xDp: Flow<Int> = context.hudDataStore.data.map { it[KEY_X_DP] ?: DEFAULT_X_DP }
+    val yDp: Flow<Int> = context.hudDataStore.data.map { it[KEY_Y_DP] ?: DEFAULT_Y_DP }
     val running: Flow<Boolean> = context.hudDataStore.data.map { it[KEY_RUNNING] ?: false }
     val stepMhz: Flow<Int> = context.hudDataStore.data.map { it[KEY_STEP_MHZ] ?: 200 }
     val enabledPolicies: Flow<Set<Int>> = context.hudDataStore.data.map {
@@ -83,15 +88,20 @@ class HudPrefs @Inject constructor(
         context.hudDataStore.edit { it[KEY_HUD_OPACITY] = (opacity * 100).toInt().coerceIn(10, 100) }
     }
 
-    private companion object {
-        val KEY_PROFILE = stringPreferencesKey("profile")
-        val KEY_X_DP = intPreferencesKey("x_dp")
-        val KEY_Y_DP = intPreferencesKey("y_dp")
-        val KEY_RUNNING = booleanPreferencesKey("running")
-        val KEY_STEP_MHZ = intPreferencesKey("step_mhz")
-        val KEY_ENABLED_POLICIES = androidx.datastore.preferences.core
+    companion object {
+        /** First-run HUD inset from the top-left corner (dp). Shared with
+         *  [OverlayService] so the first frame spawns at the same inset position. */
+        const val DEFAULT_X_DP = 28
+        const val DEFAULT_Y_DP = 80
+
+        private val KEY_PROFILE = stringPreferencesKey("profile")
+        private val KEY_X_DP = intPreferencesKey("x_dp")
+        private val KEY_Y_DP = intPreferencesKey("y_dp")
+        private val KEY_RUNNING = booleanPreferencesKey("running")
+        private val KEY_STEP_MHZ = intPreferencesKey("step_mhz")
+        private val KEY_ENABLED_POLICIES = androidx.datastore.preferences.core
             .stringSetPreferencesKey("enabled_policies")
-        val KEY_HUD_SIZE_INDEX = intPreferencesKey("hud_size_index")
-        val KEY_HUD_OPACITY = intPreferencesKey("hud_opacity_pct")
+        private val KEY_HUD_SIZE_INDEX = intPreferencesKey("hud_size_index")
+        private val KEY_HUD_OPACITY = intPreferencesKey("hud_opacity_pct")
     }
 }

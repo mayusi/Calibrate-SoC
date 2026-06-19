@@ -109,6 +109,9 @@ fun FanCurveScreen(
                         text = when (vendor) {
                             FanCurveVendor.AYANEO ->
                                 "Custom fan curve for AYANEO — zero-setup, via the game-window service."
+                            FanCurveVendor.RETROID ->
+                                "Custom fan speed for Retroid (experimental) — zero-setup, via the " +
+                                    "vendor fan service. A single held speed, not a temperature curve."
                             FanCurveVendor.ODIN ->
                                 "Custom smart fan curve for the AYN Odin."
                             null -> "Custom smart fan curve."
@@ -243,6 +246,11 @@ fun FanCurveScreen(
                             "This controls your device's cooling. Calibrate sends the curve to " +
                                 "the AYANEO game-window service and reads the fan PWM back to " +
                                 "confirm the fan path is active."
+                        FanCurveVendor.RETROID ->
+                            "This controls your device's cooling. On Retroid, Calibrate sets a " +
+                                "single custom fan SPEED through the vendor fan service (a fixed " +
+                                "held speed, not a temperature curve) and reads the fan value " +
+                                "back to confirm it took effect."
                         else ->
                             "This controls your device's cooling. Calibrate edits the Odin fan " +
                                 "curve, reloads the fan service, and verifies the result."
@@ -277,6 +285,10 @@ fun FanCurveScreen(
                         "Every curve must pass Calibrate's hot-zone cooling floor before it can " +
                             "apply, so a curve can't run your AYANEO hot. Calibrate never reports " +
                             "success it could not verify."
+                    FanCurveVendor.RETROID ->
+                        "Every curve must pass Calibrate's hot-zone cooling floor, and the held " +
+                            "Retroid fan speed is never set below a safe minimum. Calibrate never " +
+                            "reports success it could not verify."
                     else ->
                         "Calibrate preserves your other Odin settings when writing the curve, " +
                             "and never reports success it could not verify."

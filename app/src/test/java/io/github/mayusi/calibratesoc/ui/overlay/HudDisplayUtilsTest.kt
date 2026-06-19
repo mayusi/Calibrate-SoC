@@ -198,6 +198,68 @@ class HudDisplayUtilsTest {
         assertThat(label).isEqualTo("FPS")
     }
 
+    // ── formatGpuClock ───────────────────────────────────────────────────────
+
+    @Test
+    fun `formatGpuClock formats sub-GHz MHz with M suffix`() {
+        assertThat(HudDisplayUtils.formatGpuClock(540)).isEqualTo("540M")
+        // RP6 idle GPU: 220000000 Hz upstream → gpuMhz 220 → "220M".
+        assertThat(HudDisplayUtils.formatGpuClock(220)).isEqualTo("220M")
+        assertThat(HudDisplayUtils.formatGpuClock(840)).isEqualTo("840M")
+    }
+
+    @Test
+    fun `formatGpuClock switches to GHz at and above 1000 MHz`() {
+        // A 1 GHz+ GPU must read "X.XXG" like the CPU clock, never an ugly "1100M".
+        assertThat(HudDisplayUtils.formatGpuClock(1000)).isEqualTo("1.00G")
+        assertThat(HudDisplayUtils.formatGpuClock(1100)).isEqualTo("1.10G")
+        assertThat(HudDisplayUtils.formatGpuClock(2200)).isEqualTo("2.20G")
+    }
+
+    @Test
+    fun `formatGpuClock stays in MHz just below the GHz boundary`() {
+        assertThat(HudDisplayUtils.formatGpuClock(999)).isEqualTo("999M")
+    }
+
+    @Test
+    fun `formatGpuClock returns dash for null or zero`() {
+        assertThat(HudDisplayUtils.formatGpuClock(null)).isEqualTo("—")
+        assertThat(HudDisplayUtils.formatGpuClock(0)).isEqualTo("—")
+    }
+
+    // ── formatLoadPct ────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatLoadPct returns dash for null`() {
+        assertThat(HudDisplayUtils.formatLoadPct(null, isProxy = false)).isEqualTo("—")
+        assertThat(HudDisplayUtils.formatLoadPct(null, isProxy = true)).isEqualTo("—")
+    }
+
+    @Test
+    fun `formatLoadPct prefixes tilde only for proxy`() {
+        assertThat(HudDisplayUtils.formatLoadPct(88, isProxy = false)).isEqualTo("88%")
+        assertThat(HudDisplayUtils.formatLoadPct(88, isProxy = true)).isEqualTo("~88%")
+    }
+
+    @Test
+    fun `formatLoadPct clamps out-of-range`() {
+        assertThat(HudDisplayUtils.formatLoadPct(150, isProxy = false)).isEqualTo("100%")
+        assertThat(HudDisplayUtils.formatLoadPct(-5, isProxy = true)).isEqualTo("~0%")
+    }
+
+    // ── formatHzTag ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatHzTag appends HZ to the value`() {
+        assertThat(HudDisplayUtils.formatHzTag(60)).isEqualTo("60HZ")
+        assertThat(HudDisplayUtils.formatHzTag(120)).isEqualTo("120HZ")
+    }
+
+    @Test
+    fun `formatHzTag uses honest dash for null`() {
+        assertThat(HudDisplayUtils.formatHzTag(null)).isEqualTo("—HZ")
+    }
+
     // ── formatClusterMhz ─────────────────────────────────────────────────────
 
     @Test
@@ -261,27 +323,56 @@ class HudDisplayUtilsTest {
 
     // ── hudWidthDp ────────────────────────────────────────────────────────────
 
-    // Full-panel widths were widened (420/480/540) so the horizontal HUD lays
-    // the FPS hero block and the 4-wide metric-tile row out on one row.
+    // The rebuilt verbose panel is a vertical structured card (~330dp approved
+    // width), so the presets bracket that: 300 / 330 / 372.
     @Test
-    fun `hudWidthDp returns 420 for index 0`() {
-        assertThat(HudDisplayUtils.hudWidthDp(0)).isEqualTo(420)
+    fun `hudWidthDp returns 300 for index 0`() {
+        assertThat(HudDisplayUtils.hudWidthDp(0)).isEqualTo(300)
     }
 
     @Test
-    fun `hudWidthDp returns 480 for index 1`() {
-        assertThat(HudDisplayUtils.hudWidthDp(1)).isEqualTo(480)
+    fun `hudWidthDp returns 330 for index 1`() {
+        assertThat(HudDisplayUtils.hudWidthDp(1)).isEqualTo(330)
     }
 
     @Test
-    fun `hudWidthDp returns 540 for index 2`() {
-        assertThat(HudDisplayUtils.hudWidthDp(2)).isEqualTo(540)
+    fun `hudWidthDp returns 372 for index 2`() {
+        assertThat(HudDisplayUtils.hudWidthDp(2)).isEqualTo(372)
     }
 
     @Test
     fun `hudWidthDp clamps out-of-range indices`() {
-        assertThat(HudDisplayUtils.hudWidthDp(-1)).isEqualTo(420)
-        assertThat(HudDisplayUtils.hudWidthDp(99)).isEqualTo(540)
+        assertThat(HudDisplayUtils.hudWidthDp(-1)).isEqualTo(300)
+        assertThat(HudDisplayUtils.hudWidthDp(99)).isEqualTo(372)
+    }
+
+    // ── formatFrameMs ─────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatFrameMs returns null for null or zero fps`() {
+        assertThat(HudDisplayUtils.formatFrameMs(null)).isNull()
+        assertThat(HudDisplayUtils.formatFrameMs(0)).isNull()
+    }
+
+    @Test
+    fun `formatFrameMs computes one-decimal milliseconds`() {
+        // 60 fps → 16.667 → "16.7 ms"; 144 fps → 6.94 → "6.9 ms".
+        assertThat(HudDisplayUtils.formatFrameMs(60)).isEqualTo("16.7 ms")
+        assertThat(HudDisplayUtils.formatFrameMs(144)).isEqualTo("6.9 ms")
+        assertThat(HudDisplayUtils.formatFrameMs(30)).isEqualTo("33.3 ms")
+    }
+
+    // ── formatRefreshTag ──────────────────────────────────────────────────────
+
+    @Test
+    fun `formatRefreshTag labels the panel refresh rate`() {
+        assertThat(HudDisplayUtils.formatRefreshTag(60)).isEqualTo("REFRESH 60Hz")
+        assertThat(HudDisplayUtils.formatRefreshTag(120)).isEqualTo("REFRESH 120Hz")
+    }
+
+    @Test
+    fun `formatRefreshTag uses honest dash for null`() {
+        assertThat(HudDisplayUtils.formatRefreshTag(null)).isEqualTo("REFRESH —Hz")
     }
 
     // ── hudSizeLabel ──────────────────────────────────────────────────────────
@@ -556,5 +647,91 @@ class HudDisplayUtilsTest {
         // 3_000_000 kHz = 3.0 GHz
         assertThat(HudDisplayUtils.formatDecisionCap(3_000_000)).isEqualTo("3.0G")
         assertThat(HudDisplayUtils.formatDecisionCap(1_690_000)).isEqualTo("1.7G")
+    }
+
+    // ── tempTier (cool → hot thresholds) ──────────────────────────────────────
+
+    @Test
+    fun `tempTier null is NONE`() {
+        assertThat(HudDisplayUtils.tempTier(null)).isEqualTo(HudDisplayUtils.TempTier.NONE)
+    }
+
+    @Test
+    fun `tempTier below 70 is COOL`() {
+        assertThat(HudDisplayUtils.tempTier(0f)).isEqualTo(HudDisplayUtils.TempTier.COOL)
+        assertThat(HudDisplayUtils.tempTier(69.9f)).isEqualTo(HudDisplayUtils.TempTier.COOL)
+    }
+
+    @Test
+    fun `tempTier 70 to under 90 is WARM`() {
+        assertThat(HudDisplayUtils.tempTier(70f)).isEqualTo(HudDisplayUtils.TempTier.WARM)
+        assertThat(HudDisplayUtils.tempTier(89.9f)).isEqualTo(HudDisplayUtils.TempTier.WARM)
+    }
+
+    @Test
+    fun `tempTier 90 and above is HOT`() {
+        assertThat(HudDisplayUtils.tempTier(90f)).isEqualTo(HudDisplayUtils.TempTier.HOT)
+        assertThat(HudDisplayUtils.tempTier(105f)).isEqualTo(HudDisplayUtils.TempTier.HOT)
+    }
+
+    @Test
+    fun `tempTier thresholds match published constants`() {
+        assertThat(HudDisplayUtils.TEMP_WARM_C).isEqualTo(70f)
+        assertThat(HudDisplayUtils.TEMP_HOT_C).isEqualTo(90f)
+    }
+
+    // ── formatTempBare ────────────────────────────────────────────────────────
+
+    @Test
+    fun `formatTempBare drops the unit and rounds`() {
+        assertThat(HudDisplayUtils.formatTempBare(72.4f)).isEqualTo("72°")
+        assertThat(HudDisplayUtils.formatTempBare(null)).isEqualTo("—")
+    }
+
+    // ── formatBatteryPct ──────────────────────────────────────────────────────
+
+    @Test
+    fun `formatBatteryPct formats and clamps, dash for null`() {
+        assertThat(HudDisplayUtils.formatBatteryPct(87)).isEqualTo("87%")
+        assertThat(HudDisplayUtils.formatBatteryPct(null)).isEqualTo("—")
+        assertThat(HudDisplayUtils.formatBatteryPct(150)).isEqualTo("100%")
+        assertThat(HudDisplayUtils.formatBatteryPct(-5)).isEqualTo("0%")
+    }
+
+    // ── isBoosting / formatClockWithBoost ─────────────────────────────────────
+
+    @Test
+    fun `isBoosting false when either arg null`() {
+        assertThat(HudDisplayUtils.isBoosting(null, 2918)).isFalse()
+        assertThat(HudDisplayUtils.isBoosting(3000, null)).isFalse()
+    }
+
+    @Test
+    fun `isBoosting true only when running clearly exceeds cap`() {
+        // 3010 > 2918 + 25 → boosting
+        assertThat(HudDisplayUtils.isBoosting(3010, 2918)).isTrue()
+        // at/under cap (within OPP tolerance) → not boosting
+        assertThat(HudDisplayUtils.isBoosting(2918, 2918)).isFalse()
+        assertThat(HudDisplayUtils.isBoosting(2930, 2918)).isFalse() // within 25 MHz tolerance
+        assertThat(HudDisplayUtils.isBoosting(1800, 2918)).isFalse()
+    }
+
+    @Test
+    fun `formatClockWithBoost appends plus only when boosting`() {
+        assertThat(HudDisplayUtils.formatClockWithBoost(3010, 2918)).isEqualTo("3.01G+")
+        assertThat(HudDisplayUtils.formatClockWithBoost(2918, 2918)).isEqualTo("2.92G")
+        // No cap → just the clock, no plus.
+        assertThat(HudDisplayUtils.formatClockWithBoost(2918, null)).isEqualTo("2.92G")
+        assertThat(HudDisplayUtils.formatClockWithBoost(null, 2918)).isEqualTo("—")
+    }
+
+    // ── isThrottlingNow ───────────────────────────────────────────────────────
+
+    @Test
+    fun `isThrottlingNow false for null or zero, true for positive state`() {
+        assertThat(HudDisplayUtils.isThrottlingNow(null)).isFalse()
+        assertThat(HudDisplayUtils.isThrottlingNow(0)).isFalse()
+        assertThat(HudDisplayUtils.isThrottlingNow(1)).isTrue()
+        assertThat(HudDisplayUtils.isThrottlingNow(4)).isTrue()
     }
 }
