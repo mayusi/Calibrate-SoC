@@ -1,0 +1,73 @@
+name: Downloads badge
+
+# Computes the TRUE app-download total (APK assets only — excludes the
+# .sha256 sidecars that the stock shields.io github/downloads/total badge
+# wrongly counts) and publishes it as an endpoint JSON on the orphan
+# `badges` branch. The README badge reads that endpoint, so it always
+# shows the accurate count and refreshes after every release.
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+  schedule:
+    # Refresh once a day so the count tracks downloads between releases.
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: downloads-badge
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute APK-only download total
+        id: count
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          total=$(gh api --paginate "repos/${{ github.repository }}/releases" \
+            --jq '[.[].assets[] | select(.name | endswith(".apk")) | .download_count] | add // 0')
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+          echo "APK-only downloads: $total"
+
+      - name: Write endpoint JSON to the badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOTAL: ${{ steps.count.outputs.total }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > out/downloads.json <<EOF
+          {
+            "schemaVersion": 1,
+            "label": "downloads",
+            "message": "${TOTAL}",
+            "color": "brightgreen"
+          }
+          EOF
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          tmp=$(mktemp -d)
+          cp out/downloads.json "$tmp/downloads.json"
+
+          git clone --depth 1 --branch badges \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" badges-branch \
+            || { git init badges-branch && (cd badges-branch && git checkout --orphan badges); }
+
+          cp "$tmp/downloads.json" badges-branch/downloads.json
+          cd badges-branch
+          git add downloads.json
+          if git diff --staged --quiet; then
+            echo "No change in download count."
+          else
+            git commit -m "chore: downloads badge → ${TOTAL} APK downloads"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:badges
+          fi

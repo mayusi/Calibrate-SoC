@@ -11,7 +11,7 @@ Real-time SoC monitoring · in-game floating HUD · CPU/GPU benchmark + stabilit
 [![Platform](https://img.shields.io/badge/platform-Android%2010%2B-green.svg?style=flat-square)](#requirements)
 [![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](#contributing)
 [![Release](https://img.shields.io/github/v/release/mayusi/Calibrate-SoC?include_prereleases&style=flat-square)](https://github.com/mayusi/Calibrate-SoC/releases)
-[![Downloads](https://img.shields.io/github/downloads/mayusi/Calibrate-SoC/total?style=flat-square)](https://github.com/mayusi/Calibrate-SoC/releases)
+[![Downloads](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/mayusi/Calibrate-SoC/badges/downloads.json&style=flat-square)](https://github.com/mayusi/Calibrate-SoC/releases)
 [![Last commit](https://img.shields.io/github/last-commit/mayusi/Calibrate-SoC?style=flat-square)](https://github.com/mayusi/Calibrate-SoC/commits/main)
 
 </div>
