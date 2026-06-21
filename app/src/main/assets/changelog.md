@@ -1,6 +1,14 @@
-## [0.1.34-alpha] — 2026-06-18
+## [0.1.35-alpha] — 2026-06-21
 
-A big HUD rework, plus zero-setup fan curves for the Retroid Pocket 6.
+Setup no longer pushes "Force SELinux" — it's now a clearly-warned last resort.
+
+### Changed — setup wizard
+- **"Force SELinux" is no longer a setup step.** Most devices (AYN/Odin via PServer, AYANEO, Retroid) tune perfectly fine without it, so the wizard now runs the unlock script first and never asks you to enable it.
+- **It's only offered as an explicit last resort** — and only on a device that genuinely has no other tuning path. When it does appear, it leads with a clear warning that **SELinux Permissive mode can break emulators and many apps and weakens device security**, and "skip — keep emulators working" is the recommended default.
+- The unlock script and in-app guidance were reworded to match: the script's grants + PServer whitelist work on Enforcing SELinux — no Permissive needed.
+
+### Fixed
+- A weekly insights date calculation could land in the future on Sundays in some locales.
 
 ### Fixed — the floating HUD
 - **The HUD no longer crashes when you show it.** A layout-hosting bug could force-close the app the moment the overlay appeared — fixed.

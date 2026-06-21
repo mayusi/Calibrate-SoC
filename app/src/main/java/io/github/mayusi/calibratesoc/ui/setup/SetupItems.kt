@@ -124,14 +124,16 @@ object BatteryOptSetupItem : SetupItem {
  */
 object ForceSelinuxSetupItem : SetupItem {
     override val id = "force_selinux"
-    override val title = "Permissive SELinux (advanced)"
+    override val title = "Force SELinux — last resort (not recommended)"
     override val rationale =
-        "Optional. Needed only for live in-app tuning (HUD ± buttons + " +
-            "direct sysfs writes). Open your device's settings app and turn " +
-            "\"Force SELinux\" ON — it's available on AYN (Odin/Thor) and " +
-            "Retroid (Pocket 6) handhelds. Some devices ship permissive " +
-            "already. We can't flip it for you — the firmware owns the " +
-            "toggle. Skip it if you only want monitoring + benchmarks."
+        "Last resort only. Puts the device in SELinux Permissive mode, which " +
+            "can BREAK many emulators and apps and weakens security — most " +
+            "users should leave it OFF. It's only ever needed for the " +
+            "chmod-direct write path (HUD ± buttons) on devices that have NO " +
+            "other live-tuning path — PServer (Odin/AYN), the AYANEO/Retroid " +
+            "binders, and root all work WITHOUT it. We can't flip it for you " +
+            "(the firmware owns the toggle). Skip it unless live tuning truly " +
+            "won't work any other way."
     override fun isDone(context: Context): Boolean {
         // We CANNOT reliably read SELinux mode from our app's UID:
         //   - getenforce → "Permission denied" (Odin 3 + Thor)

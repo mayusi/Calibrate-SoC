@@ -65,6 +65,12 @@ class InsightsViewModel @Inject constructor(
         /** Start of the current calendar week (Monday 00:00:00.000 local). */
         fun weekStartMs(): Long {
             val cal = Calendar.getInstance()
+            // Pin the week to start on Monday regardless of the device locale's
+            // first-day-of-week. Without this, on a Sunday-first locale (e.g. en-US)
+            // setting DAY_OF_WEEK=MONDAY while today is Sunday rolls FORWARD to next
+            // Monday — putting the week start in the future. Forcing firstDayOfWeek
+            // makes "this week's Monday" always resolve to the past Monday.
+            cal.firstDayOfWeek = Calendar.MONDAY
             cal.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
             cal.set(Calendar.HOUR_OF_DAY, 0)
             cal.set(Calendar.MINUTE, 0)

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
+import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +22,15 @@ class AdvancedUnlockViewModel @Inject constructor(
 
     private val _grants = MutableStateFlow(script.grantsCurrentlyHeld())
     val grants: StateFlow<AdvancedPermissionsScript.Grants> = _grants.asStateFlow()
+
+    /**
+     * The latest capability snapshot, so the onboarding wizard can decide
+     * whether a no-Permissive live-tuning path (PServer / AYANEO binder /
+     * root) already exists — and therefore whether the Force SELinux
+     * last-resort step should be offered at all. Null until the first
+     * [CapabilityProbe.refresh] lands.
+     */
+    val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
 
     fun deployScript(): AdvancedPermissionsScript.Deployed = script.deploy()
 

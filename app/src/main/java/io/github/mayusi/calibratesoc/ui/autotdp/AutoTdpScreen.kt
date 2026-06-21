@@ -1630,8 +1630,9 @@ private fun UnlockLadderRow(stepNumber: Int, step: UnlockStep) {
             "No root, no reboot — the best default. Bind Shizuku and grant this app permission; " +
                 "AutoTDP then probes whether the kernel allows shell writes on this device."
         UnlockStepKind.UNLOCK_SCRIPT ->
-            "Run it once via your device's \"Run script as Root\" runner. Needs SELinux permissive " +
-                "during the chmod. Resets on reboot — re-run after each boot."
+            "Run it once via your device's \"Run script as Root\" runner. Grants the app's " +
+                "permissions and (on AYN/Odin) whitelists it with PServer — works on Enforcing " +
+                "SELinux, no Permissive needed. Resets on reboot — re-run after each boot."
         UnlockStepKind.ROOT ->
             "Magisk / KernelSU — full, vendor-independent live writes that survive reboot."
     }

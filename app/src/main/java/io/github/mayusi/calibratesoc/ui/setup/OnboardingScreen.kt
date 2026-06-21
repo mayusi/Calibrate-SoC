@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.RemoveCircleOutline
-import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
@@ -73,26 +72,38 @@ import kotlinx.coroutines.delay
 /**
  * First-launch wizard. Walks the user through the three universal
  * permissions (overlay, usage access, battery opt). Advanced unlock
- * (Force SELinux + unlock script) lives in Tune → Advanced unlock and
- * is surfaced as an optional next-step at the end of this wizard.
+ * (the unlock SCRIPT — pm grants + PServer whitelist) lives in
+ * Tune → Advanced unlock and is surfaced as an optional next-step at
+ * the end of this wizard.
  *
  * On applicable devices (AYN/Odin/Retroid/AYANEO — any device with a
  * vendor runner or PServer), the advanced steps are FORCED: the user
  * must either complete them or confirm a full-screen scary warning that
  * the app will be read-only. On non-applicable devices the steps remain
  * optional (they cannot complete them — no vendor runner present).
+ *
+ * IMPORTANT: "Force SELinux" (SELinux Permissive) is NEVER pushed as a
+ * normal step. The unlock SCRIPT runs first; Force SELinux is only ever
+ * offered afterwards, as a clearly-warned LAST RESORT, and ONLY when the
+ * device genuinely has no other live-tuning path (see [ForceSelinuxGate]).
+ * Permissive breaks a lot of emulation and weakens security, so skipping
+ * it is the safe, recommended default.
  */
 /**
  * Terminal state machine that runs AFTER the 3 universal permission
  * steps. The whole flow is optional — every phase has a skip/enter-app
  * escape.
- *   None         → still in the universal steps / all-done decision
- *   Ask          → "do you want advanced unlock?" explainer
- *   SelinuxGuide → Step 1 of 2: turn ON Force SELinux (breadcrumb guide)
- *   ScriptGuide  → Step 2 of 2: generate + run the unlock script
- *   Done         → celebrate; live grants checklist; enter app
+ *   None              → still in the universal steps / all-done decision
+ *   Ask               → "do you want advanced unlock?" explainer
+ *   ScriptGuide       → the MAIN advanced step: generate + run the unlock
+ *                       script (pm grants + PServer whitelist). Works on
+ *                       Enforcing SELinux — no Permissive needed.
+ *   SelinuxLastResort → OPTIONAL tail, only reached when the script ran but
+ *                       NO no-Permissive live path exists. Big warning,
+ *                       easy/recommended skip. Not shown otherwise.
+ *   Done              → celebrate; live grants checklist; enter app
  */
-private enum class AdvPhase { None, Ask, SelinuxGuide, ScriptGuide, Done }
+private enum class AdvPhase { None, Ask, ScriptGuide, SelinuxLastResort, Done }
 
 @Composable
 fun OnboardingScreen(
@@ -110,6 +121,31 @@ fun OnboardingScreen(
     // the advanced flow once the user opts in from the all-done step.
     var advancedPhase by remember { mutableStateOf(AdvPhase.None) }
     val grants by advancedUnlockVm.grants.collectAsState()
+    val capability by advancedUnlockVm.capability.collectAsState()
+
+    // Whether to offer the Force SELinux (SELinux Permissive) LAST-RESORT
+    // step at all. Only when there is genuinely NO no-Permissive live path:
+    // no live chmod-direct sysfs, no AYN/Odin PServer, no AYANEO binder, not
+    // root. On an Odin/AYANEO/RP6 (which tune via PServer/binder) this is
+    // false, so the user NEVER sees a Force SELinux step. Recomputed off the
+    // live grants + capability so it settles the moment the script runs.
+    //
+    // CONSERVATIVE on an unknown capability: until the first probe lands
+    // (capability == null) we DON'T offer it — better to under-offer this
+    // last resort than to push Permissive on a device we haven't confirmed
+    // actually lacks every live path. The wizard refreshes capability on
+    // entering the script step and on resume, so by the time the user reaches
+    // the Done screen the report is settled.
+    val cap = capability
+    val offerForceSelinux = cap != null && ForceSelinuxGate.shouldOfferForceSelinux(
+        ForceSelinuxGate.Signals(
+            sysfsDirectlyWritable = grants.sysfsWritable,
+            pserverSysfsLive = cap.pserverSysfsLive,
+            ayaneoBinderLive = cap.ayaneoBinderLive,
+            isRoot = cap.privilege ==
+                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT,
+        ),
+    )
 
     // Full-screen scary-skip dialog: shown when the user tries to bypass
     // the forced advanced step on an applicable device.
@@ -122,6 +158,10 @@ fun OnboardingScreen(
     // screen.
     var lastActionAtMs by remember { mutableStateOf(0L) }
     var tick by remember { mutableStateOf(0L) }
+    // Warm the capability report once on mount so the Force-SELinux gate has a
+    // settled signal (PServer / AYANEO binder / root) before the user can reach
+    // the advanced Done screen. Without this the gate stays conservative-null.
+    LaunchedEffect(Unit) { advancedUnlockVm.refresh() }
     LaunchedEffect(Unit) {
         while (true) {
             val sinceAction = System.currentTimeMillis() - lastActionAtMs
@@ -137,11 +177,11 @@ fun OnboardingScreen(
         }
     }
 
-    // Re-probe capability whenever we enter SELinux or Script phases so
-    // the isDone() signals are fresh (PServer cache may be stale from
-    // cold start before the user ran anything).
+    // Re-probe capability whenever we enter the Script or last-resort SELinux
+    // phases so the isDone()/live-path signals are fresh (PServer cache may be
+    // stale from cold start before the user ran anything).
     LaunchedEffect(advancedPhase) {
-        if (advancedPhase == AdvPhase.SelinuxGuide || advancedPhase == AdvPhase.ScriptGuide) {
+        if (advancedPhase == AdvPhase.ScriptGuide || advancedPhase == AdvPhase.SelinuxLastResort) {
             advancedUnlockVm.refresh()
         }
     }
@@ -201,17 +241,24 @@ fun OnboardingScreen(
     val scriptUnlocked = grants.dump || grants.writeSecureSettings || grants.sysfsWritable
     LaunchedEffect(advancedPhase, scriptUnlocked) {
         if (advancedPhase == AdvPhase.ScriptGuide && scriptUnlocked) {
-            // Advanced setup completed — clear the skipped flag so gated-feature
-            // re-surface logic knows the user did it properly.
+            // The unlock script ran — pm grants + (on AYN) the PServer whitelist
+            // landed. That's the whole job for PServer/binder/most devices, so
+            // clear the skipped flag and celebrate. We deliberately do NOT route
+            // to the Force SELinux step here: if a no-Permissive live path now
+            // exists ([offerForceSelinux] == false) it's never needed, and even
+            // when it might help it's a last resort the user opts into manually
+            // from the Done screen — never auto-pushed.
             viewModel.setAdvancedSetupSkipped(false)
             advancedPhase = AdvPhase.Done
         }
     }
 
     // ── Scary-skip confirmation dialog ────────────────────────────────────────
-    // Only shown when the user tries to leave a forced advanced step on an
-    // applicable device without completing it. Covers both the SELinux and
-    // Script phases (and the AllDone "Skip" path on applicable devices).
+    // Only shown when the user tries to leave the unlock-SCRIPT advanced step
+    // (or the AllDone "Skip" path) on an applicable device without completing
+    // it. This is about the SCRIPT (which actually unlocks live tuning) — NOT
+    // about Force SELinux. Skipping Force SELinux is friction-free and never
+    // routes here.
     if (showScarySkipDialog) {
         ScarySkipDialog(
             onGoBack = { showScarySkipDialog = false },
@@ -261,31 +308,11 @@ fun OnboardingScreen(
                 AdvPhase.Ask -> AdvancedAskStep(
                     vendorName = vendorName,
                     advancedApplicable = advancedApplicable,
-                    onYes = { advancedPhase = AdvPhase.SelinuxGuide },
+                    // Script-first: opting into advanced unlock goes straight to
+                    // the unlock SCRIPT (pm grants + PServer whitelist). Force
+                    // SELinux is never on the default path.
+                    onYes = { advancedPhase = AdvPhase.ScriptGuide },
                     onNo = requestSkip,
-                )
-                AdvPhase.SelinuxGuide -> AdvancedSelinuxStep(
-                    vendorName = vendorName,
-                    advancedApplicable = advancedApplicable,
-                    selinuxDone = ForceSelinuxSetupItem.isDone(context),
-                    onOpenVendor = {
-                        lastActionAtMs = System.currentTimeMillis()
-                        ForceSelinuxSetupItem.launch(context)
-                    },
-                    onConfirmed = {
-                        ForceSelinuxSetupItem.setManuallyConfirmed(context, true)
-                        advancedPhase = AdvPhase.ScriptGuide
-                    },
-                    onSkip = {
-                        // "Skip this step" on an applicable device → scary dialog.
-                        // On non-applicable: advance freely (can't do it anyway).
-                        if (advancedApplicable) {
-                            showScarySkipDialog = true
-                        } else {
-                            advancedPhase = AdvPhase.ScriptGuide
-                        }
-                    },
-                    onEnterApp = requestSkip,
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
                     vendorName = vendorName,
@@ -297,10 +324,35 @@ fun OnboardingScreen(
                         OdinIntents.openVendorSettings(context)
                     },
                     onShowFile = { path -> OdinIntents.openScriptDirectory(context, path) },
+                    onContinue = { advancedPhase = AdvPhase.Done },
                     onEnterApp = requestSkip,
+                )
+                AdvPhase.SelinuxLastResort -> AdvancedSelinuxLastResortStep(
+                    vendorName = vendorName,
+                    selinuxDone = ForceSelinuxSetupItem.isDone(context),
+                    onOpenVendor = {
+                        lastActionAtMs = System.currentTimeMillis()
+                        ForceSelinuxSetupItem.launch(context)
+                    },
+                    onConfirmed = {
+                        ForceSelinuxSetupItem.setManuallyConfirmed(context, true)
+                        advancedPhase = AdvPhase.Done
+                    },
+                    // Skipping Force SELinux is the SAFE, recommended choice —
+                    // friction-free, NO scary dialog. Just go celebrate what the
+                    // script already unlocked.
+                    onSkip = { advancedPhase = AdvPhase.Done },
                 )
                 AdvPhase.Done -> AdvancedDoneStep(
                     grants = grants,
+                    // Only surface the last-resort Force SELinux opt-in when the
+                    // gate says there's genuinely no other live path. On
+                    // Odin/AYANEO/RP6 this is null → the link never appears.
+                    onTryForceSelinux = if (offerForceSelinux) {
+                        { advancedPhase = AdvPhase.SelinuxLastResort }
+                    } else {
+                        null
+                    },
                     onEnterApp = enterApp,
                 )
                 AdvPhase.None -> Unit
@@ -867,8 +919,9 @@ private fun AdvancedAskStep(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             AdvNoteCard(
-                "The cost: a one-time ~2-minute setup — flip a system toggle in $vendorName and run a " +
-                    "one-time script as root. That's it; it persists afterward.",
+                "The cost: a one-time ~2-minute setup — generate a small script and run it once via " +
+                    "$vendorName's \"Run script as Root\". That's it; the permissions persist afterward. " +
+                    "No system-wide SELinux changes needed.",
             )
             if (advancedApplicable) {
                 Text(
@@ -895,21 +948,23 @@ private fun AdvancedAskStep(
 }
 
 /**
- * Phase 3 — Step 1 of 2: turn ON Force SELinux. The app can't deep-link
- * to the exact toggle, so this is a breadcrumb guide + manual confirm.
+ * OPTIONAL last-resort step — Force SELinux (SELinux Permissive). Only ever
+ * reached when the unlock script has run but the device has NO no-Permissive
+ * live-tuning path (gated by [ForceSelinuxGate]). It is NEVER on the default
+ * flow.
  *
- * On applicable devices the "Skip this" button is REMOVED — trying to
- * skip goes through [onSkip] which the parent maps to ScarySkipDialog.
+ * The headline is a PROMINENT WARNING: Permissive can break emulators and many
+ * apps and weakens device security. Skipping is the SAFE, recommended default
+ * and is friction-free (no scary dialog) — the "Skip" button is the primary,
+ * highlighted action; enabling it is the secondary, de-emphasised one.
  */
 @Composable
-private fun AdvancedSelinuxStep(
+private fun AdvancedSelinuxLastResortStep(
     vendorName: String,
-    advancedApplicable: Boolean,
     selinuxDone: Boolean,
     onOpenVendor: () -> Unit,
     onConfirmed: () -> Unit,
     onSkip: () -> Unit,
-    onEnterApp: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -919,7 +974,45 @@ private fun AdvancedSelinuxStep(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            AdvCardHeader(Icons.Outlined.Security, "Turn on Force SELinux", "Step 1 of 2")
+            AdvCardHeader(
+                Icons.Outlined.Warning,
+                "Force SELinux — last resort",
+                "Advanced · not recommended for most users",
+            )
+
+            // PROMINENT warning headline — emulation breakage + security.
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "This puts your device in SELinux Permissive mode.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        Text(
+                            "Permissive can BREAK many emulators and apps — the main reason these " +
+                                "handhelds exist — and it weakens your device's security. Most people " +
+                                "should NOT enable it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+            }
 
             if (selinuxDone) {
                 Row(
@@ -937,7 +1030,7 @@ private fun AdvancedSelinuxStep(
                         modifier = Modifier.size(18.dp),
                     )
                     Text(
-                        "Already unlocked",
+                        "Already permissive",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -945,46 +1038,57 @@ private fun AdvancedSelinuxStep(
                 }
             }
 
+            Text(
+                "We only show this because your device has no other way to do live in-app clock " +
+                    "tuning — no vendor service (PServer / AYANEO), no root, and the kernel keeps the " +
+                    "sysfs nodes read-only. Force SELinux is the ONLY remaining path for the HUD ± " +
+                    "buttons here, and it only matters for that. Monitoring, the HUD overlay, FPS, and " +
+                    "benchmarks already work without it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            // Skip is the PRIMARY, recommended action — friction-free, no dialog.
+            Button(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
+                Text("Skip — keep emulators working (recommended)")
+            }
+
+            // Enabling it is the secondary, de-emphasised path for users who
+            // understand the trade-off and accept it.
+            Text(
+                "Still want to try it? (only if you understand the risk)",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 NumberedStep(1, "Tap \"Open $vendorName\" below — it opens the settings app.")
                 NumberedStep(2, "Scroll to find Force SELinux (it may be under a 'Developer', 'Advanced', or 'System' section depending on your device).")
-                NumberedStep(3, "Toggle Force SELinux → ON.")
+                NumberedStep(3, "Toggle Force SELinux → ON, then re-run the unlock script so the chmods can stick.")
                 NumberedStep(4, "Press back / recent-apps to return to Calibrate SoC.")
             }
-
-            AdvNoteCard(
-                "This lets the unlock script's permission changes actually stick. Without it, the script " +
-                    "runs but the live-tuning chmods are blocked.",
-            )
-
-            Button(onClick = onOpenVendor, modifier = Modifier.fillMaxWidth()) { Text("Open $vendorName") }
-            OutlinedButton(onClick = onConfirmed, modifier = Modifier.fillMaxWidth()) {
-                Text(if (selinuxDone) "Continue" else "I turned it ON — continue")
+            OutlinedButton(onClick = onOpenVendor, modifier = Modifier.fillMaxWidth()) {
+                Text("Open $vendorName (advanced)")
             }
-            // On applicable devices: no silent "I'll do it later" — show the
-            // scary dialog instead so the user understands the consequence.
-            // On non-applicable: keep both escape buttons (they can't do this anyway).
-            if (advancedApplicable) {
-                TextButton(
-                    onClick = onSkip, // → ScarySkipDialog on applicable devices
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    ),
-                ) { Text("Skip (read-only mode)") }
-            } else {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onSkip, modifier = Modifier.weight(1f)) { Text("Skip this — I'll do it later") }
-                    TextButton(onClick = onEnterApp, modifier = Modifier.weight(1f)) { Text("Enter app") }
-                }
+            OutlinedButton(
+                onClick = onConfirmed,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) {
+                Text(if (selinuxDone) "Continue" else "I enabled it anyway — continue")
             }
         }
     }
 }
 
 /**
- * Phase 4 — Step 2 of 2: generate + run the unlock script, with live
- * grant detection.
+ * The MAIN advanced step — generate + run the unlock script, with live
+ * grant detection. This is the part that actually unlocks live tuning on
+ * PServer/binder/most devices (pm grants + PServer whitelist) and works on
+ * Enforcing SELinux — no Permissive needed. Force SELinux is NOT part of
+ * this step.
  *
  * Auto-deploys the script on entry (so the user doesn't have to tap
  * "Generate" manually — the file is ready the moment they see this screen).
@@ -998,6 +1102,7 @@ private fun AdvancedScriptStep(
     onGenerate: () -> AdvancedPermissionsScript.Deployed,
     onOpenVendor: () -> Unit,
     onShowFile: (String) -> Unit,
+    onContinue: () -> Unit,
     onEnterApp: () -> Unit,
 ) {
     var deployed by remember { mutableStateOf<AdvancedPermissionsScript.Deployed?>(null) }
@@ -1019,7 +1124,7 @@ private fun AdvancedScriptStep(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            AdvCardHeader(Icons.Outlined.Terminal, "Run the unlock script", "Step 2 of 2")
+            AdvCardHeader(Icons.Outlined.Terminal, "Run the unlock script", "One-time, no Permissive needed")
 
             Button(
                 onClick = { deployed = runCatching { onGenerate() }.getOrNull() },
@@ -1083,6 +1188,14 @@ private fun AdvancedScriptStep(
                 enabled = generated,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Show me the script file") }
+            // Manual forward path to the Done screen for when live grants
+            // didn't auto-detect (some firmwares delay the pm-grant probe).
+            // The live-success effect normally advances automatically; this
+            // is the always-available "I ran it — continue" escape.
+            OutlinedButton(
+                onClick = onContinue,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("I ran the script — continue") }
             // On applicable devices this routes through ScarySkipDialog;
             // on non-applicable it directly enters the app.
             TextButton(
@@ -1096,10 +1209,18 @@ private fun AdvancedScriptStep(
     }
 }
 
-/** Phase 5 — celebrate. Honest if only some grants landed. */
+/**
+ * Phase 5 — celebrate. Honest if only some grants landed.
+ *
+ * [onTryForceSelinux] is non-null ONLY when [ForceSelinuxGate] decided this
+ * device has no no-Permissive live path — i.e. the genuine last-resort case.
+ * When non-null we show a small, de-emphasised, clearly-warned link to the
+ * Force SELinux step. On Odin/AYANEO/RP6 it's null and the link never appears.
+ */
 @Composable
 private fun AdvancedDoneStep(
     grants: AdvancedPermissionsScript.Grants,
+    onTryForceSelinux: (() -> Unit)?,
     onEnterApp: () -> Unit,
 ) {
     Card(
@@ -1152,6 +1273,23 @@ private fun AdvancedDoneStep(
                 )
             }
             Button(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) { Text("Enter app") }
+
+            // Last-resort opt-in, only when the gate decided no other live path
+            // exists. Deliberately small + de-emphasised + honest about the cost
+            // so it never reads as a recommended next step.
+            if (onTryForceSelinux != null) {
+                Text(
+                    "Still no live ± clock control? There's one last-resort option — Force SELinux " +
+                        "(Permissive). It can break emulators and weakens security, so most people " +
+                        "should leave it off.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = onTryForceSelinux,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Advanced: last-resort options") }
+            }
         }
     }
 }

@@ -848,9 +848,12 @@ class AutoTdpViewModel @Inject constructor(
          *                 where the node-probe then confirms writes, AutoTDP is
          *                 already live and this whole ladder is hidden.)
          *   2. UNLOCK_SCRIPT — Run the unlock script once via the device's root-script
-         *                 runner [needs SELinux-permissive-during-chmod]. Available
-         *                 wherever a vendor settings "Run script as Root" path exists;
-         *                 the AYN PServer whitelist is the strongest form of this.
+         *                 runner. Grants the app's perms + (on AYN/Odin) the PServer
+         *                 whitelist — works on Enforcing SELinux, NO Permissive needed.
+         *                 Available wherever a vendor settings "Run script as Root" path
+         *                 exists; the AYN PServer whitelist is the strongest form of this.
+         *                 (Force SELinux / Permissive is NOT part of this rung — it's a
+         *                 separate last resort that can break emulators, never pushed here.)
          *   3. ROOT     — Enable root mode (Magisk/KernelSU) [full, vendor-independent].
          *                 Marked AVAILABLE when root is present but not opted-in.
          *
