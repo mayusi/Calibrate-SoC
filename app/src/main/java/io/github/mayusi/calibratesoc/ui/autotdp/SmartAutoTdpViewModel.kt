@@ -6,6 +6,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
+import io.github.mayusi.calibratesoc.data.autotdp.GoalParams
+import io.github.mayusi.calibratesoc.data.autotdp.GoalParamsPrefs
 import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
 import io.github.mayusi.calibratesoc.data.autotdp.WorkloadContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -41,6 +44,7 @@ import javax.inject.Inject
 @HiltViewModel
 class SmartAutoTdpViewModel @Inject constructor(
     private val controller: AutoTdpController,
+    private val goalParamsPrefs: GoalParamsPrefs,
 ) : ViewModel() {
 
     // ── Selected goal (user intent, persists across stop/start) ──────────────
@@ -76,7 +80,56 @@ class SmartAutoTdpViewModel @Inject constructor(
         .map { it.status == AutoTdpStatus.RUNNING }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    // ── GoalParams slider StateFlows (backed by DataStore prefs) ─────────────
+
+    /** The user's TARGET_FPS_FLOOR setpoint (snapped to GoalParams.FPS_FLOOR_STEPS). */
+    val fpsFloor: StateFlow<Int> = goalParamsPrefs.fpsFloor
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GoalParams.DEFAULT_FPS_FLOOR)
+
+    /** The user's TARGET_TEMP_CEILING setpoint (°C, 70..95). */
+    val tempCeilingC: StateFlow<Int> = goalParamsPrefs.tempCeilingC
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GoalParams.DEFAULT_TEMP_CEILING_C)
+
+    /** The user's TARGET_RUNTIME setpoint (hours, 1..6). */
+    val targetRuntimeHours: StateFlow<Float> = goalParamsPrefs.targetRuntimeHours
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GoalParams.DEFAULT_RUNTIME_HOURS)
+
+    // ── Run-state passthrough: new UNIT 4 honesty fields ─────────────────────
+
+    /**
+     * True when the TARGET_FPS_FLOOR mode is active but the engine cannot read a
+     * real frame-rate source and has fallen back to Balanced. Shown as an amber
+     * degrade banner in [GoalPickerPanel].
+     */
+    val fpsFloorDegraded: StateFlow<Boolean> = controller.state
+        .map { it.fpsFloorDegraded }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * A modelled runtime projection line from the engine (e.g. "Projected: 3h 10m
+     * (estimated)"), or null when the engine has no estimate yet. Shown under the
+     * TARGET_RUNTIME slider.
+     */
+    val runtimeProjectionNote: StateFlow<String?> = controller.state
+        .map { it.runtimeProjectionNote }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     // ── Actions ───────────────────────────────────────────────────────────────
+
+    /** Persist a new TARGET_FPS_FLOOR setpoint. */
+    fun setFpsFloor(fps: Int) {
+        viewModelScope.launch { goalParamsPrefs.setFpsFloor(fps) }
+    }
+
+    /** Persist a new TARGET_TEMP_CEILING setpoint (°C). */
+    fun setTempCeilingC(tempC: Int) {
+        viewModelScope.launch { goalParamsPrefs.setTempCeilingC(tempC) }
+    }
+
+    /** Persist a new TARGET_RUNTIME setpoint (hours). */
+    fun setTargetRuntimeHours(hours: Float) {
+        viewModelScope.launch { goalParamsPrefs.setTargetRuntimeHours(hours) }
+    }
 
     /** Update the selected goal (does not start/stop the daemon). */
     fun selectGoal(goal: GoalProfile) {

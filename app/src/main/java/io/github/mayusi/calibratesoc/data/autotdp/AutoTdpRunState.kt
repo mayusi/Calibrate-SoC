@@ -83,6 +83,19 @@ data class AutoTdpRunState(
      * honest: it is a classification (belief), never a measured quantity.
      */
     val detectedContext: WorkloadContext? = null,
+    /**
+     * UNIT 4 — true when TARGET_FPS_FLOOR is the picked goal but no REAL frame-rate
+     * source is available, so the daemon degraded to BALANCED_SMART. The UI shows a
+     * banner explaining the degrade. Honesty flag; false otherwise.
+     */
+    val fpsFloorDegraded: Boolean = false,
+    /**
+     * UNIT 4 — for TARGET_RUNTIME, the MODELLED live projection line for the HUD/picker,
+     * e.g. "Projected: 3h 10m (modelled, estimated)". Null when the daemon is not running
+     * TARGET_RUNTIME or no projection could be modelled. This is a MODEL output, always
+     * labelled as such — never a guarantee.
+     */
+    val runtimeProjectionNote: String? = null,
 )
 
 /** Lifecycle states for the AutoTDP daemon. */

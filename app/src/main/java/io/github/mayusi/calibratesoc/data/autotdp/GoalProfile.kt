@@ -64,6 +64,23 @@ enum class GoalProfile(
      * it parks. This is the single switch that keeps ACT-2 honest.
      */
     val usesUclampNotPark: Boolean,
+    /**
+     * UNIT 4 (RICHER GOAL MODES) — per-mode OBJECTIVE-SETPOINT metadata. These three
+     * fields are null for the original six modes (→ ZERO behaviour change: the engine
+     * and classifier never read them for those goals), and carry the DEFAULT setpoint
+     * for the three new objective modes. They are informational defaults only — the
+     * LIVE per-user value comes from [GoalParams] (DataStore sliders), threaded into the
+     * service's OUTER-SETPOINT clamp, NEVER mutated onto the enum (the enum stays pure
+     * and serializable). The band/lever/soft-temp values above ARE the control engine
+     * each objective mode rides; these fields just name the user-facing target.
+     *
+     *  - [defaultFpsFloor]        TARGET_FPS_FLOOR's default minimum FPS (the "hold ≥ N").
+     *  - [defaultTempCeilingC]    TARGET_TEMP_CEILING's default die-temp ceiling (°C).
+     *  - [defaultTargetRuntimeHours] TARGET_RUNTIME's default "make it last H hours".
+     */
+    val defaultFpsFloor: Int? = null,
+    val defaultTempCeilingC: Int? = null,
+    val defaultTargetRuntimeHours: Float? = null,
 ) {
     /**
      * Never bottleneck the game; only back off to dodge the kill. SMOOTHNESS-first:
@@ -148,6 +165,89 @@ enum class GoalProfile(
         tightenLeverOrder = listOf(Lever.CAP, Lever.MIN_FREQ_FLOOR, Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.PARK),
         usesUclampNotPark = false,
     ),
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  UNIT 4 — RICHER OBJECTIVE GOAL MODES (setpoint generators)
+    // ════════════════════════════════════════════════════════════════════════════
+    // Each of the three modes below is a CONCRETE goal the band controller runs
+    // DIRECTLY — its band/bias/soft-temp/lever-orders are REUSED from an existing
+    // curated mode (those numbers are LAW; we do not invent new band values). The
+    // mode's user-facing OBJECTIVE (temp ceiling / fps floor / runtime hours) is a
+    // setpoint applied by the service's OUTER clamp ON TOP of this band controller —
+    // it can only TIGHTEN the cap (strictly safer), never loosen past safety. The
+    // 40% hard floor, the thermal kill, and revert all run underneath, unchanged.
+
+    /**
+     * UNIT 4 — TARGET_TEMP_CEILING: hold the die at/below a user temperature ceiling.
+     *
+     * Control engine = COOL_QUIET (aggressive thermal pre-empt): identical band
+     * (48–70), bias (PREEMPT), soft die-temp (80), and lever orders. The user's
+     * ceiling slider (70–95 °C, default 80) is enforced as an OUTER cap-ceiling guard
+     * in the service: as the smoothed die approaches the ceiling the cap-ceiling
+     * tightens (leaning on the committed fast-tighten urgency too), and relaxes when
+     * the die is comfortably below — never above what is safe. The inner COOL_QUIET
+     * pre-empt is the safety floor; the outer guard makes the arbitrary ceiling real.
+     */
+    TARGET_TEMP_CEILING(
+        gpuBandLowPct = 48,
+        gpuBandHighPct = 70,
+        softDieTempC = 80,
+        bias = Bias.PREEMPT,
+        hasHardPowerCeiling = false,
+        loosenLeverOrder = listOf(Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.CAP, Lever.MIN_FREQ_FLOOR, Lever.UNPARK),
+        tightenLeverOrder = listOf(Lever.CAP, Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.MIN_FREQ_FLOOR, Lever.PARK),
+        usesUclampNotPark = false,
+        defaultTempCeilingC = 80,
+    ),
+
+    /**
+     * UNIT 4 — TARGET_FPS_FLOOR: the lowest power that still holds ≥ N FPS.
+     *
+     * Control engine = BATTERY_SAVER's aggressive tighten band (35–60, TIGHTEN bias,
+     * its lever orders) — but WITHOUT the hard watts ceiling (hasHardPowerCeiling =
+     * false: this mode walks the cap down by FPS feedback, not a power budget). The
+     * fps-floor BLOCK is an OUTER anti-tighten guard in the service: when the frame
+     * source is REAL (isRealFps) and realFps < N, it prevents any further tighten
+     * (holds the cap at the last value) — the controller walks down until FPS just
+     * touches the floor, then holds the knee. When NO real FPS source is available the
+     * goal-resolution region DEGRADES this to BALANCED_SMART and the UI shows a banner
+     * (honesty: never claim an FPS guarantee the device can't measure). User slider:
+     * 30/40/45/60/90, default 60.
+     */
+    TARGET_FPS_FLOOR(
+        gpuBandLowPct = 35,
+        gpuBandHighPct = 60,
+        softDieTempC = 85,
+        bias = Bias.TIGHTEN,
+        hasHardPowerCeiling = false,
+        loosenLeverOrder = listOf(Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.CAP, Lever.MIN_FREQ_FLOOR, Lever.UNPARK),
+        tightenLeverOrder = listOf(Lever.CAP, Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.PARK, Lever.MIN_FREQ_FLOOR),
+        usesUclampNotPark = false,
+        defaultFpsFloor = 60,
+    ),
+
+    /**
+     * UNIT 4 — TARGET_RUNTIME: make the battery last H hours.
+     *
+     * Control engine = BATTERY_SAVER's aggressive tighten band (35–60, TIGHTEN) without
+     * the watts ceiling. The OUTER 60-second [RuntimeBudgetController] loop computes
+     * budgetW = remainingWh / H, picks the largest OPP whose PowerModel-modelled draw ≤
+     * budgetW, and sets that as a HARD CAP CEILING: the band controller may tighten
+     * BELOW it but never loosen ABOVE it. Recomputed every 60 s as the battery drains.
+     * The projection is MODELLED (PowerModel MEASURED/ESTIMATED honesty) and labelled —
+     * never a guarantee. User slider: 1–6 h, default 3.
+     */
+    TARGET_RUNTIME(
+        gpuBandLowPct = 35,
+        gpuBandHighPct = 60,
+        softDieTempC = 85,
+        bias = Bias.TIGHTEN,
+        hasHardPowerCeiling = false,
+        loosenLeverOrder = listOf(Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.CAP, Lever.MIN_FREQ_FLOOR, Lever.UNPARK),
+        tightenLeverOrder = listOf(Lever.CAP, Lever.GPU_DEVFREQ, Lever.GPU_FLOOR, Lever.PARK, Lever.MIN_FREQ_FLOOR),
+        usesUclampNotPark = false,
+        defaultTargetRuntimeHours = 3f,
+    ),
     ;
 
     /** Band width in points. Asserted ≥ 22 for every concrete goal in tests. */
@@ -171,9 +271,11 @@ enum class GoalProfile(
     fun fanModeFor(dieTempC: Int?): Int? {
         if (dieTempC == null) return null
         return when (this) {
-            COOL_QUIET -> if (dieTempC >= softDieTempC - 5) FanPresets.SMART else FanPresets.QUIET
+            COOL_QUIET, TARGET_TEMP_CEILING -> if (dieTempC >= softDieTempC - 5) FanPresets.SMART else FanPresets.QUIET
             MAX_FPS -> if (dieTempC >= softDieTempC - 8) FanPresets.SPORT else FanPresets.SMART
-            BALANCED_SMART, BATTERY_SAVER, AUTO -> null
+            // The objective FPS-floor / runtime modes manage heat through clocks, not
+            // fan noise (like BALANCED/BATTERY/AUTO) — leave the fan at the vendor default.
+            BALANCED_SMART, BATTERY_SAVER, AUTO, TARGET_FPS_FLOOR, TARGET_RUNTIME -> null
         }
     }
 

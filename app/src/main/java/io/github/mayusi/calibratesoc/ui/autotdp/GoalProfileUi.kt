@@ -27,6 +27,10 @@ object GoalProfileUi {
         GoalProfile.MAX_FPS -> "Max FPS"
         GoalProfile.COOL_QUIET -> "Cool & quiet"
         GoalProfile.BATTERY_SAVER -> "Battery saver"
+        // UNIT 4 — objective goal modes.
+        GoalProfile.TARGET_TEMP_CEILING -> "Temp ceiling"
+        GoalProfile.TARGET_FPS_FLOOR -> "FPS floor"
+        GoalProfile.TARGET_RUNTIME -> "Battery runtime"
     }
 
     /**
@@ -44,6 +48,13 @@ object GoalProfileUi {
             "Lowest temps and fan noise; accepts some FPS reduction."
         GoalProfile.BATTERY_SAVER ->
             "Maximum battery life while staying responsive; applies a hard power ceiling."
+        // UNIT 4 — objective goal modes (honest about what the target controls).
+        GoalProfile.TARGET_TEMP_CEILING ->
+            "Holds the chip at or below a temperature you set; clocks back when it nears the ceiling."
+        GoalProfile.TARGET_FPS_FLOOR ->
+            "Lowest power that still holds your minimum FPS — needs a real frame-rate source."
+        GoalProfile.TARGET_RUNTIME ->
+            "Stretches the battery toward a runtime you set; projection is modelled, not guaranteed."
     }
 
     /**
@@ -87,5 +98,9 @@ object GoalProfileUi {
         GoalProfile.MAX_FPS -> "MAX"
         GoalProfile.COOL_QUIET -> "COOL"
         GoalProfile.BATTERY_SAVER -> "BATT"
+        // UNIT 4 — objective goal modes (distinct, ≤12 chars, ASCII).
+        GoalProfile.TARGET_TEMP_CEILING -> "TEMP"
+        GoalProfile.TARGET_FPS_FLOOR -> "FPS"
+        GoalProfile.TARGET_RUNTIME -> "RUNTIME"
     }
 }

@@ -29,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -102,8 +103,66 @@ class AutoTdpService : Service() {
      */
     @Inject lateinit var learnedGameModel: LearnedGameModel
 
+    /**
+     * UNIT 4 (RICHER GOAL MODES): the persisted objective setpoints (fps floor / temp
+     * ceiling / runtime hours). Snapshotted ONCE at session start into [sessionGoalParams]
+     * so the tick loop reads a stable value object with no per-tick DataStore I/O.
+     */
+    @Inject lateinit var goalParamsPrefs: GoalParamsPrefs
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
+
+    /**
+     * UNIT 4: the 60-second TARGET_RUNTIME outer-budget loop job. Separate from [loopJob]
+     * (the 1 Hz tick loop) — it recomputes the runtime cap-ceiling every minute as the
+     * battery drains. Cancelled alongside [loopJob] on every stop path.
+     */
+    private var runtimeBudgetJob: Job? = null
+
+    /**
+     * UNIT 4: the objective setpoints captured at session start (sanitized). Defaults to
+     * [GoalParams.DEFAULT] so a session that never read prefs still has safe values.
+     */
+    @Volatile private var sessionGoalParams: GoalParams = GoalParams.DEFAULT
+
+    /**
+     * UNIT 4: the live TARGET_RUNTIME cap CEILING (kHz), recomputed by [runtimeBudgetJob]
+     * every 60 s. Null = no runtime ceiling in force (fails OPEN to the band controller,
+     * which is itself always safe). The per-tick loop reads this and clamps the band
+     * controller's cap so it never loosens ABOVE the ceiling. @Volatile: written by the
+     * outer loop, read by the tick loop.
+     */
+    @Volatile private var runtimeCapCeilingKhz: Int? = null
+
+    /**
+     * UNIT 4: the modelled TARGET_RUNTIME projection note (honesty-labelled) for the HUD.
+     * Written by [runtimeBudgetJob]; surfaced to the run state by the tick loop.
+     */
+    @Volatile private var runtimeProjectionNote: String? = null
+
+    /**
+     * UNIT 4: the live TARGET_TEMP_CEILING cap CEILING (kHz), walked by the per-tick outer
+     * guard as the smoothed die approaches/leaves the user ceiling. @Volatile mirrors the
+     * runtime ceiling; null = no temp ceiling in force yet.
+     */
+    @Volatile private var tempCapCeilingKhz: Int? = null
+
+    /**
+     * UNIT 4: the most recent battery voltage (µV) + draw (mW) folded from the tick loop,
+     * read by the 60s runtime-budget loop (which runs off the tick thread). Null until the
+     * first sample carries them. Kept separate from the kill-path % read.
+     */
+    @Volatile private var lastBatteryVoltageUv: Long? = null
+    @Volatile private var lastBatteryDrawMilliW: Long? = null
+
+    /**
+     * UNIT 4: an isolated cap → measured-draw (mW) collector for the runtime PowerModel
+     * fit. Owned entirely by this service (NOT Unit 1's [SessionStatsAccumulator]); the
+     * tick loop records (appliedCap, drawMw) at steady state and the 60s loop fits it.
+     * A simple synchronized map (cross-thread). Latest draw per distinct cap wins.
+     */
+    private val capDrawSamples = java.util.Collections.synchronizedMap(LinkedHashMap<Int, Long>())
 
     /**
      * UNIT 1: the foreground game package resolved at session start (best-effort via
@@ -211,6 +270,10 @@ class AutoTdpService : Service() {
         }
         loopJob?.cancel()
         loopJob = null
+        // UNIT 4: cancel the runtime-budget outer loop too (serviceScope.cancel below also
+        // tears it down, but null it explicitly so a restart never sees a stale job).
+        runtimeBudgetJob?.cancel()
+        runtimeBudgetJob = null
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -449,6 +512,28 @@ class AutoTdpService : Service() {
                 "onset=${learnedSeed.throttleOnsetSec}s (${learnedSeed.sessionCount} sessions)")
         }
 
+        // ── UNIT 4 (RICHER GOAL MODES): snapshot the objective setpoints ONCE ──────
+        // Read the persisted sliders into a stable value object so the tick loop never
+        // touches DataStore. Best-effort: a read failure falls back to GoalParams.DEFAULT
+        // (safe values), never blocks the daemon. Reset the outer-ceiling state per session.
+        sessionGoalParams = runCatching {
+            goalParamsPrefs.params.first()
+        }.getOrNull()?.sanitized() ?: GoalParams.DEFAULT
+        runtimeCapCeilingKhz = null
+        tempCapCeilingKhz = null
+        runtimeProjectionNote = null
+        lastBatteryVoltageUv = null
+        lastBatteryDrawMilliW = null
+        capDrawSamples.clear()
+
+        // ── UNIT 4: start the TARGET_RUNTIME 60s outer-budget loop (only for that goal) ──
+        // It recomputes the runtime cap-ceiling every minute from remaining Wh + the
+        // PowerModel, and the per-tick loop clamps the band controller's cap to it (never
+        // loosen above). For every other goal this job is never started → zero overhead.
+        if (config.goal == GoalProfile.TARGET_RUNTIME) {
+            startRuntimeBudgetLoop(caps)
+        }
+
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
@@ -534,6 +619,11 @@ class AutoTdpService : Service() {
                 // 0.85 x the learned onset. Both inert when seed == null (cold start).
                 val sessionElapsedSec =
                     ((sample.timestampMs - sessionStartEpochMs) / 1000L).toInt().coerceAtLeast(0)
+                // UNIT 4: read battery level + charging for the charge-aware AUTO gate.
+                // Cheap BatteryManager reads (already used for the battery kill). Null when
+                // unreadable → AUTO falls through to the classifier path (no new guess).
+                val batteryPct = readBatteryPct()
+                val charging = batteryManager?.isCharging
                 val decision = AutoTdpEngine.decide(
                     window = window.toList(),
                     config = config,
@@ -543,6 +633,10 @@ class AutoTdpService : Service() {
                     goalOverride = config.goal,
                     seed = learnedSeed,
                     sessionElapsedSec = sessionElapsedSec,
+                    // UNIT 4: objective setpoints + charge-aware AUTO inputs.
+                    goalParams = sessionGoalParams,
+                    batteryPct = batteryPct,
+                    charging = charging,
                 )
                 // PERSIST: carry the engine's threaded state into the NEXT tick. This
                 // single reassignment is what keeps EWMA smoothing, the cross-actuator
@@ -562,7 +656,17 @@ class AutoTdpService : Service() {
                 // run the engine (so the HUD shows what it WOULD do) but apply nothing.
                 val inBaselineGrace =
                     (System.currentTimeMillis() - sessionStartEpochMs) < BASELINE_GRACE_MS
-                val effectiveTarget = if (inBaselineGrace) currentState else decision.target
+
+                // ── UNIT 4: OUTER-SETPOINT CLAMP (objective goal modes) ─────────────
+                // The committed band controller already chose decision.target (with its
+                // 40% floor, thermal pre-empt, cool-downs). The three objective modes ride
+                // ON TOP as a cap CEILING / anti-tighten: each can only ever TIGHTEN the
+                // cap (strictly safer); none can raise the cap above what the band
+                // controller chose, push below the 40% floor (CapFloor-snapped), or bypass
+                // the kill/revert. Applied only on the matching goal; a no-op otherwise.
+                val clampedTarget =
+                    applyOuterSetpoint(decision, currentState, caps, sample)
+                val effectiveTarget = if (inBaselineGrace) currentState else clampedTarget
 
                 // ── Apply delta ────────────────────────────────────────────────
                 // BUG E FIX (honest Applied): track at the tick level whether all ops
@@ -674,6 +778,22 @@ class AutoTdpService : Service() {
                     realFpsX10 = sample.realFpsX10.takeIf { sample.isRealFps },
                 )
 
+                // ── UNIT 4: fold battery + cap→draw for the runtime-budget loop ─────
+                // Cheap scalar writes: the 60s outer loop reads these off the tick thread.
+                // We record the (applied cap, measured draw) pair only OUTSIDE baseline
+                // grace (so warm-up STOCK draw never poisons the model) and only when both
+                // the cap and a real draw are known — keeps the PowerModel fit honest.
+                sample.batteryVoltageUv?.let { lastBatteryVoltageUv = it }
+                val drawMw = sample.batteryDrawMilliW
+                if (drawMw != null && drawMw > 0L) {
+                    lastBatteryDrawMilliW = drawMw
+                    if (!inBaselineGrace) {
+                        val cap = currentState.bigClusterCapKhz
+                            ?: caps.bigClusterOppStepsKhz.lastOrNull() // null cap = stock = top OPP
+                        if (cap != null) capDrawSamples[cap] = drawMw
+                    }
+                }
+
                 // ── Proof-of-effect wiring ─────────────────────────────────────
                 // HEARTBEAT: record wall-clock of this applied tick.
                 val nowMs = System.currentTimeMillis()
@@ -748,6 +868,10 @@ class AutoTdpService : Service() {
                         decisions = decisions.toList(),
                         activeGoal = activeGoal,
                         detectedContext = detectedContext,
+                        // UNIT 4: honesty surface for the objective goal modes.
+                        fpsFloorDegraded = decision.fpsFloorDegraded,
+                        runtimeProjectionNote =
+                            if (config.goal == GoalProfile.TARGET_RUNTIME) runtimeProjectionNote else null,
                     )
                 )
                 updateNotification(status = "Running", detail = displayReason)
@@ -910,6 +1034,9 @@ class AutoTdpService : Service() {
             // and stop the service.
             loopJob?.cancel()
             loopJob = null
+            // UNIT 4: stop the TARGET_RUNTIME 60s outer-budget loop too (no-op if absent).
+            runtimeBudgetJob?.cancel()
+            runtimeBudgetJob = null
             stopSelf()
         }
     }
@@ -929,6 +1056,146 @@ class AutoTdpService : Service() {
         return if (pct in 1 until BATTERY_KILL_PCT) {
             "Battery kill: $pct% < $BATTERY_KILL_PCT%"
         } else null
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  UNIT 4 — OBJECTIVE-MODE OUTER SETPOINTS (cap-ceiling / fps-floor / runtime)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /** Battery level (%), or null when unreadable. Feeds the charge-aware AUTO gate. */
+    private fun readBatteryPct(): Int? =
+        batteryManager?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            ?.takeIf { it in 0..100 }
+
+    /**
+     * UNIT 4: apply the active objective mode's OUTER SETPOINT to the band controller's
+     * chosen [TdpDecision.target], producing the cap the daemon actually writes this tick.
+     *
+     * Each mode keys off [TdpDecision.resolvedGoal] (so AUTO that resolved to an objective
+     * mode is handled too) and acts ONLY on the big-cluster cap. Every path can only ever
+     * TIGHTEN the cap (lower it toward a ceiling, or hold it at the FPS knee) — strictly
+     * safer. The band controller's 40% floor, thermal pre-empt, cool-downs and the thermal
+     * kill all already ran inside decide(); this never raises a cap above the band
+     * controller's choice and never pushes below the 40% floor ([RuntimeBudgetController]
+     * snaps every ceiling through [CapFloor]).
+     *
+     *  - TARGET_RUNTIME       → clamp cap ≤ [runtimeCapCeilingKhz] (60s outer loop).
+     *  - TARGET_TEMP_CEILING  → walk [tempCapCeilingKhz] vs the user ceiling, clamp to it.
+     *  - TARGET_FPS_FLOOR     → when real FPS < floor, block the tighten (hold the knee).
+     *  - anything else        → the band controller's target unchanged.
+     */
+    private fun applyOuterSetpoint(
+        decision: TdpDecision,
+        currentState: TdpState,
+        caps: TdpCaps,
+        sample: Telemetry,
+    ): TdpState {
+        val steps = caps.bigClusterOppStepsKhz
+        val proposedCap = decision.target.bigClusterCapKhz
+        val clampedCap: Int? = when (decision.resolvedGoal) {
+            GoalProfile.TARGET_RUNTIME ->
+                RuntimeBudgetController.clampCapToCeiling(proposedCap, runtimeCapCeilingKhz, steps)
+
+            GoalProfile.TARGET_TEMP_CEILING -> {
+                // Walk the temp cap-ceiling from the smoothed die vs the user ceiling, then
+                // clamp to it. We read the die from this sample (prefer the GPU die in the
+                // sane band, else the hottest zone) — same source the engine prefers.
+                val dieC = sampleDieTempC(sample)
+                val nextCeiling = RuntimeBudgetController.computeTempCeiling(
+                    currentCeilingKhz = tempCapCeilingKhz,
+                    smoothedDieC = dieC,
+                    ceilingC = sessionGoalParams.tempCeilingC,
+                    oppStepsKhz = steps,
+                )
+                tempCapCeilingKhz = nextCeiling
+                RuntimeBudgetController.clampCapToCeiling(proposedCap, nextCeiling, steps)
+            }
+
+            GoalProfile.TARGET_FPS_FLOOR ->
+                RuntimeBudgetController.applyFpsFloorBlock(
+                    proposedCapKhz = proposedCap,
+                    currentCapKhz = currentState.bigClusterCapKhz,
+                    realFpsX10 = sample.realFpsX10,
+                    isRealFps = sample.isRealFps,
+                    fpsFloor = sessionGoalParams.fpsFloor,
+                    oppStepsKhz = steps,
+                )
+
+            else -> proposedCap // no objective outer setpoint for this goal
+        }
+        return if (clampedCap != proposedCap) {
+            decision.target.copy(bigClusterCapKhz = clampedCap)
+        } else {
+            decision.target
+        }
+    }
+
+    /**
+     * The die temp (°C) from a telemetry [sample] for the temp-ceiling guard: prefer the
+     * GPU die read when it is a sane milli-°C value, else the hottest skin zone. Mirrors
+     * the engine's preference (defense-in-depth against a bad-unit die). Null when unknown.
+     */
+    private fun sampleDieTempC(sample: Telemetry): Int? {
+        val die = sample.gpuDieTempMilliC?.takeIf { it in DIE_SANE_MILLI_MIN..DIE_SANE_MILLI_MAX }
+        val milli = die ?: sample.zoneTempsMilliC.maxByOrNull { it.tempMilliC }?.tempMilliC
+        return milli?.let { it / 1000 }
+    }
+
+    /**
+     * UNIT 4: the TARGET_RUNTIME 60-second outer-budget loop. Recomputes the runtime cap
+     * CEILING every minute from remaining Wh + the PowerModel, writing it to
+     * [runtimeCapCeilingKhz] (the per-tick loop clamps the band controller's cap to it,
+     * never loosening above). Runs in [serviceScope] (cancelled on every stop path). It
+     * NEVER writes sysfs and NEVER bypasses safety — it only LOWERS a ceiling the tick loop
+     * then applies as a strictly-safer upper bound. The projection is MODELLED + labelled.
+     */
+    private fun startRuntimeBudgetLoop(caps: TdpCaps) {
+        runtimeBudgetJob?.cancel()
+        runtimeBudgetJob = serviceScope.launch {
+            while (true) {
+                runCatching { recomputeRuntimeBudget(caps) }
+                    .onFailure { Log.w(TAG, "runtime budget recompute failed", it) }
+                delay(RuntimeBudgetController.RECOMPUTE_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * One recompute of the runtime cap ceiling: read remaining Wh + live draw, fit the
+     * PowerModel from the session's measured (cap, draw) pairs when available, and ask
+     * [RuntimeBudgetController] for the largest OPP whose modelled draw fits the budget.
+     * Writes [runtimeCapCeilingKhz] + [runtimeProjectionNote]. All reads are best-effort;
+     * on missing data the ceiling stays null (fails OPEN to the always-safe band controller).
+     */
+    private fun recomputeRuntimeBudget(caps: TdpCaps) {
+        val bm = batteryManager ?: return
+        val chargeUah = bm.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+            .takeIf { it > 0 } ?: return
+        // Live battery draw + voltage from the most recent monitor sample carried on state.
+        val voltageUv = lastBatteryVoltageUv
+        val drawMw = lastBatteryDrawMilliW
+        if (voltageUv == null || voltageUv <= 0L) return
+        val remainingWh = (chargeUah / 1_000_000.0) * (voltageUv / 1_000_000.0)
+        val targetHours = sessionGoalParams.targetRuntimeHours.toDouble()
+
+        // Session's measured (cap, draw) pairs → optional non-linear PowerModel fit.
+        // Collected by the tick loop into [capDrawSamples] (isolated from Unit 1's stats).
+        val pairs = capDrawSamples.toMap()
+        val fit = if (pairs.size >= 2) PowerModel.fit(pairs) else null
+
+        val budget = RuntimeBudgetController.computeRuntimeBudget(
+            remainingWh = remainingWh,
+            targetHours = targetHours,
+            oppStepsKhz = caps.bigClusterOppStepsKhz,
+            powerModelFit = fit,
+            referenceCapKhz = caps.bigClusterOppStepsKhz.lastOrNull(),
+            referenceDrawMilliW = drawMw,
+        )
+        runtimeCapCeilingKhz = budget.capCeilingKhz
+        runtimeProjectionNote = budget.projectedHours?.let { hrs ->
+            val confTag = if (budget.confidence == PowerModel.Confidence.MEASURED) "modelled" else "estimated"
+            "Projected: ${BatteryTarget.formatHours(hrs)} ($confTag)"
+        } ?: budget.note
     }
 
     // ── LIVE availability gate ─────────────────────────────────────────────────
@@ -1216,6 +1483,14 @@ class AutoTdpService : Service() {
          * to save state cleanly.
          */
         private const val BATTERY_KILL_PCT = 5
+
+        /**
+         * UNIT 4: plausible GPU die-temp band (milli-°C) for the temp-ceiling guard. Mirrors
+         * the engine's defense-in-depth band so a bad-unit / off-scale die never drives the
+         * outer temp guard; outside this band we fall back to the hottest skin zone.
+         */
+        private const val DIE_SANE_MILLI_MIN = 20_000
+        private const val DIE_SANE_MILLI_MAX = 130_000
 
         /**
          * BUG A FIX: Maximum number of write attempts for transient failures.

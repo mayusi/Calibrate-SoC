@@ -206,6 +206,13 @@ object AutoTdpEngine {
         // ── UNIT 1 (per-game learning) — both default null => cold-start identical ──
         seed: LearnedSeed? = null,
         sessionElapsedSec: Int? = null,
+        // ── UNIT 4 (richer goal modes) — all default null/false => behaviour identical ──
+        // The objective setpoints (fps floor / temp ceiling / runtime hours) live in
+        // [goalParams]; [batteryPct]/[charging] feed the charge-aware AUTO gate. All
+        // defaulted, so legacy callers and the existing 6 modes are byte-identical.
+        goalParams: GoalParams? = null,
+        batteryPct: Int? = null,
+        charging: Boolean? = null,
     ): TdpDecision {
         if (window.isEmpty()) {
             // No window ⇒ no classification possible. Echo the requested goal as-is
@@ -223,17 +230,26 @@ object AutoTdpEngine {
         // ── Signals ────────────────────────────────────────────────────────────
         val signals = computeSignals(window, caps, controllerState)
 
-        // ── Resolve the active goal (AUTO → classifier) ──────────────────────────
+        // ── Resolve the active goal (AUTO → classifier; UNIT 4 objective modes) ───
         val requestedGoal = goalOverride ?: GoalProfile.fromLegacyProfile(config.profile)
         val classification = ContextClassifier.classify(
             window = window,
             smoothedGpuPct = signals.smoothedGpuPct,
             prior = controllerState.classifier,
         )
-        val activeGoal = if (requestedGoal == GoalProfile.AUTO) {
-            ContextClassifier.goalFor(classification.context, signals.thermalTrend)
-        } else {
-            requestedGoal
+        // UNIT 4 — TARGET_FPS_FLOOR honest degrade: the fps-floor block only has meaning
+        // with a REAL frame source. When the latest sample carries no measured FPS we
+        // DEGRADE the goal to BALANCED_SMART here (in the goal-resolution region) so the
+        // band controller never tightens against a fabricated FPS number, and we flag the
+        // decision so the UI can show the "FPS floor needs a real frame-rate source;
+        // using Balanced" banner. (Charging AUTO can also resolve TO an objective mode.)
+        val hasRealFps = window.lastOrNull()?.isRealFps == true
+        val fpsFloorDegraded = requestedGoal == GoalProfile.TARGET_FPS_FLOOR && !hasRealFps
+        val activeGoal: GoalProfile = when {
+            requestedGoal == GoalProfile.AUTO ->
+                resolveAutoGoal(classification.context, signals.thermalTrend, batteryPct, charging)
+            fpsFloorDegraded -> GoalProfile.BALANCED_SMART
+            else -> requestedGoal
         }
 
         // Carry the freshly-advanced classifier state AND the updated EWMA
@@ -270,8 +286,13 @@ object AutoTdpEngine {
             )
             if (proactive != null) {
                 // UNIT 2: stamp the adaptive cadence hint on the proactive-pre-empt path too.
+                // UNIT 4: carry the fps-degrade flag so the UI banner is consistent here too.
                 return applyFanGovernor(proactive, caps, activeGoal, signals)
-                    .copy(resolvedGoal = activeGoal, nextTickHintMs = nextTickHint(signals, activeGoal))
+                    .copy(
+                        resolvedGoal = activeGoal,
+                        nextTickHintMs = nextTickHint(signals, activeGoal),
+                        fpsFloorDegraded = fpsFloorDegraded,
+                    )
             }
         }
 
@@ -323,7 +344,11 @@ object AutoTdpEngine {
         // 500 ms, calm → 1000 ms). The daemon honours it with a 500 ms floor; the field
         // defaults to null on the no-telemetry early-return path so default behaviour holds.
         val finalDecision = applyFanGovernor(raw, caps, activeGoal, signals)
-            .copy(resolvedGoal = activeGoal, nextTickHintMs = nextTickHint(signals, activeGoal))
+            .copy(
+                resolvedGoal = activeGoal,
+                nextTickHintMs = nextTickHint(signals, activeGoal),
+                fpsFloorDegraded = fpsFloorDegraded,
+            )
         return if (seedNote != null) {
             finalDecision.copy(reason = "${finalDecision.reason} [$seedNote]")
         } else {
@@ -371,6 +396,44 @@ object AutoTdpEngine {
     private data class Band(val low: Int, val high: Int)
 
     private fun bandFor(goal: GoalProfile) = Band(goal.gpuBandLowPct, goal.gpuBandHighPct)
+
+    // ── UNIT 4: charge-aware AUTO resolution ─────────────────────────────────────
+
+    /** Battery-% thresholds for the charge-aware AUTO gate (LAW). */
+    private const val AUTO_BATTERY_SAVER_PCT = 30 // ≤30% (and >15) → BATTERY_SAVER
+    private const val AUTO_RUNTIME_PCT = 15       // <15% → TARGET_RUNTIME (finish the session)
+
+    /**
+     * UNIT 4 — the charge-aware AUTO resolution. AUTO gains an OUTER charge/level gate
+     * around the existing context classifier; the classifier's inner branches are
+     * UNCHANGED (this still calls the committed [ContextClassifier.goalFor]):
+     *
+     *   - charging (any %)            → MAX_FPS   (plugged in: spend freely for smoothness)
+     *   - unplugged, battery > 30%    → the classifier path (LIGHT→BALANCED,
+     *                                    HEAVY+rising→COOL_QUIET, etc.) — UNCHANGED
+     *   - unplugged, 15%..30%         → BATTERY_SAVER (start conserving)
+     *   - unplugged, < 15%            → TARGET_RUNTIME (stretch what's left to finish)
+     *
+     * When the battery level / charging state is unknown (null) we fall through to the
+     * classifier path — the same behaviour as before this gate existed (no new guess).
+     * PURE: scalar comparisons + the committed classifier call; no I/O, no allocations.
+     */
+    private fun resolveAutoGoal(
+        context: WorkloadContext,
+        thermalTrend: ThermalTrend,
+        batteryPct: Int?,
+        charging: Boolean?,
+    ): GoalProfile {
+        // Charging (any level): plugged in → favour smoothness, the classifier path is moot.
+        if (charging == true) return GoalProfile.MAX_FPS
+        // Unknown battery level: behave exactly as the pre-gate classifier path.
+        val pct = batteryPct ?: return ContextClassifier.goalFor(context, thermalTrend)
+        return when {
+            pct < AUTO_RUNTIME_PCT -> GoalProfile.TARGET_RUNTIME
+            pct <= AUTO_BATTERY_SAVER_PCT -> GoalProfile.BATTERY_SAVER
+            else -> ContextClassifier.goalFor(context, thermalTrend)
+        }
+    }
 
     // ════════════════════════════════════════════════════════════════════════════
     //  UNIT 1 — PER-GAME LEARNING (seed start cap + proactive pre-empt)
@@ -1702,4 +1765,12 @@ data class TdpDecision(
      * UNIT 2 (adaptive cadence) fills this field; the daemon clamps it to a 500 ms floor.
      */
     val nextTickHintMs: Int? = null,
+    /**
+     * UNIT 4 — true when the user picked TARGET_FPS_FLOOR but no REAL frame-rate source
+     * is available this tick, so the engine DEGRADED the goal to BALANCED_SMART. The UI
+     * surfaces a banner ("FPS floor needs a real frame-rate source; using Balanced.").
+     * Defaults to false so every legacy / non-FPS-floor decision is unaffected. This is
+     * an honesty flag — it never changes the target/reason/controllerState.
+     */
+    val fpsFloorDegraded: Boolean = false,
 )

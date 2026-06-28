@@ -142,6 +142,11 @@ fun AutoTdpScreen(
     val smartActiveGoal by smartVm.activeGoal.collectAsStateWithLifecycle()
     val smartDetectedContext by smartVm.detectedContext.collectAsStateWithLifecycle()
     val smartIsRunning by smartVm.isRunning.collectAsStateWithLifecycle()
+    val smartFpsFloor by smartVm.fpsFloor.collectAsStateWithLifecycle()
+    val smartTempCeiling by smartVm.tempCeilingC.collectAsStateWithLifecycle()
+    val smartRuntimeHours by smartVm.targetRuntimeHours.collectAsStateWithLifecycle()
+    val smartFpsDegraded by smartVm.fpsFloorDegraded.collectAsStateWithLifecycle()
+    val smartRuntimeNote by smartVm.runtimeProjectionNote.collectAsStateWithLifecycle()
 
     var showPerAppDialog by remember { mutableStateOf(false) }
 
@@ -237,6 +242,14 @@ fun AutoTdpScreen(
                 detectedContext = smartDetectedContext,
                 isRunning = smartIsRunning,
                 onSelectGoal = { smartVm.selectGoal(it) },
+                fpsFloor = smartFpsFloor,
+                tempCeilingC = smartTempCeiling,
+                targetRuntimeHours = smartRuntimeHours,
+                onSetFpsFloor = { smartVm.setFpsFloor(it) },
+                onSetTempCeiling = { smartVm.setTempCeilingC(it) },
+                onSetRuntimeHours = { smartVm.setTargetRuntimeHours(it) },
+                fpsFloorDegraded = smartFpsDegraded,
+                runtimeProjectionNote = smartRuntimeNote,
             )
         }
 
