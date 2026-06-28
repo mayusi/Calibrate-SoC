@@ -185,6 +185,31 @@ fun OnboardingScreen(
         ),
     )
 
+    // ── First-run route: PServer-live → one-click hero, not the old ladder ──
+    //
+    // THE FIX. The wizard used to ALWAYS fall into the per-permission stepIdx
+    // ladder on first run (advancedPhase starts at None), so a PServer-live
+    // device — confirmed live by the isTransactable() probe — was walked through
+    // the OLD manual overlay/usage/battery steps. The one-click "Set up
+    // everything" hero (AdvPhase.AutoSetup) was only reachable from the END of
+    // that ladder. Nothing consumed the reactive pserverSysfsLive signal to skip
+    // straight to it.
+    //
+    // [decideOnboardingRoute] is the single pure source of truth for that
+    // decision (unit-tested in OnboardingRouteTest). It reacts to the probe
+    // landing: cap is null on the first frame → Checking transient (NOT the
+    // ladder); when the probe resolves pserverSysfsLive true → AutoSetupHero.
+    //
+    // [userTookManualControl] makes the decision sticky to user intent: once
+    // they enter an advanced sub-phase by hand OR advance the manual ladder on
+    // a non-live device, we never yank them back onto the auto route.
+    var userTookManualControl by remember { mutableStateOf(false) }
+    val onboardingRoute = decideOnboardingRoute(
+        capResolved = cap != null,
+        pserverSysfsLive = cap?.pserverSysfsLive == true,
+        userTookManualControl = userTookManualControl,
+    )
+
     // Full-screen scary-skip dialog: shown when the user tries to bypass
     // the forced advanced step on an applicable device.
     var showScarySkipDialog by remember { mutableStateOf(false) }
@@ -253,6 +278,21 @@ fun OnboardingScreen(
     var stepIdx by remember { mutableIntStateOf(0) }
     // Steps: 0=welcome, 1..N=items, N+1=all-done/advanced-unlock nudge
     val totalSteps = items.size + 2
+
+    // Reactive auto-route (THE FIX): the moment the probe confirms a PServer-live
+    // device, jump straight to the one-click hero (AdvPhase.AutoSetup),
+    // collapsing the old per-permission ladder. Keyed on the route so it fires
+    // when pserverSysfsLive flips true a frame after first composition. Only acts
+    // from the pristine first-run state (still at welcome, no advanced phase yet)
+    // so it never fights a user who has already navigated somewhere on purpose.
+    LaunchedEffect(onboardingRoute) {
+        if (onboardingRoute == OnboardingRoute.AutoSetupHero &&
+            advancedPhase == AdvPhase.None &&
+            stepIdx == 0
+        ) {
+            advancedPhase = AdvPhase.AutoSetup
+        }
+    }
 
     // Auto-advance: when the current step's item flips to done, move
     // to the next one after a short pulse (so the user sees the ✓ for
@@ -450,9 +490,32 @@ fun OnboardingScreen(
             }
             return@Column
         }
+        // ── Probe-in-flight guard ─────────────────────────────────────────────
+        // While the capability probe hasn't landed yet (cap == null) AND the user
+        // hasn't already committed to a flow, show a brief "Checking your device…"
+        // transient instead of the welcome/ladder. This is what prevents a
+        // PServer-live first-run user from being stranded on the OLD manual ladder
+        // because of a first-frame race: the instant the probe resolves live, the
+        // auto-route LaunchedEffect above flips us to the one-click hero; if it
+        // resolves non-live we fall through to the genuine manual ladder below.
+        // We only gate the pristine first-run state (welcome) — once the user has
+        // moved into the ladder on a confirmed non-live device we never bounce
+        // them back to a spinner.
+        if (onboardingRoute == OnboardingRoute.Checking && stepIdx == 0 && !userTookManualControl) {
+            CheckingDeviceStep()
+            return@Column
+        }
         when (stepIdx) {
             0 -> WelcomeStep(
-                onNext = { stepIdx = 1 },
+                // Advancing off welcome commits to the manual ladder — but only
+                // honestly: if the probe still says "live", the auto-route has
+                // already taken over and this lambda won't run for a live device.
+                // Marking manual control keeps the decision sticky so a late probe
+                // can't yank a user who deliberately chose the manual path.
+                onNext = {
+                    userTookManualControl = true
+                    stepIdx = 1
+                },
                 onSkipAll = enterApp,
             )
             allDoneStepIdx -> AllDoneStep(
@@ -680,6 +743,44 @@ private fun StepDot(completed: Boolean, current: Boolean) {
                 .clip(CircleShape)
                 .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
         )
+    }
+}
+
+/**
+ * Brief "Checking your device…" transient shown on first run while the
+ * capability probe is still in flight (cap == null). Prevents committing a
+ * PServer-live user to the OLD manual ladder because of a first-frame race:
+ * the instant the probe resolves, the route flips to either the one-click hero
+ * (PServer-live) or the genuine manual ladder (non-live). Lightweight by design
+ * — the probe lands within a few hundred ms of mount.
+ */
+@Composable
+private fun CheckingDeviceStep() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            androidx.compose.material3.CircularProgressIndicator(
+                modifier = Modifier.size(40.dp),
+            )
+            Text(
+                "Checking your device…",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "One moment — we're detecting how your handheld can tune so we can set " +
+                    "everything up the fastest way.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
     }
 }
 
