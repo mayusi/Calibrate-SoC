@@ -48,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -85,6 +86,8 @@ import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.KvRow
+import io.github.mayusi.calibratesoc.ui.autotdp.adaptive.AdaptivePanel
+import io.github.mayusi.calibratesoc.ui.autotdp.adaptive.AdaptiveViewModel
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
 import kotlinx.coroutines.delay
 
@@ -106,11 +109,15 @@ import kotlinx.coroutines.delay
  * 10. Script deploy result (SCRIPT rung).
  * 11. Companion toggles: idle/charge + per-app.
  */
+/** Top-level mode tabs for the AutoTDP screen (Unit 4). */
+private enum class AutoTdpScreenMode { ADAPTIVE, GOAL_MODES, MANUAL }
+
 @Composable
 fun AutoTdpScreen(
     onBack: () -> Unit = {},
     viewModel: AutoTdpViewModel = hiltViewModel(),
     smartVm: SmartAutoTdpViewModel = hiltViewModel(),
+    adaptiveVm: AdaptiveViewModel = hiltViewModel(),
 ) {
     val rung by viewModel.rung.collectAsStateWithLifecycle()
     val runState by viewModel.runState.collectAsStateWithLifecycle()
@@ -147,6 +154,23 @@ fun AutoTdpScreen(
     val smartRuntimeHours by smartVm.targetRuntimeHours.collectAsStateWithLifecycle()
     val smartFpsDegraded by smartVm.fpsFloorDegraded.collectAsStateWithLifecycle()
     val smartRuntimeNote by smartVm.runtimeProjectionNote.collectAsStateWithLifecycle()
+
+    // Adaptive mode state (Unit 4)
+    val adaptiveSelectedPreset by adaptiveVm.selectedPreset.collectAsStateWithLifecycle()
+    val adaptiveCustomIntent by adaptiveVm.customIntent.collectAsStateWithLifecycle()
+    val adaptiveEffectiveIntent by adaptiveVm.effectiveIntent.collectAsStateWithLifecycle()
+    val adaptiveNearestPreset by adaptiveVm.nearestPreset.collectAsStateWithLifecycle()
+    val adaptiveGpuOcTier by adaptiveVm.gpuOcTier.collectAsStateWithLifecycle()
+    val adaptiveBeyondStockConsent by adaptiveVm.beyondStockConsent.collectAsStateWithLifecycle()
+    val adaptiveBeyondStockVerdict by adaptiveVm.beyondStockProbeVerdict.collectAsStateWithLifecycle()
+    val adaptiveIsRunning by adaptiveVm.isRunning.collectAsStateWithLifecycle()
+    val adaptiveCpuCapLabel by adaptiveVm.liveCpuCapLabel.collectAsStateWithLifecycle()
+    val adaptiveGpuLabel by adaptiveVm.liveGpuLabel.collectAsStateWithLifecycle()
+    val adaptiveWhyLabel by adaptiveVm.liveWhyLabel.collectAsStateWithLifecycle()
+    val adaptiveModeActive by adaptiveVm.adaptiveModeActive.collectAsStateWithLifecycle()
+
+    // Mode segmented control state (Unit 4) — Adaptive is the default-highlighted tab
+    var screenMode by remember { mutableStateOf(AutoTdpScreenMode.ADAPTIVE) }
 
     var showPerAppDialog by remember { mutableStateOf(false) }
 
@@ -228,29 +252,69 @@ fun AutoTdpScreen(
         // ── 4. Rung disclosure ─────────────────────────────────────────────────
         item { ArsenalRungBanner(rung = rung, runState = runState) }
 
-        // ── 5. Goal mode picker (Wave 4b) — the ONLY control surface now ───────
-        // The legacy 3-way PROFILE segmented control (Efficiency/Balanced/Battery)
-        // was REMOVED: it was superseded by the 5-mode GOAL MODE picker and the two
-        // side-by-side pickers were confusing/redundant. The goal modes subsume the
-        // old profiles (BALANCED_SMART ≈ Balanced, COOL_QUIET ≈ Efficiency,
-        // BATTERY_SAVER ≈ Battery-target), and START now uses the selected GOAL, so
-        // the legacy picker had no remaining purpose.
+        // ── 5. Mode segmented control + control panel (Unit 4) ────────────────
+        // Adaptive is the new default tab; Goal Modes preserves the existing
+        // GoalPickerPanel; Manual = placeholder for future manual controls.
+        // The insert is purely ADDITIVE — GoalPickerPanel is unchanged, just
+        // gated behind the Goal Modes tab.
+        //
+        // TODO: AutoTdpScreen.kt is ~2200 LOC — flagged as split candidate.
+        // Suggested split: AdaptiveSection.kt + GoalModesSection.kt extracted
+        // as top-level item-slot composables when this file grows further.
         item {
-            GoalPickerPanel(
-                selectedGoal = smartSelectedGoal,
-                activeGoal = smartActiveGoal,
-                detectedContext = smartDetectedContext,
-                isRunning = smartIsRunning,
-                onSelectGoal = { smartVm.selectGoal(it) },
-                fpsFloor = smartFpsFloor,
-                tempCeilingC = smartTempCeiling,
-                targetRuntimeHours = smartRuntimeHours,
-                onSetFpsFloor = { smartVm.setFpsFloor(it) },
-                onSetTempCeiling = { smartVm.setTempCeilingC(it) },
-                onSetRuntimeHours = { smartVm.setTargetRuntimeHours(it) },
-                fpsFloorDegraded = smartFpsDegraded,
-                runtimeProjectionNote = smartRuntimeNote,
+            AutoTdpModeSegmentedControl(
+                selected = screenMode,
+                onSelect = { screenMode = it },
             )
+        }
+        item {
+            when (screenMode) {
+                AutoTdpScreenMode.ADAPTIVE -> AdaptivePanel(
+                    selectedPreset       = adaptiveSelectedPreset,
+                    customIntent         = adaptiveCustomIntent,
+                    effectiveIntent      = adaptiveEffectiveIntent,
+                    nearestPreset        = adaptiveNearestPreset,
+                    gpuOcTier            = adaptiveGpuOcTier,
+                    beyondStockConsent   = adaptiveBeyondStockConsent,
+                    beyondStockVerdict   = adaptiveBeyondStockVerdict,
+                    isRunning            = adaptiveIsRunning,
+                    liveCpuCapLabel      = adaptiveCpuCapLabel,
+                    liveGpuLabel         = adaptiveGpuLabel,
+                    liveTemp             = runState.appliedState?.let { state ->
+                        // temperature is not in TdpState directly; surface from
+                        // liveSnapshot when available (Unit 5 wires the live °C)
+                        null
+                    },
+                    liveWhyLabel         = adaptiveWhyLabel,
+                    adaptiveModeActive   = adaptiveModeActive,
+                    onSelectPreset       = { adaptiveVm.selectPreset(it) },
+                    onUpdateWeight       = { axis, v -> adaptiveVm.updateCustomWeight(axis, v) },
+                    onEnterCustom        = { adaptiveVm.enterCustom() },
+                    onExitToPreset       = { adaptiveVm.exitToPreset() },
+                    onSetGpuOcTier       = { adaptiveVm.setGpuOcTier(it) },
+                    onGrantConsent       = { adaptiveVm.grantBeyondStockConsent() },
+                    onSetAdaptiveActive  = { adaptiveVm.setAdaptiveActive(it) },
+                )
+                AutoTdpScreenMode.GOAL_MODES -> GoalPickerPanel(
+                    selectedGoal         = smartSelectedGoal,
+                    activeGoal           = smartActiveGoal,
+                    detectedContext      = smartDetectedContext,
+                    isRunning            = smartIsRunning,
+                    onSelectGoal         = { smartVm.selectGoal(it) },
+                    fpsFloor             = smartFpsFloor,
+                    tempCeilingC         = smartTempCeiling,
+                    targetRuntimeHours   = smartRuntimeHours,
+                    onSetFpsFloor        = { smartVm.setFpsFloor(it) },
+                    onSetTempCeiling     = { smartVm.setTempCeilingC(it) },
+                    onSetRuntimeHours    = { smartVm.setTargetRuntimeHours(it) },
+                    fpsFloorDegraded     = smartFpsDegraded,
+                    runtimeProjectionNote = smartRuntimeNote,
+                )
+                AutoTdpScreenMode.MANUAL -> {
+                    // Manual controls placeholder — future wave.
+                    // No controls have been removed; this slot is additive.
+                }
+            }
         }
 
         // ── 6. Battery target input (reachable under the Battery-Saver GOAL) ────
@@ -258,7 +322,7 @@ fun AutoTdpScreen(
         // (BATTERY_SAVER carries the hard power ceiling) instead of the removed legacy
         // BATTERY_TARGET profile. The VM derives the watts budget from this preview
         // when starting a BATTERY_SAVER goal.
-        if (smartSelectedGoal == GoalProfile.BATTERY_SAVER) {
+        if (screenMode == AutoTdpScreenMode.GOAL_MODES && smartSelectedGoal == GoalProfile.BATTERY_SAVER) {
             item {
                 BatteryTargetArsenalCard(
                     targetHours = targetHours,
@@ -2200,4 +2264,61 @@ private fun estimateSweepMinutes(state: SweepUiState): String {
     }
     val totalSeconds = steps * 5
     return if (totalSeconds < 60) "<1" else "${totalSeconds / 60}"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Unit 4: Mode segmented control [ Adaptive | Goal Modes | Manual ]
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Three-tab mode selector sitting above the control panel area (Unit 4).
+ *
+ * Adaptive is highlighted by default (it is the new recommended entry point).
+ * Goal Modes preserves the existing GoalPickerPanel unchanged.
+ * Manual is a placeholder for future direct-override controls.
+ *
+ * Uses the existing Arsenal chip pattern (accent border + tinted background
+ * when selected, neutral border when idle) — no new design primitives.
+ */
+@Composable
+private fun AutoTdpModeSegmentedControl(
+    selected: AutoTdpScreenMode,
+    onSelect: (AutoTdpScreenMode) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AutoTdpScreenMode.entries.forEach { mode ->
+            val isSelected = mode == selected
+            val accent = AccentBar.Emerald
+            val bg     = if (isSelected) accent.copy(alpha = 0.14f) else Color(0xFF0C0C10)
+            val border = if (isSelected) 1.dp else 0.5.dp
+            val borderColor = if (isSelected) accent else Color(0xFF6B7280).copy(alpha = 0.4f)
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(bg)
+                    .border(border, borderColor, RoundedCornerShape(4.dp))
+                    .clickable { onSelect(mode) }
+                    .padding(vertical = 9.dp, horizontal = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = when (mode) {
+                        AutoTdpScreenMode.ADAPTIVE   -> "Adaptive"
+                        AutoTdpScreenMode.GOAL_MODES -> "Goal Modes"
+                        AutoTdpScreenMode.MANUAL     -> "Manual"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isSelected) accent else Color(0xFF9999AA),
+                    letterSpacing = 0.02.sp,
+                )
+            }
+        }
+    }
 }

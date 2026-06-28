@@ -101,7 +101,7 @@ fun IntelligencePanelCard(
         Text(
             "ESTIMATES VARY WITH WORKLOAD — AT THIS LOAD ONLY",
             style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF555566),
+            color = AccentBar.Neutral,
             letterSpacing = 0.06.sp,
         )
     }
@@ -141,7 +141,7 @@ private fun TimeToEmptySection(estimate: BatteryEstimate) {
             Text(
                 "Battery time estimate requires a charge counter reading — not available on this device.",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF888888),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -182,7 +182,7 @@ private fun TimeToEmptySection(estimate: BatteryEstimate) {
                     Text(
                         drawLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF888888),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 2.dp),
                     )
                 }
@@ -219,7 +219,7 @@ private fun ThermalHeadroomSection(state: ThermalHeadroomState) {
             Text(
                 "No thermal zone readings available — temps may be restricted on this device.",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF888888),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -345,7 +345,7 @@ private fun EfficiencyWinSection(
             Text(
                 "Cap big cluster at ${state.kneeMhz} MHz → $pctLabel, no measurable perf loss",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFCCCCCC),
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
                 "[MEASURED via efficiency sweep]",
@@ -367,7 +367,7 @@ private fun EfficiencyWinSection(
             Text(
                 "~${state.drawReductionPct}% draw reduction possible",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFCCCCCC),
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
                 "[ESTIMATED — run Efficiency Sweep for measured data]",
@@ -413,7 +413,7 @@ private fun ApplyResultDialog(
                         "Big cluster capped at: $capsText\n\n" +
                             "The kernel will remain at this cap until a reboot or another preset is applied.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFCCCCCC),
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                 }
                 is ApplyResult.Failed -> {

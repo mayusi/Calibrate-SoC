@@ -53,6 +53,17 @@ data class AutoTdpProfileConfig(
      * Carried end-to-end (controller → intent → daemon → engine `goalOverride`).
      */
     val goal: GoalProfile? = null,
+    /**
+     * UNIT 5 (ADAPTIVE MODE): the resolved Adaptive run config (intent + OC tier + consent +
+     * cached probe verdict). NON-NULL ⇒ the daemon runs the ADAPTIVE branch
+     * ([io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveCoordinator]) as the
+     * UNIFIED driver and IGNORES [goal] / [profile] for control (they stay populated only
+     * for the back-compat extras + the watts mirror). Null ⇒ today's legacy goal/profile
+     * path, byte-identical. Mutual exclusion: a session is EITHER adaptive OR legacy, never
+     * both — set by [io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController.start]
+     * with an [AdaptiveRunConfig].
+     */
+    val adaptive: AdaptiveRunConfig? = null,
 ) {
     companion object {
         /**
@@ -78,5 +89,56 @@ data class AutoTdpProfileConfig(
                 goal = goal,
             )
         }
+
+        /**
+         * UNIT 5: build an ADAPTIVE config from a resolved [AdaptiveRunConfig]. [profile] is
+         * mirrored to BALANCED (a safe legacy fallback for the back-compat extras) and [goal]
+         * is left null — the daemon takes the adaptive branch when [adaptive] is non-null,
+         * so the legacy goal/profile are never consulted for control. Mutual exclusion holds:
+         * an adaptive config is never also a legacy goal config.
+         */
+        fun forAdaptive(adaptive: AdaptiveRunConfig): AutoTdpProfileConfig =
+            AutoTdpProfileConfig(
+                profile = AutoTdpProfile.BALANCED,
+                targetMilliWatts = null,
+                goal = null,
+                adaptive = adaptive,
+            )
     }
 }
+
+/**
+ * UNIT 5 (ADAPTIVE MODE): the SERIALIZABLE carrier for the resolved Adaptive run config —
+ * the round-trip-safe mirror of [io.github.mayusi.calibratesoc.data.autotdp.adaptive
+ * .AdaptiveCoordinator.AdaptiveConfig]. The controller resolves it from the VM state and
+ * hands it to the service; it survives the intent extras (encoded as a compact string by
+ * [io.github.mayusi.calibratesoc.data.autotdp.AutoTdpService.buildStartIntent]) and is
+ * rebuilt on the daemon side, where [toCoordinatorConfig] turns it back into the pure
+ * coordinator input.
+ *
+ * The four weights are stored as the ALREADY-NORMALIZED intent (the VM exposes
+ * `effectiveIntent`, normalized by design). The OC tier + consent are the user's choices
+ * (consent is also gated again in [AdaptivePolicy]); [probeVerdictRecord] is the cached
+ * verdict STRING in the same `"<verdict>"` form the prefs store uses (without the device
+ * fingerprint prefix — the controller strips it before constructing this), or null when
+ * never probed / not Accepted.
+ *
+ * @property wPerformance     normalized performance weight (0..1).
+ * @property wBattery         normalized battery weight (0..1).
+ * @property wStability       normalized stability weight (0..1).
+ * @property wThermalHeadroom normalized thermal-headroom weight (0..1).
+ * @property gpuOcTierOrdinal ordinal of the chosen `GpuOcTier`.
+ * @property beyondStockConsent the raw consent flag.
+ * @property probeVerdictRecord the cached verdict string ("Accepted:<hz>" / "Rejected:<hz>"
+ *                            / "Ineffective" / "Unsupported"), or null when never probed.
+ */
+@Serializable
+data class AdaptiveRunConfig(
+    val wPerformance: Float,
+    val wBattery: Float,
+    val wStability: Float,
+    val wThermalHeadroom: Float,
+    val gpuOcTierOrdinal: Int,
+    val beyondStockConsent: Boolean,
+    val probeVerdictRecord: String? = null,
+)

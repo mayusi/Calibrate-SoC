@@ -14,12 +14,23 @@ import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.R
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveCoordinator
+import io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveSetpoints
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuBandController
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuControllerState
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuOcProber
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuOcThermalGuard
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuOcVerdict
+import io.github.mayusi.calibratesoc.data.autotdp.gpu.GpuSignals
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -110,6 +121,22 @@ class AutoTdpService : Service() {
      */
     @Inject lateinit var goalParamsPrefs: GoalParamsPrefs
 
+    /**
+     * UNIT 5 (ADAPTIVE MODE): the beyond-stock GPU-OC accept-probe + its I/O. The probe runs
+     * ONCE at engage (off the tick thread) only when the adaptive config requests BEYOND_STOCK
+     * with consent; its verdict is cached in [adaptiveProbeVerdict] for the session. The
+     * reader/load route through the same privileged channels the rest of the daemon uses; the
+     * writer routes through [tunableWriter] so the probe's max_freq write is snapshotted and
+     * reverted by the SAME revert path as every other write.
+     *
+     * [gpuOcProber] is a stateless orchestrator with no dependencies (its I/O is injected per
+     * call), so it is constructed inline rather than via Hilt (no @Inject constructor + no DI
+     * module needed). The reader + load generator are real injected singletons.
+     */
+    private val gpuOcProber: GpuOcProber = GpuOcProber()
+    @Inject lateinit var privilegedSysfsReader: io.github.mayusi.calibratesoc.data.capability.PrivilegedSysfsReader
+    @Inject lateinit var gpuTriangleStorm: io.github.mayusi.calibratesoc.data.benchmark.GpuTriangleStorm
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
 
@@ -125,6 +152,14 @@ class AutoTdpService : Service() {
      * [GoalParams.DEFAULT] so a session that never read prefs still has safe values.
      */
     @Volatile private var sessionGoalParams: GoalParams = GoalParams.DEFAULT
+
+    /**
+     * UNIT 5 (ADAPTIVE MODE): the cached beyond-stock probe verdict for THIS session,
+     * resolved ONCE at engage (off the tick thread). Null until probed / when not running
+     * adaptive with BEYOND_STOCK. Read on the tick thread to gate the OC ceiling; written
+     * once before the tick loop starts, so a plain @Volatile is sufficient.
+     */
+    @Volatile private var adaptiveProbeVerdict: GpuOcVerdict? = null
 
     /**
      * UNIT 4: the live TARGET_RUNTIME cap CEILING (kHz), recomputed by [runtimeBudgetJob]
@@ -534,6 +569,35 @@ class AutoTdpService : Service() {
             startRuntimeBudgetLoop(caps)
         }
 
+        // ── UNIT 5 (ADAPTIVE MODE): resolve config + probe beyond-stock ONCE at engage ──
+        // When the active mode is Adaptive (config.adaptive != null) the daemon runs the
+        // unified AdaptiveCoordinator branch in the tick loop instead of the legacy
+        // single-goal path (mutual exclusion: config.goal is null on this path). If the
+        // resolved config requests BEYOND_STOCK with consent, run the GpuOcProber ONCE here
+        // — OFF the tick thread (we are on Dispatchers.IO, before the collect loop) — and
+        // cache the honest verdict. The prober writes max_freq through TunableWriter (so the
+        // write is snapshotted + reverted by the SAME revert path) and ALWAYS restores stock
+        // + stops the bounded load on every exit. A non-Accepted verdict keeps the GPU within
+        // the stock ceiling (the policy + coordinator gate beyond-stock on Accepted only).
+        adaptiveProbeVerdict = null
+        val adaptiveConfig: AdaptiveCoordinator.AdaptiveConfig? =
+            config.adaptive?.let { AdaptiveCoordinator.fromRunConfig(it) }
+        if (adaptiveConfig != null) {
+            // Probe only when beyond-stock is actually requested + consented; otherwise the
+            // probe is pointless work (the policy can't reach BEYOND_STOCK without it).
+            val wantsBeyondStock = adaptiveConfig.gpuOcTier ==
+                io.github.mayusi.calibratesoc.data.autotdp.adaptive.GpuOcTier.BEYOND_STOCK &&
+                adaptiveConfig.beyondStockConsent
+            adaptiveProbeVerdict = if (wantsBeyondStock) {
+                runCatching { probeBeyondStockOnce(caps, report) }.getOrNull()
+            } else {
+                null
+            }
+            if (wantsBeyondStock) {
+                Log.i(TAG, "Adaptive beyond-stock probe verdict: $adaptiveProbeVerdict")
+            }
+        }
+
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
@@ -556,6 +620,23 @@ class AutoTdpService : Service() {
         // session always begins from a clean state (no stale EWMA leaking across
         // start/stop cycles).
         var controllerState = ControllerState.INITIAL
+
+        // ── UNIT 5 (ADAPTIVE MODE): per-session adaptive control state ──────────────
+        // The resolved setpoints (pure, from the policy) are computed once; the GPU band
+        // controller's carried state + the OC thermal guard's latch state thread tick-to-tick
+        // alongside the CPU controllerState. All INITIAL per session (no stale carry).
+        val adaptiveSetpoints: AdaptiveSetpoints? =
+            adaptiveConfig?.let { AdaptiveCoordinator.resolveSetpoints(it, caps) }
+        val beyondStockArmed = adaptiveConfig != null && adaptiveSetpoints != null &&
+            AdaptiveCoordinator.beyondStockArmed(adaptiveConfig, adaptiveSetpoints)
+        val adaptiveEffectiveCeilHz: Long? =
+            if (adaptiveConfig != null && adaptiveSetpoints != null) {
+                AdaptiveCoordinator.effectiveCeilHz(adaptiveConfig, adaptiveSetpoints, caps)
+            } else {
+                null
+            }
+        var gpuControllerState = GpuControllerState.INITIAL
+        var gpuOcGuardState = GpuOcThermalGuard.GpuOcGuardState()
 
         // ── UNIT 2: ADAPTIVE TICK CADENCE (decimate to honour nextTickHintMs) ──────
         // The shared MonitorService stream stays a fixed 1 Hz (process-shared with the HUD
@@ -624,17 +705,27 @@ class AutoTdpService : Service() {
                 // unreadable → AUTO falls through to the classifier path (no new guess).
                 val batteryPct = readBatteryPct()
                 val charging = batteryManager?.isCharging
+                // UNIT 5: on the ADAPTIVE branch the engine rides the POLICY's CPU goal +
+                // goalParams (the unified driver picks them), not the legacy config.goal /
+                // session sliders. decide()'s decision logic is UNCHANGED — we only pass it
+                // the goal/params the policy resolved. On the legacy branch these are the
+                // existing values (byte-identical behaviour). The 40% floor / pre-empt / kill
+                // are still enforced INSIDE decide() either way.
+                val effectiveGoalOverride =
+                    if (adaptiveSetpoints != null) adaptiveSetpoints.cpuGoal else config.goal
+                val effectiveGoalParams =
+                    if (adaptiveSetpoints != null) adaptiveSetpoints.cpuGoalParams else sessionGoalParams
                 val decision = AutoTdpEngine.decide(
                     window = window.toList(),
                     config = config,
                     caps = caps,
                     current = currentState,
                     controllerState = controllerState,
-                    goalOverride = config.goal,
+                    goalOverride = effectiveGoalOverride,
                     seed = learnedSeed,
                     sessionElapsedSec = sessionElapsedSec,
                     // UNIT 4: objective setpoints + charge-aware AUTO inputs.
-                    goalParams = sessionGoalParams,
+                    goalParams = effectiveGoalParams,
                     batteryPct = batteryPct,
                     charging = charging,
                 )
@@ -644,11 +735,40 @@ class AutoTdpService : Service() {
                 // the fan governor, and the classifier hysteresis ALIVE across ticks.
                 controllerState = decision.controllerState
 
-                // UNIT 2: adopt the engine's requested re-eval cadence for the NEXT tick.
-                // Null (legacy / no-telemetry early return) → keep the calm 1 Hz default,
-                // preserving today's exact behaviour. The decimation gate above re-clamps to
-                // the 500 ms floor every tick, so a bad hint can never speed past 2 Hz.
-                nextTickHintMs = decision.nextTickHintMs ?: AutoTdpEngine.CALM_TICK_MS_DEFAULT
+                // ── UNIT 5 (ADAPTIVE MODE): compose CPU ⊕ GPU ⊕ OC into ONE decision ────────
+                // On the adaptive branch, run the GPU band controller + (when armed) the OC
+                // thermal guard over the SAME sample stream, and compose with the CPU decision
+                // above into a single composed target + reason via AdaptiveCoordinator. The
+                // composed target's GPU devfreq min/max ride the SAME TdpStateTransition.delta
+                // → TunableWriter → snapshot/revert path as every other field, so one revert
+                // restores CPU + GPU + OC to stock. The legacy branch leaves `decision`
+                // untouched (adaptiveSetpoints == null → this block is skipped entirely).
+                val effectiveDecision: TdpDecision =
+                    if (adaptiveConfig != null && adaptiveSetpoints != null) {
+                        val composed = composeAdaptiveTick(
+                            cpuDecision = decision,
+                            sample = sample,
+                            setpoints = adaptiveSetpoints,
+                            caps = caps,
+                            effectiveCeilHz = adaptiveEffectiveCeilHz,
+                            beyondStockArmed = beyondStockArmed,
+                            gpuState = gpuControllerState,
+                            guardState = gpuOcGuardState,
+                        )
+                        // Thread the GPU controller + OC guard state into the NEXT tick.
+                        gpuControllerState = composed.nextGpuState
+                        gpuOcGuardState = composed.nextGuardState
+                        composed.decision
+                    } else {
+                        decision
+                    }
+
+                // UNIT 2: adopt the requested re-eval cadence for the NEXT tick. On the
+                // adaptive branch this is the composed min(cpu, gpu) hint (already floored);
+                // on the legacy branch it is the engine's hint. Null (legacy / no-telemetry
+                // early return) → keep the calm 1 Hz default, preserving today's behaviour.
+                // The decimation gate above re-clamps to the 500 ms floor every tick.
+                nextTickHintMs = effectiveDecision.nextTickHintMs ?: AutoTdpEngine.CALM_TICK_MS_DEFAULT
 
                 // ── Honest-baseline grace gate ─────────────────────────────────
                 // For the first BASELINE_GRACE_MS after RUNNING, hold at STOCK so the
@@ -664,8 +784,13 @@ class AutoTdpService : Service() {
                 // cap (strictly safer); none can raise the cap above what the band
                 // controller chose, push below the 40% floor (CapFloor-snapped), or bypass
                 // the kill/revert. Applied only on the matching goal; a no-op otherwise.
+                // UNIT 5: pass the COMPOSED decision so the (no-op-on-adaptive) outer-setpoint
+                // clamp reads the composed CPU⊕GPU⊕OC target. On the adaptive path resolvedGoal
+                // is one of the 4 curated bands (never an objective TARGET_* mode), so this
+                // returns the composed target unchanged; on the legacy path it is the engine
+                // decision exactly as before.
                 val clampedTarget =
-                    applyOuterSetpoint(decision, currentState, caps, sample)
+                    applyOuterSetpoint(effectiveDecision, currentState, caps, sample)
                 val effectiveTarget = if (inBaselineGrace) currentState else clampedTarget
 
                 // ── Apply delta ────────────────────────────────────────────────
@@ -757,9 +882,9 @@ class AutoTdpService : Service() {
                 // If any ops were skipped (!allOpsSucceeded), tag the reason as partial
                 // so the HUD honestly reflects that not all writes landed this tick.
                 val displayReason = if (!allOpsSucceeded) {
-                    "${decision.reason} [partial — some writes skipped]"
+                    "${effectiveDecision.reason} [partial — some writes skipped]"
                 } else {
-                    decision.reason
+                    effectiveDecision.reason
                 }
                 Log.v(TAG, "decision: $displayReason")
 
@@ -797,8 +922,10 @@ class AutoTdpService : Service() {
                 // ── Proof-of-effect wiring ─────────────────────────────────────
                 // HEARTBEAT: record wall-clock of this applied tick.
                 val nowMs = System.currentTimeMillis()
-                // Carry the engine's HoldReason into run state (UI's clean label).
-                val holdReason = decision.holdReason
+                // Carry the engine's HoldReason into run state (UI's clean label). The
+                // composed decision preserves the CPU decision's holdReason on the adaptive
+                // path, so this is the engine's honest reason either way.
+                val holdReason = effectiveDecision.holdReason
                 // Append a DecisionRecord (FIFO, bounded by MAX_DECISION_HISTORY).
                 decisions.addLast(
                     DecisionRecord(
@@ -854,7 +981,15 @@ class AutoTdpService : Service() {
                 // detectedContext: the classifier's COMMITTED belief (classifier.stable)
                 // — the DETECTED honesty tier. It is a belief, never a measurement; we
                 // always surface it (the classifier runs every tick regardless of path).
-                val activeGoal = if (config.goal != null) decision.resolvedGoal else null
+                // UNIT 5: on the adaptive branch surface the POLICY's resolved CPU goal (the
+                // unified driver's goal, e.g. "→ Balanced") so the HUD shows what adaptive is
+                // riding; on the legacy Smart path it is the engine's resolved goal; on the
+                // pure legacy-profile path it stays null.
+                val activeGoal = when {
+                    adaptiveSetpoints != null -> effectiveDecision.resolvedGoal
+                    config.goal != null -> effectiveDecision.resolvedGoal
+                    else -> null
+                }
                 val detectedContext = controllerState.classifier.stable
 
                 controller.updateState(
@@ -869,7 +1004,7 @@ class AutoTdpService : Service() {
                         activeGoal = activeGoal,
                         detectedContext = detectedContext,
                         // UNIT 4: honesty surface for the objective goal modes.
-                        fpsFloorDegraded = decision.fpsFloorDegraded,
+                        fpsFloorDegraded = effectiveDecision.fpsFloorDegraded,
                         runtimeProjectionNote =
                             if (config.goal == GoalProfile.TARGET_RUNTIME) runtimeProjectionNote else null,
                     )
@@ -1056,6 +1191,162 @@ class AutoTdpService : Service() {
         return if (pct in 1 until BATTERY_KILL_PCT) {
             "Battery kill: $pct% < $BATTERY_KILL_PCT%"
         } else null
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  UNIT 5 — ADAPTIVE MODE (compose CPU ⊕ GPU ⊕ OC; beyond-stock probe at engage)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /** The composed adaptive tick result threaded back into the daemon loop. */
+    private data class AdaptiveComposeResult(
+        val decision: TdpDecision,
+        val nextGpuState: GpuControllerState,
+        val nextGuardState: GpuOcThermalGuard.GpuOcGuardState,
+    )
+
+    /**
+     * UNIT 5: run the GPU band controller + (when beyond-stock is armed) the OC thermal guard
+     * over THIS [sample], then compose with the CPU [cpuDecision] into ONE [TdpDecision] whose
+     * [TdpDecision.target] carries the merged CPU ⊕ GPU ⊕ OC kernel state. The GPU devfreq
+     * fields ride the SAME TdpStateTransition.delta → TunableWriter → snapshot/revert path as
+     * the CPU fields, so one revert restores everything.
+     *
+     * The GPU controller's load-blind HOLD, its GPU floor invariant, the fast-down on heat,
+     * the engine's 40% cap floor / pre-empt / 105 °C kill, and the OC guard's self-disarm are
+     * ALL enforced INSIDE the pure pieces — this method only feeds them the right inputs and
+     * merges their outputs (the coordinator's precedence law). Beyond-stock is applied ONLY
+     * when [beyondStockArmed] (tier == BEYOND_STOCK && consent && verdict == Accepted); the
+     * guard then trims the OC cap DOWNWARD on heat and latches off for the hot episode.
+     */
+    private fun composeAdaptiveTick(
+        cpuDecision: TdpDecision,
+        sample: Telemetry,
+        setpoints: AdaptiveSetpoints,
+        caps: TdpCaps,
+        effectiveCeilHz: Long?,
+        beyondStockArmed: Boolean,
+        gpuState: GpuControllerState,
+        guardState: GpuOcThermalGuard.GpuOcGuardState,
+    ): AdaptiveComposeResult {
+        // GPU busy% — the RAW read this tick (null ⇒ the GPU controller HOLDs, load-blind).
+        val gpuBusyPct = sample.gpuLoadPct
+        // Shared thermal/throttle signals. The die temp uses the SAME source the engine
+        // prefers (GPU die in the sane band, else the hottest zone); the slope reuses the
+        // engine's already-computed dTemp EWMA from THIS tick's controllerState (no re-derive).
+        val dieTempC = sampleDieTempC(sample)
+        val dTempSlope = cpuDecision.controllerState.dTempSlopeEwma
+        val gpuSignals = GpuSignals(
+            smoothedDieTempC = dieTempC,
+            dTempSlopeCPerS = dTempSlope,
+            coolingMaxState = sample.coolingDeviceMaxState,
+        )
+
+        // ── GPU band controller: governs up to the effective ceiling (OC when armed) ──────
+        val (gpuDecision, nextGpuState) = GpuBandController.decide(
+            gpuBusyPct = gpuBusyPct,
+            signals = gpuSignals,
+            setpoints = setpoints,
+            state = gpuState,
+            caps = caps,
+            effectiveCeilHz = effectiveCeilHz,
+        )
+
+        // ── OC thermal guard (only when beyond-stock is genuinely armed) ──────────────────
+        // Evaluated every tick; it trims the OC cap DOWN on heat and hard-disarms (latches to
+        // stock for the hot episode) at 105 − 8 = 97 °C. Null when not armed → no guard runs
+        // and the GPU governs within stock by construction (the effective ceiling IS stock).
+        var nextGuardState = guardState
+        val ocGuardOutcome: AdaptiveCoordinator.GpuOcGuardOutcome? =
+            if (beyondStockArmed && effectiveCeilHz != null) {
+                val stockCeil = caps.gpuDevfreqCeilHz ?: effectiveCeilHz
+                // The cap the guard is trimming = the band's proposed max this tick, or the
+                // OC ceiling when the band is holding (so the guard always has a real cap to
+                // reason about against the stock ceiling).
+                val currentMaxHz = gpuDecision.targetGpuDevfreqMaxHz ?: effectiveCeilHz
+                val guard = GpuOcThermalGuard.evaluate(
+                    gpuTempC = dieTempC,
+                    dTempSlopeCPerS = dTempSlope,
+                    currentMaxHz = currentMaxHz,
+                    ceilHz = stockCeil,
+                    steps = caps.gpuDevfreqStepsHz,
+                    gpuSoftTempC = setpoints.gpuSoftTempC,
+                    killC = ThermalKillEvaluator.KILL_THRESHOLD_MILLI_C / 1000,
+                    state = nextGuardState,
+                )
+                nextGuardState = guard.state
+                AdaptiveCoordinator.GpuOcGuardOutcome.from(guard)
+            } else {
+                null
+            }
+
+        // ── Compose into one TdpState + merged reason ─────────────────────────────────────
+        val composed = AdaptiveCoordinator.compose(
+            cpuDecision = cpuDecision,
+            gpuDecision = gpuDecision,
+            gpuState = nextGpuState,
+            ocGuard = ocGuardOutcome,
+            setpoints = setpoints,
+        )
+
+        // Rebuild the TdpDecision around the composed target + reason + cadence, preserving
+        // the CPU decision's honesty fields (holdReason / resolvedGoal / fpsFloorDegraded /
+        // controllerState — the CPU state is threaded separately above).
+        val composedDecision = cpuDecision.copy(
+            target = composed.target,
+            reason = composed.reason,
+            nextTickHintMs = composed.nextTickHintMs,
+        )
+        return AdaptiveComposeResult(
+            decision = composedDecision,
+            nextGpuState = composed.gpuControllerState,
+            nextGuardState = nextGuardState,
+        )
+    }
+
+    /**
+     * UNIT 5: run the beyond-stock GPU-OC accept-probe ONCE at engage (off the tick thread).
+     * Wires the prober's injected I/O to the real privileged channels: reads via
+     * [privilegedSysfsReader], writes `max_freq` via [tunableWriter] (so the write is
+     * SNAPSHOTTED + reverted by the SAME revert path), and the bounded ~2 s load via
+     * [gpuTriangleStorm]. The prober ALWAYS restores the stock ceiling + stops the load on
+     * every exit path (including exception). Returns the honest verdict; caching is the
+     * caller's job ([adaptiveProbeVerdict]).
+     */
+    private suspend fun probeBeyondStockOnce(
+        caps: TdpCaps,
+        report: CapabilityReport,
+    ): GpuOcVerdict {
+        val gpuRoot = caps.gpuRootPath
+            ?: return GpuOcVerdict.Unsupported // no GPU node ⇒ no beyond-stock lever
+        val reader = GpuOcProber.SysfsReader { path ->
+            privilegedSysfsReader.catOrNull(path)
+        }
+        val writer = GpuOcProber.SysfsWriter { path, valueHz ->
+            // Route through the GUARDED TunableWriter: the max_freq write is snapshotted, so
+            // a beyond-stock value is reverted to stock by the SAME revert handle as every
+            // other write. We build the devfreq max_freq id from the GPU root.
+            val result = runCatching {
+                tunableWriter.write(
+                    id = Tunables.gpuMaxFreq(gpuRoot),
+                    value = valueHz.toString(),
+                    report = report,
+                    reason = "adaptive beyond-stock OC probe",
+                )
+            }.getOrNull()
+            result is WriteResult.Success
+        }
+        val loadGen = object : GpuOcProber.LoadGen {
+            override suspend fun run(durationMs: Long) {
+                runCatching { gpuTriangleStorm.run(durationMs) }
+            }
+
+            override fun stop() {
+                // GpuTriangleStorm.run renders on a bounded background EGL pass that ends with
+                // the call (nothing left running). There is no separate hard-stop handle to
+                // invoke; teardown is implicit in run() returning. Intentional no-op.
+            }
+        }
+        return gpuOcProber.probe(caps, reader, writer, loadGen)
     }
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -1529,13 +1820,26 @@ class AutoTdpService : Service() {
         const val EXTRA_GOAL = "goal_name"
 
         /**
+         * UNIT 5 (ADAPTIVE MODE): the resolved [AdaptiveRunConfig] encoded as a JSON string,
+         * or absent for a non-adaptive (legacy goal/profile) start. Its PRESENCE is what
+         * routes the daemon onto the adaptive branch ([AdaptiveCoordinator]); an unparseable
+         * value is dropped (adaptive == null) and the daemon falls back to the legacy path.
+         */
+        const val EXTRA_ADAPTIVE = "adaptive_json"
+
+        /** Lenient JSON for the adaptive-config round-trip (ignore unknown keys for fwd-compat). */
+        private val ADAPTIVE_JSON = Json { ignoreUnknownKeys = true }
+
+        /**
          * Build the ACTION_START intent for [config] (pure — no service-start side
          * effect). Extracted so the goal/profile/watts round-trip is unit-testable
          * without an Android service runtime.
          *
          * EXTRA_PROFILE_ORDINAL is ALWAYS written (back-compat + the watts-ceiling
          * path). EXTRA_GOAL is written only when [AutoTdpProfileConfig.goal] is set;
-         * its presence is what makes the Smart engine reachable.
+         * its presence is what makes the Smart engine reachable. EXTRA_ADAPTIVE is
+         * written only when [AutoTdpProfileConfig.adaptive] is set; its presence routes
+         * the daemon onto the unified Adaptive branch.
          */
         fun buildStartIntent(context: Context, config: AutoTdpProfileConfig): Intent =
             Intent(context, AutoTdpService::class.java).apply {
@@ -1543,6 +1847,7 @@ class AutoTdpService : Service() {
                 putExtra(EXTRA_PROFILE_ORDINAL, config.profile.ordinal)
                 config.targetMilliWatts?.let { putExtra(EXTRA_TARGET_MW, it) }
                 config.goal?.let { putExtra(EXTRA_GOAL, it.name) }
+                config.adaptive?.let { putExtra(EXTRA_ADAPTIVE, ADAPTIVE_JSON.encodeToString(it)) }
             }
 
         /**
@@ -1550,6 +1855,10 @@ class AutoTdpService : Service() {
          * of [buildStartIntent]). Unknown/absent extras degrade to the safe legacy
          * default (BALANCED, no goal). An unparseable EXTRA_GOAL name is dropped (goal
          * == null) rather than crashing — the daemon then runs the legacy profile.
+         *
+         * UNIT 5: when EXTRA_ADAPTIVE is present and parses, the config carries the
+         * [AdaptiveRunConfig] and the daemon takes the adaptive branch (mutual exclusion:
+         * goal stays null on the adaptive path). An unparseable adaptive blob is dropped.
          */
         fun configFromStartIntent(intent: Intent): AutoTdpProfileConfig {
             val profileOrdinal = intent.getIntExtra(EXTRA_PROFILE_ORDINAL, AutoTdpProfile.BALANCED.ordinal)
@@ -1558,7 +1867,15 @@ class AutoTdpService : Service() {
             val goal = intent.getStringExtra(EXTRA_GOAL)?.let { name ->
                 GoalProfile.entries.firstOrNull { it.name == name }
             }
-            return AutoTdpProfileConfig(profile = profile, targetMilliWatts = targetMw, goal = goal)
+            val adaptive = intent.getStringExtra(EXTRA_ADAPTIVE)?.let { json ->
+                runCatching { ADAPTIVE_JSON.decodeFromString<AdaptiveRunConfig>(json) }.getOrNull()
+            }
+            return AutoTdpProfileConfig(
+                profile = profile,
+                targetMilliWatts = targetMw,
+                goal = goal,
+                adaptive = adaptive,
+            )
         }
 
         fun start(context: Context, config: AutoTdpProfileConfig) {

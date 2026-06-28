@@ -62,6 +62,20 @@ class AutoTdpController @Inject constructor(
     }
 
     /**
+     * UNIT 5 (ADAPTIVE MODE): engage Adaptive mode — the UNIFIED governor. The resolved
+     * [adaptive] config (intent + OC tier + consent + cached probe verdict) drives the
+     * daemon's ADAPTIVE branch ([io.github.mayusi.calibratesoc.data.autotdp.adaptive
+     * .AdaptiveCoordinator]) instead of the legacy single-goal path. Mutual exclusion is
+     * structural: an adaptive config carries no [GoalProfile], so the legacy goal/profile
+     * path is never taken this session; the daemon's BoostArbiter claim still suspends Game
+     * Boost + the Predictive Throttle Guard. The live run-state ([state]) is populated by
+     * the adaptive tick exactly as the legacy path does, so the AdaptivePanel readout works.
+     */
+    fun start(adaptive: AdaptiveRunConfig) {
+        start(AutoTdpProfileConfig.forAdaptive(adaptive))
+    }
+
+    /**
      * Stop the daemon and revert all writes. The service handles revert
      * internally via TunableWriter.revertAll before it exits.
      */

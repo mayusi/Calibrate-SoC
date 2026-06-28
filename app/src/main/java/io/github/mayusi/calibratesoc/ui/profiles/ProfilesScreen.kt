@@ -48,15 +48,19 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
 import io.github.mayusi.calibratesoc.data.profiles.PerAppBundle
+import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
 import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
+import io.github.mayusi.calibratesoc.ui.theme.Spacing
 import kotlinx.coroutines.launch
 
 /**
@@ -119,31 +123,32 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text("Profiles", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Saved tunes you can reapply. Mark a profile Apply on boot to keep it across reboots — otherwise everything reverts.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+            Column {
+                Text(
+                    "PROFILES",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    letterSpacing = 0.06.sp,
+                )
+                Spacer(Modifier.height(Spacing.dense))
+                Text(
+                    "Saved tunes you can reapply. Mark a profile Apply on boot to keep it across reboots — otherwise everything reverts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(Spacing.group))
             OutlinedButton(
                 onClick = { showImportDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.size(6.dp))
+                Spacer(Modifier.size(Spacing.group))
                 Text("Import tune from code")
             }
         }
@@ -176,8 +181,9 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
         }
 
         item {
-            Spacer(Modifier.height(8.dp))
-            Text("Per-app overrides", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(Spacing.dense))
+            SectionHeader(title = "PER-APP OVERRIDES", accent = AccentBar.Blue)
+            Spacer(Modifier.height(Spacing.dense))
             Text(
                 "When you switch to an app on this list, its profile auto-applies. Requires the Accessibility grant in Settings.",
                 style = MaterialTheme.typography.bodySmall,
@@ -244,12 +250,9 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
         // Wave 4b: per-app full bundle editor entry points
         if (store.perAppOverrides.isNotEmpty()) {
             item {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Full bundle editor",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Spacer(Modifier.height(Spacing.dense))
+                SectionHeader(title = "FULL BUNDLE EDITOR", accent = AccentBar.Purple)
+                Spacer(Modifier.height(Spacing.dense))
                 Text(
                     "Edit AutoTDP goal, refresh rate, fan mode, Game Boost on launch, and background app reaper per game.",
                     style = MaterialTheme.typography.bodySmall,

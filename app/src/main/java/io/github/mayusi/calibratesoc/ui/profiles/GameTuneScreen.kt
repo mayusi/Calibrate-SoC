@@ -62,7 +62,7 @@ import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
 import io.github.mayusi.calibratesoc.ui.components.KvRow
-import io.github.mayusi.calibratesoc.ui.components.SectionCard
+import io.github.mayusi.calibratesoc.ui.theme.Spacing
 
 // ─── Accent colour for this screen ────────────────────────────────────────────
 
@@ -72,8 +72,6 @@ private val ErrorRed   = Color(0xFFFF4D6D)   // AccentBar.Red equivalent
 // ─── Screen colours (mirrors the rest of the dark Arsenal theme) ───────────────
 
 private val SurfaceColor = Color(0xFF141419)
-private val TileColor    = Color(0xFF0C0C10)
-private val LabelGray    = Color(0xFF999999)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public entry point
@@ -129,29 +127,28 @@ fun GameTuneScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(SurfaceColor)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = Spacing.screen),
     ) {
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.item))
 
         // ── Screen title ──────────────────────────────────────────────────────
         Text(
-            text = "Game Tunes",
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.5.sp,
-                color = Color.White,
-            ),
+            text = "GAME TUNES",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+            letterSpacing = 0.06.sp,
         )
         Text(
             text = gameDisplayName,
             style = MaterialTheme.typography.bodySmall,
-            color = LabelGray,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(Spacing.item))
 
         // ── Tab row ───────────────────────────────────────────────────────────
         Row(
@@ -166,11 +163,10 @@ fun GameTuneScreen(
                 ) {
                     Text(
                         text = label,
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                            color = if (active) TuneAccent else LabelGray,
-                            letterSpacing = 0.8.sp,
-                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                        color = if (active) TuneAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 0.8.sp,
                     )
                 }
             }
@@ -264,103 +260,84 @@ private fun ShareTab(
     onSystemShare: (String) -> Unit,
 ) {
     LazyColumn(
-        contentPadding = PaddingValues(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item {
             ArsenalPanel(accent = TuneAccent, title = "Share this game's tune") {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "Generate a compact code that encodes all tuning settings for " +
-                            "$gameDisplayName — AutoTDP goal, refresh rate, fan mode, game boost, " +
-                            "and any CPU/GPU clock caps.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = LabelGray,
+                Text(
+                    text = "Generate a compact code that encodes all tuning settings for " +
+                        "$gameDisplayName — AutoTDP goal, refresh rate, fan mode, game boost, " +
+                        "and any CPU/GPU clock caps.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (bundle == null) {
+                    AlertCard(
+                        type = AlertType.WARNING,
+                        title = "No tune configured",
+                        message = "Configure settings for this game first — there's nothing to share yet.",
                     )
-
-                    Spacer(Modifier.height(4.dp))
-
-                    if (bundle == null) {
-                        AlertCard(
-                            type = AlertType.WARNING,
-                            title = "No tune configured",
-                            message = "Configure settings for this game first — there's nothing to share yet.",
-                        )
-                    } else {
-                        ArsenalButton(
-                            label = "Generate tune code",
-                            accent = TuneAccent,
-                            style = ArsenalButtonStyle.Primary,
-                            onClick = {
-                                viewModel.generateShareCode(
-                                    packageName = packageName,
-                                    gameDisplayName = gameDisplayName,
-                                    bundle = bundle,
-                                    profile = profile,
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                } else {
+                    ArsenalButton(
+                        label = "Generate tune code",
+                        accent = TuneAccent,
+                        style = ArsenalButtonStyle.Primary,
+                        onClick = {
+                            viewModel.generateShareCode(
+                                packageName = packageName,
+                                gameDisplayName = gameDisplayName,
+                                bundle = bundle,
+                                profile = profile,
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
 
         if (shareCode != null) {
             item {
-                SectionCard(title = "Your tune code") {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                ArsenalPanel(accent = TuneAccent, title = "Your tune code") {
+                    OutlinedTextField(
+                        value = shareCode,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = Color.White,
+                        ),
+                        label = { Text("CSOC2 tune code") },
+                        minLines = 3,
+                        maxLines = 6,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.group),
                     ) {
-                        OutlinedTextField(
-                            value = shareCode,
-                            onValueChange = {},
-                            readOnly = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                color = Color.White,
-                            ),
-                            label = { Text("CSOC2 tune code") },
-                            minLines = 3,
-                            maxLines = 6,
+                        ArsenalButton(
+                            label = "Copy",
+                            accent = TuneAccent,
+                            style = ArsenalButtonStyle.Secondary,
+                            onClick = { onCopy(shareCode) },
+                            modifier = Modifier.weight(1f),
                         )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            ArsenalButton(
-                                label = "Copy",
-                                accent = TuneAccent,
-                                style = ArsenalButtonStyle.Secondary,
-                                onClick = { onCopy(shareCode) },
-                                modifier = Modifier.weight(1f),
-                            )
-                            ArsenalButton(
-                                label = "Share",
-                                accent = AccentBar.Blue,
-                                style = ArsenalButtonStyle.Secondary,
-                                onClick = { onSystemShare(shareCode) },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        Text(
-                            text = "Post this code on Discord or Reddit so others can apply the " +
-                                "exact same settings for $gameDisplayName.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = LabelGray,
+                        ArsenalButton(
+                            label = "Share",
+                            accent = AccentBar.Blue,
+                            style = ArsenalButtonStyle.Secondary,
+                            onClick = { onSystemShare(shareCode) },
+                            modifier = Modifier.weight(1f),
                         )
                     }
+                    Text(
+                        text = "Post this code on Discord or Reddit so others can apply the " +
+                            "exact same settings for $gameDisplayName.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -382,40 +359,32 @@ private fun ImportTab(
     onImportError: (String) -> Unit,
 ) {
     LazyColumn(
-        contentPadding = PaddingValues(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = Spacing.screen),
+        verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
         item {
             ArsenalPanel(accent = TuneAccent, title = "Import a tune code") {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "Paste a CSOC2 game tune code below. " +
-                            "If a sysfs path fails validation we refuse the import and tell you exactly why.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = LabelGray,
-                    )
-
-                    OutlinedTextField(
-                        value = importCode,
-                        onValueChange = onImportCodeChange,
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Paste tune code here") },
-                        textStyle = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            color = Color.White,
-                        ),
-                        placeholder = { Text("CSOC2:…", color = LabelGray) },
-                        minLines = 3,
-                        maxLines = 6,
-                        isError = importState is GameTuneImportState.Error ||
-                            importState is GameTuneImportState.ValidationError,
-                    )
-                }
+                Text(
+                    text = "Paste a CSOC2 game tune code below. " +
+                        "If a sysfs path fails validation we refuse the import and tell you exactly why.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = importCode,
+                    onValueChange = onImportCodeChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Paste tune code here") },
+                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = Color.White,
+                    ),
+                    placeholder = { Text("CSOC2:…", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    minLines = 3,
+                    maxLines = 6,
+                    isError = importState is GameTuneImportState.Error ||
+                        importState is GameTuneImportState.ValidationError,
+                )
             }
         }
 
@@ -511,8 +480,8 @@ private fun CommunityTab(
 
             else -> {
                 LazyColumn(
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(bottom = Spacing.screen),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.item),
                 ) {
                     if (isLoading) {
                         item {
@@ -532,7 +501,7 @@ private fun CommunityTab(
                                 Text(
                                     "Refreshing…",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = LabelGray,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -560,104 +529,93 @@ private fun CommunityTab(
  */
 @Composable
 private fun TunePreviewCard(tune: ShareableGameTune) {
-    SectionCard(title = tune.name) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            if (tune.description.isNotBlank()) {
-                Text(
-                    text = tune.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = LabelGray,
-                )
-                Spacer(Modifier.height(4.dp))
-            }
+    ArsenalPanel(accent = TuneAccent, title = tune.name) {
+        if (tune.description.isNotBlank()) {
+            Text(
+                text = tune.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
-            KvRow(label = "Game", value = tune.gameDisplayName)
-            KvRow(label = "Package", value = tune.packageName)
+        KvRow(label = "Game", value = tune.gameDisplayName)
+        KvRow(label = "Package", value = tune.packageName)
 
-            tune.autoTdpGoal?.let { goal ->
-                KvRow(label = "AutoTDP goal", value = goal.name)
-            }
-            tune.refreshRateHz?.let { hz ->
-                KvRow(label = "Refresh rate", value = "${hz.toInt()} Hz")
-            }
-            tune.fanMode?.let { mode ->
-                KvRow(label = "Fan mode", value = mode.toString())
-            }
-            if (tune.gameBoostOnLaunch) {
-                KvRow(label = "Game Boost on launch", value = "Enabled")
-            }
+        tune.autoTdpGoal?.let { goal ->
+            KvRow(label = "AutoTDP goal", value = goal.name)
+        }
+        tune.refreshRateHz?.let { hz ->
+            KvRow(label = "Refresh rate", value = "${hz.toInt()} Hz")
+        }
+        tune.fanMode?.let { mode ->
+            KvRow(label = "Fan mode", value = mode.toString())
+        }
+        if (tune.gameBoostOnLaunch) {
+            KvRow(label = "Game Boost on launch", value = "Enabled")
+        }
 
-            // Clock caps
-            if (tune.cpuPolicyMaxKhz.isNotEmpty()) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    color = Color.White.copy(alpha = 0.06f),
-                )
-                Text(
-                    text = "CPU max caps",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = LabelGray,
-                        letterSpacing = 0.8.sp,
-                    ),
-                )
-                tune.cpuPolicyMaxKhz.forEach { (policy, khz) ->
-                    KvRow(label = "Policy $policy", value = "${khz / 1000} MHz")
-                }
+        // Clock caps
+        if (tune.cpuPolicyMaxKhz.isNotEmpty()) {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Spacing.dense),
+                color = Color.White.copy(alpha = 0.06f),
+            )
+            Text(
+                text = "CPU max caps",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 0.8.sp,
+            )
+            tune.cpuPolicyMaxKhz.forEach { (policy, khz) ->
+                KvRow(label = "Policy $policy", value = "${khz / 1000} MHz")
             }
-            if (tune.cpuPolicyMinKhz.isNotEmpty()) {
-                Text(
-                    text = "CPU min caps",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = LabelGray,
-                        letterSpacing = 0.8.sp,
-                    ),
-                )
-                tune.cpuPolicyMinKhz.forEach { (policy, khz) ->
-                    KvRow(label = "Policy $policy", value = "${khz / 1000} MHz")
-                }
+        }
+        if (tune.cpuPolicyMinKhz.isNotEmpty()) {
+            Text(
+                text = "CPU min caps",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 0.8.sp,
+            )
+            tune.cpuPolicyMinKhz.forEach { (policy, khz) ->
+                KvRow(label = "Policy $policy", value = "${khz / 1000} MHz")
             }
-            tune.gpuMaxHz?.let { hz ->
-                KvRow(label = "GPU max", value = "${hz / 1_000_000} MHz")
-            }
-            tune.gpuMinHz?.let { hz ->
-                KvRow(label = "GPU min", value = "${hz / 1_000_000} MHz")
-            }
-            tune.gpuGovernor?.let { gov ->
-                KvRow(label = "GPU governor", value = gov)
-            }
+        }
+        tune.gpuMaxHz?.let { hz ->
+            KvRow(label = "GPU max", value = "${hz / 1_000_000} MHz")
+        }
+        tune.gpuMinHz?.let { hz ->
+            KvRow(label = "GPU min", value = "${hz / 1_000_000} MHz")
+        }
+        tune.gpuGovernor?.let { gov ->
+            KvRow(label = "GPU governor", value = gov)
+        }
 
-            // Extra sysfs knobs — shown for transparency so user sees what
-            // paths are being imported (same honesty principle as preset import).
-            if (tune.extraSysfs.isNotEmpty()) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    color = Color.White.copy(alpha = 0.06f),
-                )
-                Text(
-                    text = "Additional knobs",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = LabelGray,
-                        letterSpacing = 0.8.sp,
-                    ),
-                )
-                tune.extraSysfs.forEach { (path, value) ->
-                    KvRow(label = path.substringAfterLast('/'), value = value, explainer = path)
-                }
+        // Extra sysfs knobs — shown for transparency so user sees what
+        // paths are being imported (same honesty principle as preset import).
+        if (tune.extraSysfs.isNotEmpty()) {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Spacing.dense),
+                color = Color.White.copy(alpha = 0.06f),
+            )
+            Text(
+                text = "Additional knobs",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 0.8.sp,
+            )
+            tune.extraSysfs.forEach { (path, value) ->
+                KvRow(label = path.substringAfterLast('/'), value = value, explainer = path)
             }
+        }
 
-            // Device targeting hint
-            tune.targetHandheldKeys?.takeIf { it.isNotEmpty() }?.let { keys ->
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    color = Color.White.copy(alpha = 0.06f),
-                )
-                KvRow(label = "Targets", value = keys.joinToString(", "))
-            }
+        // Device targeting hint
+        tune.targetHandheldKeys?.takeIf { it.isNotEmpty() }?.let { keys ->
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Spacing.dense),
+                color = Color.White.copy(alpha = 0.06f),
+            )
+            KvRow(label = "Targets", value = keys.joinToString(", "))
         }
     }
 }
@@ -671,74 +629,59 @@ private fun CommunityTuneCard(
     onPreviewAndImport: () -> Unit,
 ) {
     ArsenalPanel(accent = TuneAccent) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = tune.gameDisplayName,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
-                        ),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = tune.packageName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = LabelGray,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-
-                IconButton(onClick = onPreviewAndImport) {
-                    Icon(
-                        imageVector = Icons.Outlined.Download,
-                        contentDescription = "Preview & import",
-                        tint = TuneAccent,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-            }
-
-            if (tune.authorHandle.isNotBlank()) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "by ${tune.authorHandle}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = LabelGray.copy(alpha = 0.7f),
+                    text = tune.gameDisplayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-            }
-
-            if (tune.notes.isNotBlank()) {
-                Spacer(Modifier.height(2.dp))
                 Text(
-                    text = tune.notes,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.75f),
-                    maxLines = 3,
+                    text = tune.packageName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-
-            Spacer(Modifier.height(4.dp))
-
-            ArsenalButton(
-                label = "Preview & import",
-                accent = TuneAccent,
-                style = ArsenalButtonStyle.Secondary,
-                onClick = onPreviewAndImport,
-                modifier = Modifier.fillMaxWidth(),
+            IconButton(onClick = onPreviewAndImport) {
+                Icon(
+                    imageVector = Icons.Outlined.Download,
+                    contentDescription = "Preview & import",
+                    tint = TuneAccent,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        if (tune.authorHandle.isNotBlank()) {
+            Text(
+                text = "by ${tune.authorHandle}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (tune.notes.isNotBlank()) {
+            Text(
+                text = tune.notes,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        ArsenalButton(
+            label = "Preview & import",
+            accent = TuneAccent,
+            style = ArsenalButtonStyle.Secondary,
+            onClick = onPreviewAndImport,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }

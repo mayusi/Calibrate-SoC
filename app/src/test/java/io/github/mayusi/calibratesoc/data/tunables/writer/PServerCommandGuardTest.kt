@@ -222,6 +222,30 @@ class PServerCommandGuardTest {
     @Test fun allow_schedtunePreferIdleSandwich() =
         allow(sandwich("/dev/stune/foreground/schedtune.prefer_idle", "1"))
 
+    // UNIT 5 (ADAPTIVE MODE) — the BEYOND-STOCK GPU-OC max_freq write MUST pass.
+    //
+    // The adaptive beyond-stock probe + governor write the GPU devfreq max_freq node with a
+    // value ABOVE the stock ceiling (e.g. 1300 MHz). This is a clean /sys/class/devfreq
+    // max_freq node — the SAME family already allowed for stock writes — so it evaluates to
+    // Allow with NO widening of the guard. These tests LOCK that in: the value being
+    // above-stock is data the guard never inspects (it policies the PATH, not the magnitude),
+    // and the kgsl GPU root path is equally clean. If a future guard change broke this, the
+    // beyond-stock OC feature would silently fail closed.
+    @Test fun allow_beyondStockGpuMaxFreqSandwich_kgsl() =
+        allow(sandwich("/sys/class/kgsl/kgsl-3d0/devfreq/max_freq", "1300000000"))
+    @Test fun allow_beyondStockGpuMaxFreqSandwich_classDevfreq() =
+        allow(sandwich("/sys/class/devfreq/3d00000.qcom,kgsl-3d0/max_freq", "1300000000"))
+    // The 644 variant the GPU devfreq sandwich uses must also pass with an above-stock value.
+    @Test fun allow_beyondStockGpuMaxFreq644Sandwich() = allow(
+        "chmod 644 '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq' && " +
+            "printf %s '1300000000' > '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq'; " +
+            "chmod 444 '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq'",
+    )
+    // Tightness proof: the SAME devfreq directory's bind/unbind sysfs is STILL denied — the
+    // allow is scoped to the leaf tunable family, not the whole devfreq tree.
+    @Test fun deny_gpuDevfreqUnbind() =
+        deny(sandwich("/sys/class/kgsl/kgsl-3d0/devfreq/unbind", "3d00000.qcom,kgsl-3d0"))
+
     // WAVE 3B — root foreground-package reads (RootForegroundReader).
     // The two new dumpsys subjects must pass; all other activity sub-commands
     // and dumpsys window with extra args must be denied (tightness proof below).

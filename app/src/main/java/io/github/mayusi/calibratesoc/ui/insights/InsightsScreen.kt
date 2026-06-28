@@ -108,7 +108,7 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
                 Text(
                     "Cross-session performance rollup — built from real session data only.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -168,7 +168,7 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
                     Text(
                         reason,
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -212,7 +212,7 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
                     Text(
                         "No per-game profile data yet — play a few sessions with different profiles to see which works best.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -283,7 +283,7 @@ private fun SessionReportPanel(report: SessionReport, isLatest: Boolean) {
                 Text(
                     "$dateStr · ${durationMin}min",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF777777),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (isLatest) {
@@ -300,7 +300,7 @@ private fun SessionReportPanel(report: SessionReport, isLatest: Boolean) {
         Text(
             report.verdict,
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFFCCCCCC),
+            color = MaterialTheme.colorScheme.onSurface,
         )
 
         Spacer(Modifier.height(Spacing.dense))

@@ -394,7 +394,7 @@ private fun AutoTdpStatusStrip(state: AutoTdpRunState, onTap: () -> Unit) {
                     Text(
                         detail,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
@@ -467,7 +467,7 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
                     "adb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -489,7 +489,7 @@ private fun HudLauncherCard() {
                 "tap the swap icon to switch between the compact bar and the full panel. The full " +
                 "panel can start AutoTDP and switch its profile right from your game.",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
@@ -527,7 +527,7 @@ private fun HudLauncherCard() {
         Text(
             "TIP: ADD THE \"HUD\" QUICK SETTINGS TILE TO TOGGLE WITHOUT OPENING THE APP.",
             style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF777777),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             letterSpacing = 0.06.sp,
         )
     }
@@ -553,7 +553,7 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
                     Text(
                         "Nothing yet. Open the HUD, tap a chip or a ± stepper, and events show up here.",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -563,7 +563,7 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
                                     dateFmt.format(java.util.Date(entry.timestampMs)),
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF999999),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 Text(
                                     entry.level.name.take(4),
@@ -573,7 +573,7 @@ private fun HudLogsDialog(onDismiss: () -> Unit) {
                                         io.github.mayusi.calibratesoc.ui.overlay.HudEventLog.Level.ACTION -> AccentBar.Emerald
                                         io.github.mayusi.calibratesoc.ui.overlay.HudEventLog.Level.WARN -> AccentBar.Amber
                                         io.github.mayusi.calibratesoc.ui.overlay.HudEventLog.Level.ERROR -> AccentBar.Red
-                                        io.github.mayusi.calibratesoc.ui.overlay.HudEventLog.Level.INFO -> Color(0xFF999999)
+                                        io.github.mayusi.calibratesoc.ui.overlay.HudEventLog.Level.INFO -> AccentBar.Neutral
                                     },
                                 )
                                 Text(entry.message, style = MaterialTheme.typography.bodySmall)
@@ -689,7 +689,7 @@ private fun PerCoreFreqCard(t: Telemetry) {
                 "scaling_cur_freq unreadable",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             return@ArsenalPanel
         }
@@ -711,7 +711,7 @@ private fun PerCoreFreqCard(t: Telemetry) {
 private fun CpuLoadCard(history: List<Telemetry>) {
     ArsenalPanel(accent = AccentBar.Blue, title = "CPU LOAD (%)") {
         if (history.isEmpty() || history.last().perCoreLoadPct.isEmpty()) {
-            Text("WARMING UP…", style = MaterialTheme.typography.labelSmall, color = Color(0xFF999999), letterSpacing = 0.08.sp)
+            Text("WARMING UP…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = 0.08.sp)
             return@ArsenalPanel
         }
 
@@ -728,7 +728,7 @@ private fun CpuLoadCard(history: List<Telemetry>) {
             Text(
                 "PER-CORE (LIVE)",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 letterSpacing = 0.08.sp,
             )
             latestLoads.forEachIndexed { idx, pct ->
@@ -777,7 +777,7 @@ private fun GpuCard(history: List<Telemetry>, latest: Telemetry) {
             Text(
                 "GPU load unreadable on this device",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
             Spacer(Modifier.height(Spacing.group))
@@ -795,7 +795,7 @@ private fun ThermalCard(t: Telemetry) {
             Text(
                 "No thermal zones reachable",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             return@ArsenalPanel
         }
@@ -869,7 +869,7 @@ private fun BatteryEstimateRow(estimate: BatteryEstimate) {
             Text(
                 "Battery time estimate unavailable on this device",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         EstimateBasis.CHARGING -> {
@@ -902,7 +902,7 @@ private fun BatteryEstimateRow(estimate: BatteryEstimate) {
                 Text(
                     "REMAINING",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     letterSpacing = 0.08.sp,
                     modifier = Modifier.padding(bottom = 2.dp),
                 )
@@ -911,7 +911,7 @@ private fun BatteryEstimateRow(estimate: BatteryEstimate) {
                 Text(
                     "$drawLabel at this load · Estimate only — varies with game activity",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF777777),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -933,14 +933,14 @@ private fun SessionRecordingCard(
             "Record FPS, temps, clocks, and power over a play session, then review " +
                 "the timeline to diagnose drops or throttle events.",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (!isRecording) {
             Text(
                 "Note: real in-game FPS is captured only while the HUD is also running. " +
                     "Without the HUD, a session still records temps, clocks, and power.",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF777777),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (isRecording) {
@@ -977,7 +977,7 @@ private fun CpuTimeInStateCard(cap: CapabilityReport) {
         Text(
             "How long each cluster has spent at each clock speed since the last reboot (read-only, no root needed).",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
         cap.cpuTimeInState.forEach { probe ->
@@ -998,7 +998,7 @@ private fun CpuTimeInStateCard(cap: CapabilityReport) {
                 Text(
                     "No data yet — device may not have been under load",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 topEntries.forEach { entry ->
@@ -1028,7 +1028,7 @@ private fun ThermalDetailCard(
         Text(
             "Where your device starts throttling. All data is read-only — no root needed.",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
 
@@ -1037,7 +1037,7 @@ private fun ThermalDetailCard(
             Text(
                 "Trip point data not available on this kernel",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             return@ArsenalPanel
         }
@@ -1073,7 +1073,7 @@ private fun ThermalDetailCard(
                     Text(
                         tp.type,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
@@ -1097,7 +1097,7 @@ private fun DdrBusCard(devices: List<DevfreqDeviceProbe>) {
         Text(
             "DDR and bus interconnect operating frequencies at last probe refresh (read-only, no root).",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
         devices.forEach { dev ->
@@ -1115,7 +1115,7 @@ private fun DdrBusCard(devices: List<DevfreqDeviceProbe>) {
             Text(
                 "gov: ${dev.currentGovernor}",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF777777),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,
             )
             Spacer(Modifier.height(Spacing.dense))
@@ -1132,7 +1132,7 @@ private fun RamCard(t: Telemetry) {
             Text(
                 "/proc/meminfo unreadable",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             return@ArsenalPanel
         }

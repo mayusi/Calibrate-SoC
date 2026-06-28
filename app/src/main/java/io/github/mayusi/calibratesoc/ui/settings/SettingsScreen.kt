@@ -78,6 +78,8 @@ import io.github.mayusi.calibratesoc.data.update.UpdateInfo
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
@@ -178,7 +180,7 @@ fun SettingsScreen(
                 Text(
                     "Accent colour",
                     style = MaterialTheme.typography.labelMedium,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 Row(
@@ -213,7 +215,7 @@ fun SettingsScreen(
                 Text(
                     "Current: ${accentColor.name.lowercase().replaceFirstChar { it.uppercase() }}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -225,7 +227,7 @@ fun SettingsScreen(
                 Text(
                     "Clock speed",
                     style = MaterialTheme.typography.labelMedium,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 SegmentedToggle(
@@ -242,7 +244,7 @@ fun SettingsScreen(
                 Text(
                     "Temperature",
                     style = MaterialTheme.typography.labelMedium,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 SegmentedToggle(
@@ -275,12 +277,15 @@ fun SettingsScreen(
                 Text(
                     "See what changed in this version and review the full update history.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
-                OutlinedButton(onClick = { viewModel.openWhatsNew() }) {
-                    Text("View changelog")
-                }
+                ArsenalButton(
+                    label = "View changelog",
+                    onClick = { viewModel.openWhatsNew() },
+                    style = ArsenalButtonStyle.Secondary,
+                    accent = AccentBar.Neutral,
+                )
             }
         }
 
@@ -338,7 +343,7 @@ fun SettingsScreen(
             ArsenalPanel(accent = tierAccent, title = "PRIVILEGE TIER") {
                 StatusPill(text = tierChip, accent = tierAccent)
                 Spacer(Modifier.height(Spacing.dense))
-                Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = androidx.compose.ui.graphics.Color(0xFF999999))
+                Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
@@ -353,7 +358,7 @@ fun SettingsScreen(
                             "No su binary found. Install Magisk or KernelSU first if you want this tier."
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
                     Switch(
@@ -383,7 +388,7 @@ fun SettingsScreen(
                         "Grant Accessibility access so Calibrate SoC can detect app switches and auto-apply your per-app profiles."
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 OutlinedButton(onClick = {
@@ -421,13 +426,13 @@ fun SettingsScreen(
                     Text(
                         "Captured $date • ${b.tunables.size} tunables recorded.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(Spacing.dense))
                     Text(
                         "Replays every CPU/GPU cap, governor, and vendor key that was set when the app first launched. The actual surfaces restored depend on your current privilege tier — read-only tier will skip kernel writes.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = androidx.compose.ui.graphics.Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(Spacing.dense))
                     OutlinedButton(onClick = { pendingFactoryConfirm = true }) {
@@ -443,7 +448,7 @@ fun SettingsScreen(
                 Text(
                     "Open the full capability report — what the probe found on this device. Includes the Report unknown device share button.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 OutlinedButton(onClick = onOpenDeviceInfo) { Text("Open Device Info") }
@@ -465,7 +470,7 @@ fun SettingsScreen(
                 Text(
                     "Tuned for AYN Thor · Odin 3 · Odin 2, Retroid Pocket 6 · 5, and high-end Android phones.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(onClick = {
                     runCatching {
@@ -530,7 +535,7 @@ private fun UpdatesAndFeedbackCard(
             "Calibrate SoC ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
 
@@ -544,7 +549,7 @@ private fun UpdatesAndFeedbackCard(
                 Text(
                     "Checks GitHub about once a day and shows a banner when a new version is out. Updates never install on their own.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(
@@ -763,7 +768,7 @@ private fun UpdateAvailableCard(
                 Text(
                     formatBytes(info.apkSize),
                     style = MaterialTheme.typography.labelSmall,
-                    color = androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace,
                 )
             }
@@ -792,7 +797,7 @@ private fun UpdateAvailableCard(
 
         // Action button
         if (info.apkUrl != null) {
-            io.github.mayusi.calibratesoc.ui.components.ArsenalButton(
+            ArsenalButton(
                 label = "Update now",
                 onClick = onDownload,
                 accent = AccentBar.Emerald,
@@ -802,13 +807,13 @@ private fun UpdateAvailableCard(
             Text(
                 "This release has no APK download yet.",
                 style = MaterialTheme.typography.bodySmall,
-                color = androidx.compose.ui.graphics.Color(0xFF999999),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            io.github.mayusi.calibratesoc.ui.components.ArsenalButton(
+            ArsenalButton(
                 label = "View on GitHub",
                 onClick = onOpenGitHub,
                 accent = AccentBar.Neutral,
-                style = io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle.Secondary,
+                style = ArsenalButtonStyle.Secondary,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -833,20 +838,20 @@ private fun WhatsNewBanner(
         Text(
             "See what changed in this release.",
             style = MaterialTheme.typography.bodySmall,
-            color = androidx.compose.ui.graphics.Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.group))
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            io.github.mayusi.calibratesoc.ui.components.ArsenalButton(
+            ArsenalButton(
                 label = "See what's new",
                 onClick = onSeeWhatsNew,
                 accent = AccentBar.Emerald,
             )
-            io.github.mayusi.calibratesoc.ui.components.ArsenalButton(
+            ArsenalButton(
                 label = "Dismiss",
                 onClick = onDismiss,
                 accent = AccentBar.Neutral,
-                style = io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle.Secondary,
+                style = ArsenalButtonStyle.Secondary,
             )
         }
     }
@@ -880,7 +885,7 @@ private fun TempAlertsCard(
             "Notifies you when your device gets hot so you can take a break or switch to a cooler profile. " +
                 "Alerts run while monitoring is active — keep the floating HUD on while gaming to be warned in-game.",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         Spacer(Modifier.height(Spacing.group))
@@ -892,7 +897,7 @@ private fun TempAlertsCard(
                     if (enabled) "ON — fires when threshold is crossed" else "OFF",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (enabled) AccentBar.Emerald
-                    else Color(0xFF999999),
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(checked = enabled, onCheckedChange = onToggle)
@@ -928,7 +933,7 @@ private fun TempAlertsCard(
                     Text(
                         "Alert threshold",
                         style = MaterialTheme.typography.labelMedium,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
                         "%.0f%s".format(displayThreshold, unitLabel),
@@ -956,7 +961,7 @@ private fun TempAlertsCard(
                 Text(
                     "Alerts fire when any CPU, GPU, or battery sensor reaches this value.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
                 Spacer(Modifier.height(Spacing.dense))
@@ -965,7 +970,7 @@ private fun TempAlertsCard(
                 Text(
                     "Switch to profile when hot",
                     style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(Spacing.dense))
                 ProfilePickerDropdown(
@@ -980,7 +985,7 @@ private fun TempAlertsCard(
                         "The selected profile will be applied when the alert fires."
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -1063,7 +1068,7 @@ private fun SegmentedToggle(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                     color = if (selected) accentColor
-                    else androidx.compose.ui.graphics.Color(0xFF6B7280),
+                    else AccentBar.Neutral,
                     letterSpacing = 0.06.sp,
                 )
             }
@@ -1146,7 +1151,7 @@ private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                 Text(
                     if (enabled) "ON — risky features unlocked" else "OFF — safe defaults only",
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (enabled) AccentBar.Red else androidx.compose.ui.graphics.Color(0xFF999999),
+                    color = if (enabled) AccentBar.Red else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(
@@ -1166,7 +1171,7 @@ private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                 "can put the device in a bad state if used without root. " +
                 "Anything that happens with experimental features ON is on you, not the app.",
             style = MaterialTheme.typography.bodySmall,
-            color = androidx.compose.ui.graphics.Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
     if (pendingConfirm) {
@@ -1187,7 +1192,7 @@ private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                                 "DO have root and you do something stupid, it's on you — " +
                                 "the app won't stop you.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF999999),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
                         "Type ENABLE below to continue:",
@@ -1237,7 +1242,7 @@ private fun AutoConfigKnownGamesCard(enabled: Boolean, onToggle: (Boolean) -> Un
                 Text(
                     if (enabled) "ON — sets up new games for you" else "OFF — never auto-tunes",
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (enabled) AccentBar.Emerald else Color(0xFF999999),
+                    color = if (enabled) AccentBar.Emerald else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(checked = enabled, onCheckedChange = onToggle)
@@ -1251,7 +1256,7 @@ private fun AutoConfigKnownGamesCard(enabled: Boolean, onToggle: (Boolean) -> Un
                 "setup, and it never overrides tunes you set yourself. Turn this off to " +
                 "stop the app auto-configuring any game.",
             style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -1283,7 +1288,7 @@ private fun SetupChecklistCard() {
         Text(
             "These are the perms + toggles the app needs. Tap any row to open the matching system page.",
             style = MaterialTheme.typography.bodySmall,
-            color = androidx.compose.ui.graphics.Color(0xFF999999),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(Spacing.dense))
         items.forEach { item ->
@@ -1299,26 +1304,26 @@ private fun SetupChecklistCard() {
                     Text(
                         "—",
                         style = MaterialTheme.typography.titleMedium,
-                        color = androidx.compose.ui.graphics.Color(0xFF6B7280),
+                        color = AccentBar.Neutral,
                         modifier = Modifier.padding(end = 12.dp),
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             item.title,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = androidx.compose.ui.graphics.Color(0xFF777777),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
                             "Not available on this device",
                             style = MaterialTheme.typography.labelSmall,
-                            color = androidx.compose.ui.graphics.Color(0xFF6B7280),
+                            color = AccentBar.Neutral,
                         )
                     }
                 } else {
                     Text(
                         if (done) "✓" else "○",
                         style = MaterialTheme.typography.titleMedium,
-                        color = if (done) AccentBar.Emerald else androidx.compose.ui.graphics.Color(0xFF6B7280),
+                        color = if (done) AccentBar.Emerald else AccentBar.Neutral,
                         modifier = Modifier.padding(end = 12.dp),
                     )
                     Column(modifier = Modifier.weight(1f)) {
@@ -1326,7 +1331,7 @@ private fun SetupChecklistCard() {
                         Text(
                             if (done) "Granted" else "Not yet",
                             style = MaterialTheme.typography.labelSmall,
-                            color = androidx.compose.ui.graphics.Color(0xFF999999),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     TextButton(onClick = { item.launch(context) }) {
