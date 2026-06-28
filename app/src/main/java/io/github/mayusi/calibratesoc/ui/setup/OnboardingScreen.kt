@@ -1,5 +1,8 @@
 package io.github.mayusi.calibratesoc.ui.setup
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +22,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BatteryChargingFull
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Check
@@ -26,9 +31,11 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.RemoveCircleOutline
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.outlined.Warning
@@ -57,6 +64,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -834,8 +842,22 @@ private fun AllDoneStep(
                     }
                     Button(
                         onClick = onSetupEverything,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Set up everything") }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Set up everything",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                     OutlinedButton(
                         onClick = onEnterApp,
                         modifier = Modifier.fillMaxWidth(),
@@ -1084,7 +1106,7 @@ private fun GrantsChecklist(grants: AdvancedPermissionsScript.Grants) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             GrantRow(if (grants.dump) GrantState.HELD else GrantState.PENDING, "FPS / gfxinfo (DUMP)")
             GrantRow(if (grants.usageStats) GrantState.HELD else GrantState.PENDING, "Foreground app (Usage access)")
             GrantRow(if (grants.writeSecureSettings) GrantState.HELD else GrantState.PENDING, "Vendor tune keys (Secure settings)")
@@ -1178,8 +1200,23 @@ private fun AdvancedAskStep(
                 if (pserverSysfsLive) {
                     // ONE-CLICK: PServer root is live, so the app can grant itself
                     // EVERYTHING in a single tap — no script, no file picker.
-                    Button(onClick = onAutoSetup, modifier = Modifier.fillMaxWidth()) {
-                        Text("Set up everything")
+                    Button(
+                        onClick = onAutoSetup,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Set up everything",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
                     }
                     OutlinedButton(onClick = onAlreadyLiveContinue, modifier = Modifier.fillMaxWidth()) {
                         Text("Skip — I'm good")
@@ -1397,12 +1434,38 @@ private fun AdvancedSelinuxLastResortStep(
  * Lives next to the UI (not the engine) so wording changes never touch the
  * contract.
  */
-private val SetupItemLabels: List<Pair<AdvancedPermissionsScript.SetupItem, String>> = listOf(
-    AdvancedPermissionsScript.SetupItem.ROOT_PERMS to "In-game FPS & diagnostics (DUMP)",
-    AdvancedPermissionsScript.SetupItem.USAGE_ACCESS to "Foreground detection — per-app profiles (Usage access)",
-    AdvancedPermissionsScript.SetupItem.OVERLAY to "Overlay HUD (Display over other apps)",
-    AdvancedPermissionsScript.SetupItem.BATTERY to "Reliable background running (Battery unrestricted)",
-    AdvancedPermissionsScript.SetupItem.NOTIFICATIONS to "Notifications",
+private data class SetupRowSpec(
+    val item: AdvancedPermissionsScript.SetupItem,
+    val label: String,
+    val icon: ImageVector,
+)
+
+private val SetupItemLabels: List<SetupRowSpec> = listOf(
+    SetupRowSpec(
+        AdvancedPermissionsScript.SetupItem.ROOT_PERMS,
+        "In-game FPS & diagnostics (DUMP)",
+        Icons.Outlined.Speed,
+    ),
+    SetupRowSpec(
+        AdvancedPermissionsScript.SetupItem.USAGE_ACCESS,
+        "Foreground detection — per-app profiles (Usage access)",
+        Icons.Outlined.Apps,
+    ),
+    SetupRowSpec(
+        AdvancedPermissionsScript.SetupItem.OVERLAY,
+        "Overlay HUD (Display over other apps)",
+        Icons.Outlined.Layers,
+    ),
+    SetupRowSpec(
+        AdvancedPermissionsScript.SetupItem.BATTERY,
+        "Reliable background running (Battery unrestricted)",
+        Icons.Outlined.BatteryChargingFull,
+    ),
+    SetupRowSpec(
+        AdvancedPermissionsScript.SetupItem.NOTIFICATIONS,
+        "Notifications",
+        Icons.Outlined.Notifications,
+    ),
 )
 
 /**
@@ -1445,17 +1508,16 @@ private fun AdvancedFullSetupStep(
     ) {
         Column(
             modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             when (val s = fullSetupState) {
                 // ── ALL SET (every item landed per the live readback) ──────────
                 is AdvancedUnlockViewModel.FullSetupState.FullCompleted -> if (s.allGranted) {
-                    AdvCardHeader(Icons.Outlined.CheckCircle, "You're all set 🎉")
-                    Text(
-                        "Calibrate is fully configured — tuning, in-game FPS, the overlay HUD, per-app " +
-                            "profiles, and reliable background running are all enabled.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // Genuine win — a classy celebratory banner (Emerald), not childish.
+                    SetupCelebration(
+                        title = "You're all set",
+                        body = "Calibrate is fully configured — tuning, in-game FPS, the overlay HUD, " +
+                            "per-app profiles, and reliable background running are all enabled.",
                     )
                     SetupChecklist(held = s.held)
                     Button(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
@@ -1494,6 +1556,7 @@ private fun AdvancedFullSetupStep(
                     LinearProgressIndicator(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(6.dp)
                             .clip(CircleShape),
                     )
                     // No held map yet — show the items pending so the user sees what's
@@ -1519,30 +1582,127 @@ private fun AdvancedFullSetupStep(
                     }
                 }
 
-                // ── IDLE — the one clean "set up everything" screen ────────────
+                // ── IDLE — the HERO "set up everything" moment ─────────────────
                 is AdvancedUnlockViewModel.FullSetupState.Idle -> {
-                    AdvCardHeader(Icons.Outlined.Bolt, "Set up Calibrate — one tap")
+                    // Big, confident badge + headline + value line — the "tap this and
+                    // you're done" moment. Bold but cohesive with the Arsenal idiom.
+                    HeroBadge(Icons.Outlined.AutoAwesome)
                     Text(
-                        "Calibrate uses your device's built-in root bridge to grant itself everything it " +
-                            "needs — tuning, in-game FPS, the overlay HUD, per-app profiles, and reliable " +
-                            "background running. No Settings trips, no script.",
+                        "Set up Calibrate in one tap",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "Calibrate uses your device's built-in root bridge to grant itself everything " +
+                            "it needs. No Settings trips, no script, no reboot — just one tap.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     // Preview of what one tap grants — honest, all unchecked until the user taps.
-                    SetupChecklist(held = emptyMap(), liveTuningActive = liveTuningActive)
+                    SetupChecklist(
+                        held = emptyMap(),
+                        liveTuningActive = liveTuningActive,
+                        title = "What you'll get",
+                    )
                     AdvNoteCard(
                         "Safe by design: the app only grants its OWN known permissions. Every root " +
                             "command passes the built-in safety gate, which permits nothing else.",
                     )
-                    Button(onClick = onSetUp, modifier = Modifier.fillMaxWidth()) {
-                        Text("Set up everything")
+                    Button(
+                        onClick = onSetUp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Set up everything",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
                     }
                     OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
                         Text("Not now")
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The HERO icon badge for the one-click setup screen — a large accent-tinted
+ * circle with the app's primary accent. Two concentric tints give it depth
+ * without a heavy gradient (stays cheap to draw on a handheld).
+ */
+@Composable
+private fun HeroBadge(icon: ImageVector) {
+    val accent = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .size(72.dp)
+            .clip(CircleShape)
+            .background(accent.copy(alpha = 0.10f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+    }
+}
+
+/**
+ * A classy "you're all set" celebration banner — an Emerald (tertiary) badge,
+ * a bold title, and a body line. Genuine-win energy without confetti/childish
+ * flair. Only ever shown when the engine's readback confirms everything landed.
+ */
+@Composable
+private fun SetupCelebration(title: String, body: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.CheckCircle,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.size(34.dp),
+            )
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                body,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -1561,42 +1721,122 @@ private fun AdvancedFullSetupStep(
 private fun SetupChecklist(
     held: Map<AdvancedPermissionsScript.SetupItem, Boolean>,
     liveTuningActive: Boolean = false,
+    title: String? = null,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (liveTuningActive) {
-                SetupChecklistRow(done = true, label = "Live tuning (already active on this device)")
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (title != null) {
+                ChecklistHeader(title)
             }
-            for ((item, label) in SetupItemLabels) {
+            if (liveTuningActive) {
+                SetupChecklistRow(
+                    done = true,
+                    label = "Live tuning (already active on this device)",
+                    icon = Icons.Outlined.Bolt,
+                )
+            }
+            for (spec in SetupItemLabels) {
                 // HONEST: ✓ only when the readback says this item is held. Absent key
                 // (Idle preview / Running before readback) → pending, never ✓.
-                SetupChecklistRow(done = held[item] == true, label = label)
+                SetupChecklistRow(
+                    done = held[spec.item] == true,
+                    label = spec.label,
+                    icon = spec.icon,
+                )
             }
         }
     }
 }
 
-/** One honest checklist row — ✓ (held) or ○ (pending). Mirrors the real held map. */
+/** A small accent-keyed header for the checklist card (Arsenal section idiom). */
 @Composable
-private fun SetupChecklistRow(done: Boolean, label: String) {
+private fun ChecklistHeader(title: String) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(
-            if (done) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-            contentDescription = if (done) "Granted" else "Pending",
-            tint = if (done) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline,
-            modifier = Modifier.size(20.dp),
+        Box(
+            modifier = Modifier
+                .size(width = 3.dp, height = 14.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
         )
+        Text(
+            title.uppercase(),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * One honest checklist row — pending shows the item's own icon in an outlined
+ * circle; granted flips to an Emerald (tertiary) check with a subtle pop. The
+ * tint, text colour, and a small scale animate so each ✓ ticking in feels alive.
+ * HONESTY: [done] mirrors the real held map; nothing here can fake a ✓.
+ */
+@Composable
+private fun SetupChecklistRow(done: Boolean, label: String, icon: ImageVector) {
+    val iconTint by animateColorAsState(
+        targetValue = if (done) MaterialTheme.colorScheme.tertiary
+            else MaterialTheme.colorScheme.outline,
+        animationSpec = tween(durationMillis = 280),
+        label = "checklistIconTint",
+    )
+    val textColor by animateColorAsState(
+        targetValue = if (done) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = tween(durationMillis = 280),
+        label = "checklistTextColor",
+    )
+    // A gentle pop the moment a row flips to granted — tasteful, not gaudy.
+    val pop by animateFloatAsState(
+        targetValue = if (done) 1f else 0.9f,
+        animationSpec = tween(durationMillis = 220),
+        label = "checklistPop",
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier.size(28.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (done) {
+                Icon(
+                    Icons.Outlined.CheckCircle,
+                    contentDescription = "Granted",
+                    tint = iconTint,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .scale(pop),
+                )
+            } else {
+                // Pending: the item's own icon, muted, inside a hollow ring.
+                Icon(
+                    Icons.Outlined.RadioButtonUnchecked,
+                    contentDescription = "Pending",
+                    tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    modifier = Modifier.size(28.dp),
+                )
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+        }
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium,
-            color = if (done) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = if (done) FontWeight.Medium else FontWeight.Normal,
+            color = textColor,
         )
     }
 }
