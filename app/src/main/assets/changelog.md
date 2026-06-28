@@ -1,3 +1,22 @@
+## [0.2.0-alpha] — 2026-06-28
+
+The big one. Adaptive AutoTDP that learns your games, four new features, and a top-to-bottom quality pass.
+
+### Adaptive AutoTDP — better everything
+- **It learns your games.** AutoTDP now remembers each game's safe sustained clock and when it tends to throttle, pre-sets a good starting point, and heads off throttling *before* it happens — and gets smarter the more you play. (Cold start is unchanged; it only acts once it has real data.)
+- **Snappier and steadier.** Reacts in one tick to real heat/throttle, stays calm on noise (no hunting), and can never collapse your clocks in a single step.
+- **Better decisions.** Uses real GPU load, true per-core load, accurate temps, real battery draw, and a real (non-linear) power model instead of rough estimates. Fixes games that used to get throttled to battery-saver mid-session.
+- **New goal modes:** hold a **temperature ceiling**, hold an **FPS floor** (lowest power that keeps your target frame rate), or **target a battery runtime** ("make it last 3 hours"). AUTO now also adapts to charging/battery level.
+
+### New features
+- **"Best for this game" — one tap.** The app shows the profile *your own sessions* proved best for the game you're about to play (with the evidence: avg FPS, throttles, session count) and applies it in one tap.
+- **Per-game history.** Real graphs of how a game's FPS, temps, power, and load changed across your sessions, plus an honest "this tune saved ~X% battery" headline.
+- **Shareable game-tunes.** Share a whole game setup (profile + AutoTDP goal + refresh rate + fan + boost) as one code — and browse community tunes for your device. Every imported tune is validated before anything is applied.
+- **Battery & Thermal Intelligence panel.** Live "how long will this last," a "°C until throttle" headroom gauge, and a one-tap efficiency win.
+
+### Under the hood
+- Removed dead code, de-duplicated fan/units/capability logic, and tightened the codebase. 2579 tests passing.
+
 ## [0.1.37-alpha] — 2026-06-28
 
 One-tap setup, smarter automation, real power-user controls, and a serious safety + security pass.
