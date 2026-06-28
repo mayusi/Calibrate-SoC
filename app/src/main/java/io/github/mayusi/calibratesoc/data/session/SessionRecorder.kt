@@ -225,8 +225,11 @@ class SessionRecorder @Inject constructor(
         val summary = computeSessionSummary(capturedSamples)
         val fpsAvailable = capturedSamples.any { it.fps != null }
 
-        // Best-effort: try to capture the foreground app label.
-        val appLabel = runCatching { resolveAppLabel() }.getOrNull()
+        // Best-effort: try to capture the foreground app label and package name.
+        // resolveAppLabelAndPackage() returns both in one UsageStats query so we
+        // don't pay for two permission checks or two event scans.
+        val (appLabel, packageName) = runCatching { resolveAppLabelAndPackage() }
+            .getOrDefault(Pair(null, null))
 
         // Best-effort: last-applied tune preset.
         val profileName = runCatching {
@@ -238,6 +241,7 @@ class SessionRecorder @Inject constructor(
             startedAtMs = startedAtMs,
             durationMs = durationMs,
             appLabel = appLabel,
+            packageName = packageName,
             profileName = profileName,
             samples = capturedSamples,
             summary = summary,
@@ -249,17 +253,22 @@ class SessionRecorder @Inject constructor(
     }
 
     /**
-     * Best-effort foreground app name lookup via UsageStatsManager.
-     * Returns null gracefully when PACKAGE_USAGE_STATS is not granted.
+     * Best-effort foreground app lookup via UsageStatsManager.
+     * Returns a Pair of (appLabel, packageName); either component may be null.
+     * Both values come from a single permission check + single event scan so
+     * we don't duplicate the UsageStats work.
+     *
+     * Returns Pair(null, null) gracefully when PACKAGE_USAGE_STATS is not granted
+     * or no foreground app (other than ourselves) was found in the last 60 s.
      */
-    private fun resolveAppLabel(): String? {
+    private fun resolveAppLabelAndPackage(): Pair<String?, String?> {
         val um = context.getSystemService(android.content.Context.USAGE_STATS_SERVICE)
-            as? android.app.usage.UsageStatsManager ?: return null
+            as? android.app.usage.UsageStatsManager ?: return Pair(null, null)
         if (context.packageManager.checkPermission(
                 android.Manifest.permission.PACKAGE_USAGE_STATS,
                 context.packageName,
             ) != PackageManager.PERMISSION_GRANTED
-        ) return null
+        ) return Pair(null, null)
 
         val now = System.currentTimeMillis()
         val events = um.queryEvents(now - 60_000L, now)
@@ -270,12 +279,14 @@ class SessionRecorder @Inject constructor(
                 lastPkg = ev.packageName
             }
         }
-        val pkg = lastPkg?.takeIf { it != context.packageName } ?: return null
-        return runCatching {
+        val pkg = lastPkg?.takeIf { it != context.packageName }
+            ?: return Pair(null, null)
+        val label = runCatching {
             context.packageManager.getApplicationLabel(
                 context.packageManager.getApplicationInfo(pkg, 0),
             ).toString()
         }.getOrNull()
+        return Pair(label, pkg)
     }
 
     companion object {

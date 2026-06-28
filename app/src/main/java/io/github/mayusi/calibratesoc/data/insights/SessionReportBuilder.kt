@@ -86,6 +86,7 @@ object SessionReportBuilder {
             startedAtMs = session.startedAtMs,
             durationMs = session.durationMs,
             appLabel = session.appLabel,
+            packageName = session.packageName,
             profileName = session.profileName,
             avgFps = avgFps,
             peakFps = peakFps,

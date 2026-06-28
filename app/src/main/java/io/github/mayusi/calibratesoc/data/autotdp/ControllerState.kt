@@ -80,6 +80,21 @@ data class ControllerState(
     val classifier: ClassifierState = ClassifierState.INITIAL,
     val fan: FanGovernorState = FanGovernorState.INITIAL,
     val tick: Long = 0L,
+    // ── Unit 1 (per-game learning) carried flags ────────────────
+    /**
+     * UNIT 1 (per-game learning): true once the learned cap has been applied as the
+     * STARTING operating point this session. Seeding happens ONCE (the first tick a
+     * seed is present); this latch makes it idempotent so the reactive controller owns
+     * the cap from then on. Default false (cold start).
+     */
+    val learnedSeedApplied: Boolean = false,
+    /**
+     * UNIT 1 (per-game learning): true once the ONE proactive thermal tighten has fired
+     * for the current learned-onset window. Gates the proactive arm to fire AT MOST once
+     * per session near 0.85 × the learned onset; the normal band controller loosens it
+     * back. Default false.
+     */
+    val proactivePreemptArmed: Boolean = false,
 ) {
 
     /**

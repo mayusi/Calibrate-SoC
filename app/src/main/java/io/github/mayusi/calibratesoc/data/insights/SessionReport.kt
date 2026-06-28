@@ -29,6 +29,12 @@ data class SessionReport(
     val durationMs: Long,
     /** Foreground app label (may be null when PACKAGE_USAGE_STATS was not granted). */
     val appLabel: String?,
+    /**
+     * Foreground app package name at session end (e.g. "com.rp.retroarch").
+     * Null when PACKAGE_USAGE_STATS was not granted or no foreground app was detected.
+     * This is the stable key used for per-game learned params; [appLabel] is display-only.
+     */
+    val packageName: String?,
     /** Last-applied tune profile name (null when no preset was ever applied). */
     val profileName: String?,
 

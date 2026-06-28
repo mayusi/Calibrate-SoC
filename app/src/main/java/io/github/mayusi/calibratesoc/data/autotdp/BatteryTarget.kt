@@ -84,6 +84,15 @@ object BatteryTarget {
         currentDrawMw: Long,
         caps: TdpCaps,
         drawCurve: Map<Int, Long> = emptyMap(),
+        /**
+         * Unit 3: optional fitted [PowerModel.FitResult] from this session's measured
+         * (cap, draw) pairs. When non-null the OPP→draw mapping uses the non-linear
+         * draw ∝ f^n model instead of the linear heuristic, giving a more accurate
+         * runtime estimate on real DVFS curves. When null (< 2 measured points yet)
+         * the original linear proxy is used, unchanged. [drawCurve] takes priority
+         * when non-empty (measured sweep is the gold standard).
+         */
+        powerModelFit: PowerModel.FitResult? = null,
     ): BatteryTargetResult {
         require(targetHours > 0) { "targetHours must be > 0, got $targetHours" }
 
@@ -122,13 +131,23 @@ object BatteryTarget {
                     .maxOrNull()
             }
             else -> {
-                // Heuristic linear proxy: power fraction ∝ freq fraction of top OPP.
-                // Find the highest cap whose heuristic draw fraction <= budget fraction.
+                // Unit 3: prefer PowerModel fit (non-linear draw ∝ f^n) when available.
+                // Falls back to the original linear heuristic when powerModelFit is null.
+                // drawCurve (measured sweep) takes priority above — only reaches here when empty.
                 val topKhz = steps.last().toDouble()
                 steps
                     .filter { capKhz ->
-                        val fraction = capKhz / topKhz
-                        val estimatedDrawMw = (fraction * currentDrawMw).toLong()
+                        val estimatedDrawMw: Long = if (powerModelFit != null) {
+                            PowerModel.estimateDrawMilliW(
+                                capKhz = capKhz,
+                                fitResult = powerModelFit,
+                                referenceCapKhz = steps.last(),
+                                referenceDrawMilliW = currentDrawMw,
+                            )?.drawMilliW ?: ((capKhz / topKhz) * currentDrawMw).toLong()
+                        } else {
+                            // Original linear proxy — unchanged behaviour when no fit.
+                            ((capKhz / topKhz) * currentDrawMw).toLong()
+                        }
                         estimatedDrawMw <= budgetMw
                     }
                     .maxOrNull()

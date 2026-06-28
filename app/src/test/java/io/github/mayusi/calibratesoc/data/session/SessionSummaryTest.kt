@@ -252,6 +252,7 @@ class SessionSummaryTest {
                 startedAtMs = i.toLong() * 1_000L,
                 durationMs = 60_000L,
                 appLabel = null,
+                packageName = null,
                 profileName = null,
                 samples = emptyList(),
                 summary = computeSessionSummary(emptyList()),

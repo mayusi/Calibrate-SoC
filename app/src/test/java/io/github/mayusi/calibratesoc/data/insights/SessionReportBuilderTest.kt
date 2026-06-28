@@ -57,6 +57,7 @@ class SessionReportBuilderTest {
         startedAtMs = 1_000_000L,
         durationMs = durationMs,
         appLabel = appLabel,
+        packageName = null,
         profileName = profileName,
         samples = samples,
         summary = computeSessionSummary(samples),

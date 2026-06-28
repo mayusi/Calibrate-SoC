@@ -10,6 +10,7 @@ import dagger.hilt.components.SingletonComponent
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchDatabase
 import io.github.mayusi.calibratesoc.data.benchmark.db.BenchRunDao
 import io.github.mayusi.calibratesoc.data.benchmark.db.StabilityRunDao
+import io.github.mayusi.calibratesoc.data.insights.db.LearnedGameParamsDao
 import io.github.mayusi.calibratesoc.data.insights.db.SessionReportDao
 import io.github.mayusi.calibratesoc.data.scorelog.ExternalScoreDao
 import io.github.mayusi.calibratesoc.data.session.SessionDao
@@ -80,10 +81,12 @@ object AppModule {
     @Singleton
     fun provideBenchDatabase(@ApplicationContext context: Context): BenchDatabase =
         Room.databaseBuilder(context, BenchDatabase::class.java, "bench_history.db")
-            // Destructive migrations are fine for v1 — benchmark history
-            // is a user-facing convenience, not load-bearing data. If
-            // we ever ship a schema change, the next launch resets the
-            // history rather than crashing.
+            // v9→v10: additive migration — adds packageName columns to existing
+            // tables and creates the learned_game_params table. No data loss.
+            .addMigrations(BenchDatabase.MIGRATION_9_10)
+            // Destructive fallback covers any version older than v9 (pre-production).
+            // Combined with the explicit migration above, v9 devices get the additive
+            // path; anything older gets wiped (convenience data only).
             .fallbackToDestructiveMigration()
             .build()
 
@@ -101,6 +104,10 @@ object AppModule {
 
     @Provides
     fun provideSessionReportDao(db: BenchDatabase): SessionReportDao = db.sessionReportDao()
+
+    @Provides
+    fun provideLearnedGameParamsDao(db: BenchDatabase): LearnedGameParamsDao =
+        db.learnedGameParamsDao()
 
     /** Production Base64 encoder backed by android.util.Base64. */
     @Provides

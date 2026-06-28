@@ -24,6 +24,12 @@ data class SessionEntity(
     val startedAtMs: Long,
     val durationMs: Long,
     val appLabel: String?,
+    /**
+     * Foreground app package name at session end (e.g. "com.rp.retroarch").
+     * Nullable — absent on rows written before v10 (additive column, default null).
+     * This is the stable machine-readable key used for per-game learned params.
+     */
+    val packageName: String?,
     val profileName: String?,
     // Denormalised summary
     val avgFps: Float?,
@@ -52,6 +58,7 @@ data class SessionEntity(
             startedAtMs = startedAtMs,
             durationMs = durationMs,
             appLabel = appLabel,
+            packageName = packageName,
             profileName = profileName,
             samples = samples,
             summary = summary,
@@ -67,6 +74,7 @@ data class SessionEntity(
                 startedAtMs = session.startedAtMs,
                 durationMs = session.durationMs,
                 appLabel = session.appLabel,
+                packageName = session.packageName,
                 profileName = session.profileName,
                 avgFps = summary.avgFps,
                 minFps = summary.minFps,

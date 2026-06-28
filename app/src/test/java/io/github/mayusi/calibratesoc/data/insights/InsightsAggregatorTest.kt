@@ -40,6 +40,7 @@ class InsightsAggregatorTest {
         startedAtMs = startedAtMs,
         durationMs = durationMs,
         appLabel = appLabel,
+        packageName = null,
         profileName = profileName,
         avgFps = avgFps,
         peakFps = avgFps?.let { it + 5f },

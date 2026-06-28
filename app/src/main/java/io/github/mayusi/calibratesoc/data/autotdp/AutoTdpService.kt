@@ -94,8 +94,36 @@ class AutoTdpService : Service() {
     /** Used to stop Game Boost cleanly when AutoTDP starts while Boost owns clocks. */
     @Inject lateinit var gameBoostController: io.github.mayusi.calibratesoc.data.boost.GameBoostController
 
+    /**
+     * UNIT 1 (PER-GAME LEARNING): the per-package learned-parameter store. Read ONCE at
+     * session start to seed the controller; written ONCE at session end (off the tick
+     * thread) with the EWMA ratchet. SAFETY: a learned seed only sets the STARTING cap --
+     * thermal pre-empt / kill / the 40% floor / NonCancellable revert all still run.
+     */
+    @Inject lateinit var learnedGameModel: LearnedGameModel
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var loopJob: Job? = null
+
+    /**
+     * UNIT 1: the foreground game package resolved at session start (best-effort via
+     * UsageStats). Null when usage access is denied / no game in foreground -- then the
+     * session neither seeds nor learns (cold start, no fabrication).
+     */
+    @Volatile private var sessionPackage: String? = null
+
+    /**
+     * UNIT 1: the lightweight per-session stats accumulator. Built fresh at daemon start,
+     * fed once per tick, converted to a [SessionOutcome] at session end. @Volatile because
+     * the session-end write may run on a different coroutine than the tick loop.
+     */
+    @Volatile private var sessionStats: SessionStatsAccumulator? = null
+
+    /**
+     * UNIT 1: the big-cluster OPP table resolved at session start, captured so the
+     * session-end learning write can pass it for the OPP-snap + 40% floor clamp on store.
+     */
+    @Volatile private var sessionOppStepsKhz: List<Int> = emptyList()
 
     /** Battery read-out to approximate low-battery detection. */
     private var batteryManager: android.os.BatteryManager? = null
@@ -162,6 +190,9 @@ class AutoTdpService : Service() {
      * onTaskRemoved / the finally — whichever ran first wins; the rest are no-ops.
      */
     override fun onDestroy() {
+        // Idempotent clear of the cross-app coexistence sentinel — covers the case where the
+        // process is torn down without an orderly stopDaemon (e.g. system kill).
+        clearActiveMarker()
         val report = sessionReport
         val revertHandle = revert
         val perfHandle = perfDaemons
@@ -191,6 +222,8 @@ class AutoTdpService : Service() {
      * away mid-session could leave the cap pinned (DEFECT B's sibling path). Idempotent.
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
+        // Idempotent clear of the cross-app coexistence sentinel on swipe-away.
+        clearActiveMarker()
         val report = sessionReport
         val revertHandle = revert
         val perfHandle = perfDaemons
@@ -216,6 +249,14 @@ class AutoTdpService : Service() {
     private fun startDaemon(config: AutoTdpProfileConfig) {
         if (loopJob?.isActive == true) return // already running
 
+        // CROSS-APP COEXISTENCE SIGNAL: write the "AutoTDP is active" sentinel so other
+        // perf tools (notably Nova/GameNative, which can pin the CPU governor to
+        // `performance` and would otherwise fight AutoTDP's TDP capping) can detect that
+        // AutoTDP owns the CPU right now and DEFER. The marker lives in our own private
+        // files dir; a peer with root (the same PServer bridge AutoTDP uses) reads it via
+        // `cat`. Deleted on every stop path (stopDaemon / onDestroy / onTaskRemoved).
+        writeActiveMarker()
+
         // GUARDRAIL 2: a fresh, single-session revert latch. Reset the session report so
         // a stop before capabilities resolve has nothing stale to revert against.
         sessionReport = null
@@ -225,6 +266,12 @@ class AutoTdpService : Service() {
         // here as a no-op (empty daemons) so a stop before capabilities resolve has a
         // valid handle whose restore is a safe no-op.
         perfDaemons = PerfDaemonController(pServerWriter, tunableWriter, emptyList())
+
+        // UNIT 1 (PER-GAME LEARNING): fresh per-session learning state. Reset here so a
+        // new session never carries stale stats from a prior run. The package + OPP table
+        // are resolved on the IO thread inside runDaemon.
+        sessionPackage = null
+        sessionStats = SessionStatsAccumulator()
 
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -387,6 +434,21 @@ class AutoTdpService : Service() {
         // them (it never shows a fabricated number).
         sampler.runOnce()
 
+        // UNIT 1 (PER-GAME LEARNING): resolve package + read the learned seed ONCE here,
+        // before the loop. Cold start (null package, no row, or sessionCount < 2) -> seed
+        // == null -> the engine behaves EXACTLY as today. The seed only sets the STARTING
+        // cap; thermal pre-empt / kill / the 40% floor all still run from tick 1.
+        val resolvedPkg = runCatching { resolveForegroundPackage() }.getOrNull()
+        sessionPackage = resolvedPkg
+        sessionOppStepsKhz = caps.bigClusterOppStepsKhz
+        val learnedSeed: LearnedSeed? = runCatching {
+            learnedGameModel.seedFor(resolvedPkg, caps.bigClusterOppStepsKhz)
+        }.getOrNull()
+        if (learnedSeed != null) {
+            Log.i(TAG, "Per-game seed for $resolvedPkg: cap=${learnedSeed.safeSustainedCapKhz} " +
+                "onset=${learnedSeed.throttleOnsetSec}s (${learnedSeed.sessionCount} sessions)")
+        }
+
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
@@ -410,6 +472,20 @@ class AutoTdpService : Service() {
         // start/stop cycles).
         var controllerState = ControllerState.INITIAL
 
+        // ── UNIT 2: ADAPTIVE TICK CADENCE (decimate to honour nextTickHintMs) ──────
+        // The shared MonitorService stream stays a fixed 1 Hz (process-shared with the HUD
+        // — we never speed it up or spawn a thread). Instead the daemon DECIMATES: the
+        // engine REQUESTS a re-eval cadence on TdpDecision.nextTickHintMs (500 ms warming,
+        // 1000 ms calm) and we only run the (relatively expensive) engine decision + sysfs
+        // writes for a sample when at least that much wall-clock has elapsed since the last
+        // processed tick. SAFETY: the per-tick thermal/battery KILL checks below run on
+        // EVERY 1 Hz sample and are NEVER decimated — only the tune/apply work is gated.
+        // The hint is clamped to ADAPTIVE_TICK_FLOOR_MS (500 ms) so we can never process
+        // faster than 2 Hz, and the calm default (1000 ms) keeps today's exact 1 Hz cadence.
+        // lastDecisionAtMs = 0 forces the FIRST sample to process immediately (no stall).
+        var nextTickHintMs = AutoTdpEngine.CALM_TICK_MS_DEFAULT
+        var lastDecisionAtMs = 0L
+
         try {
             monitorService.telemetry(MonitorService.DEFAULT_INTERVAL_MS).collect { sample ->
                 // Roll the window.
@@ -430,11 +506,34 @@ class AutoTdpService : Service() {
                     return@collect
                 }
 
+                // ── UNIT 2: ADAPTIVE-CADENCE DECIMATION GATE ───────────────────
+                // Honour the engine's nextTickHintMs by skipping the tune/apply work for
+                // samples that arrive sooner than the requested cadence (clamped to the
+                // 500 ms floor). The window is already rolled and the safety kills above
+                // have already run (NEVER skipped) — only the engine decision + sysfs writes
+                // are decimated. A calm 1 Hz hint on the 1 Hz stream processes every sample
+                // (today's behaviour); a warming 500 ms hint also processes every sample (the
+                // 1 Hz stream never out-runs the floor). A future calm hint > 1000 ms would
+                // skip intervening samples here to save battery. lastDecisionAtMs starts at 0
+                // so the first sample always processes.
+                val sampleMs = sample.timestampMs
+                val effectiveHintMs =
+                    nextTickHintMs.coerceAtLeast(AutoTdpEngine.ADAPTIVE_TICK_FLOOR_MS).toLong()
+                if (lastDecisionAtMs != 0L && (sampleMs - lastDecisionAtMs) < effectiveHintMs) {
+                    return@collect // decimated this tick — re-eval cadence not yet elapsed
+                }
+                lastDecisionAtMs = sampleMs
+
                 // ── Engine decision ────────────────────────────────────────────
                 // Thread the PERSISTED controllerState in, and pass the Smart goal as
                 // goalOverride so the new 5-mode goal / AUTO actually reaches the
                 // engine. config.goal == null ⇒ goalOverride == null ⇒ decide() maps
                 // the legacy profile internally (today's behaviour, unchanged).
+                // UNIT 1: thread the learned seed + the session clock so the engine can
+                // seed the starting cap ONCE and arm the proactive pre-empt near
+                // 0.85 x the learned onset. Both inert when seed == null (cold start).
+                val sessionElapsedSec =
+                    ((sample.timestampMs - sessionStartEpochMs) / 1000L).toInt().coerceAtLeast(0)
                 val decision = AutoTdpEngine.decide(
                     window = window.toList(),
                     config = config,
@@ -442,12 +541,20 @@ class AutoTdpService : Service() {
                     current = currentState,
                     controllerState = controllerState,
                     goalOverride = config.goal,
+                    seed = learnedSeed,
+                    sessionElapsedSec = sessionElapsedSec,
                 )
                 // PERSIST: carry the engine's threaded state into the NEXT tick. This
                 // single reassignment is what keeps EWMA smoothing, the cross-actuator
                 // cool-down, the direction-episode confirm counters, the active lever,
                 // the fan governor, and the classifier hysteresis ALIVE across ticks.
                 controllerState = decision.controllerState
+
+                // UNIT 2: adopt the engine's requested re-eval cadence for the NEXT tick.
+                // Null (legacy / no-telemetry early return) → keep the calm 1 Hz default,
+                // preserving today's exact behaviour. The decimation gate above re-clamps to
+                // the 500 ms floor every tick, so a bad hint can never speed past 2 Hz.
+                nextTickHintMs = decision.nextTickHintMs ?: AutoTdpEngine.CALM_TICK_MS_DEFAULT
 
                 // ── Honest-baseline grace gate ─────────────────────────────────
                 // For the first BASELINE_GRACE_MS after RUNNING, hold at STOCK so the
@@ -551,6 +658,21 @@ class AutoTdpService : Service() {
                     decision.reason
                 }
                 Log.v(TAG, "decision: $displayReason")
+
+                // UNIT 1 (PER-GAME LEARNING): feed the session-stats accumulator. Cheap
+                // per-tick fold (a few scalar writes): the converged cap, the first steady-
+                // state pre-empt (for the learned onset), the band center, and the real-FPS
+                // roll. Never touches the device -- the learning WRITE happens at session end.
+                sessionStats?.onTick(
+                    elapsedSec = sessionElapsedSec,
+                    inBaselineGrace = inBaselineGrace,
+                    appliedCapKhz = currentState.bigClusterCapKhz,
+                    reason = decision.reason,
+                    bandCenterPct = decision.resolvedGoal.let {
+                        (it.gpuBandLowPct + it.gpuBandHighPct) / 2
+                    },
+                    realFpsX10 = sample.realFpsX10.takeIf { sample.isRealFps },
+                )
 
                 // ── Proof-of-effect wiring ─────────────────────────────────────
                 // HEARTBEAT: record wall-clock of this applied tick.
@@ -658,9 +780,34 @@ class AutoTdpService : Service() {
             // ── WAVE 3a: release clock ownership (un-suppresses the throttle guard). ──
             // No-op if a later owner (Game Boost) already took over — release() checks.
             arbiter.release(io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.AUTO_TDP)
+            // UNIT 1 (PER-GAME LEARNING): persist this session learned params AFTER the
+            // safety-critical revert/perfd/arbiter work so a learning write can never delay
+            // or interfere with reverting to stock. NonCancellable + runCatching inside;
+            // idempotent per session (latched).
+            persistLearnedParams()
             // Update notification if service is still technically alive
             updateNotification(status = "Stopped", detail = "All writes reverted")
         }
+    }
+
+    /**
+     * UNIT 1 (PER-GAME LEARNING): fold this session accumulated outcome into the learned
+     * params store, exactly once per session. Safe on every exit path: NonCancellable so the
+     * suspend DAO write completes even though the enclosing finally rides the cancelled
+     * loopJob; runCatching so a DAO failure can NEVER delay the revert; latched on
+     * [sessionStats] so concurrent exits write at most once; no-op when the package is
+     * unknown or no stats accrued (cold start -- nothing learned).
+     */
+    private suspend fun persistLearnedParams() {
+        val stats = sessionStats ?: return
+        sessionStats = null // latch: at most one learning write per session
+        val pkg = sessionPackage ?: return
+        val outcome = stats.toOutcome(oppStepsKhz = sessionOppStepsKhz) ?: return
+        runCatching {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                learnedGameModel.updateAfterSession(pkg, outcome, System.currentTimeMillis())
+            }
+        }.onFailure { Log.w(TAG, "persistLearnedParams failed (non-fatal)", it) }
     }
 
     /**
@@ -737,6 +884,9 @@ class AutoTdpService : Service() {
                 writeFailure = writeFailure,
             )
         )
+        // Clear the cross-app coexistence sentinel immediately on the stop request — the
+        // daemon is no longer the CPU owner from this instant, so a peer (Nova) can resume.
+        clearActiveMarker()
         val report = sessionReport
         val revertHandle = revert
         val perfHandle = perfDaemons
@@ -894,12 +1044,160 @@ class AutoTdpService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
 
+    // ── Cross-app coexistence sentinel ─────────────────────────────────────────
+
+    /**
+     * Create the "AutoTDP is active" marker file in our private files dir, containing
+     * THIS process's PID. The PID makes the marker LIVENESS-VERIFIABLE by a peer: a hard
+     * kill (`am force-stop`) or a crash tears down the process WITHOUT running our orderly
+     * stop paths, so the marker file is left behind stale. A peer that only checked
+     * file-existence would then defer forever. By writing our PID, a peer can confirm the
+     * process is still alive (`/proc/<pid>` exists and is CalibrateSoC) before deferring,
+     * and treat a dead-PID marker as "not active". Best-effort; a failure only means a peer
+     * can't auto-detect us this session (it falls back to applying — the documented
+     * behaviour for an old/unsignalled AutoTDP).
+     */
+    private fun writeActiveMarker() {
+        runCatching {
+            java.io.File(filesDir, AUTOTDP_ACTIVE_MARKER).writeText(
+                android.os.Process.myPid().toString(),
+            )
+        }.onFailure { Log.w(TAG, "writeActiveMarker failed (non-fatal)", it) }
+    }
+
+    /** Delete the active marker. Idempotent — a no-op if it was never created. */
+    private fun clearActiveMarker() {
+        runCatching {
+            val f = java.io.File(filesDir, AUTOTDP_ACTIVE_MARKER)
+            if (f.exists()) f.delete()
+        }.onFailure { Log.w(TAG, "clearActiveMarker failed (non-fatal)", it) }
+    }
+
+    // ── UNIT 1 (PER-GAME LEARNING): foreground package resolver + stats accumulator ──
+
+    /**
+     * Best-effort foreground game package via UsageStatsManager — the SAME source
+     * [io.github.mayusi.calibratesoc.data.session.SessionRecorder] uses, so the learned
+     * key matches the recorded-session key. Returns null when PACKAGE_USAGE_STATS is not
+     * granted or no foreground app (other than ourselves) was seen in the last 60 s —
+     * then the session neither seeds nor learns (cold start, no fabrication).
+     */
+    private fun resolveForegroundPackage(): String? {
+        val um = getSystemService(Context.USAGE_STATS_SERVICE)
+            as? android.app.usage.UsageStatsManager ?: return null
+        if (packageManager.checkPermission(
+                android.Manifest.permission.PACKAGE_USAGE_STATS,
+                packageName,
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return null
+        val now = System.currentTimeMillis()
+        val events = um.queryEvents(now - 60_000L, now)
+        val ev = android.app.usage.UsageEvents.Event()
+        var lastPkg: String? = null
+        while (events.getNextEvent(ev)) {
+            if (ev.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) {
+                lastPkg = ev.packageName
+            }
+        }
+        return lastPkg?.takeIf { it != packageName }
+    }
+
+    /**
+     * UNIT 1: the lightweight per-session stats accumulator. Fed once per processed tick
+     * (a handful of scalar writes — no allocation, no device I/O) and converted to a
+     * [SessionOutcome] at session end.
+     *
+     * Honesty / safety choices baked in here:
+     *  - Only STEADY-STATE ticks count (after the honest-baseline grace), so the warm-up
+     *    cap walk never looks like a throttle event.
+     *  - Only a REAL thermal pre-empt ("thermal pre-empt …") marks the session as throttled
+     *    and records the onset. The PROACTIVE pre-empt ("proactive pre-empt …") is the
+     *    engine acting on what we already learned — counting it would create a runaway
+     *    ratchet-down feedback loop, so it is deliberately ignored for learning.
+     *  - convergedCap = the LAST applied steady-state cap (where the controller settled).
+     *  - avgFpsHeldTarget is computed ONLY from real SurfaceFlinger FPS; with no real FPS
+     *    the session is treated as NOT-clean (never ratchet the cap UP on an unverified run).
+     */
+    private class SessionStatsAccumulator {
+        private var sawSteadyState = false
+        private var lastSteadyCapKhz: Int? = null
+        private var preemptFired = false
+        private var firstPreemptSec: Int? = null
+        private var lastBandCenterPct: Int? = null
+        // Real-FPS roll (steady state only).
+        private var fpsSum = 0L
+        private var fpsCount = 0
+        private var fpsPeakX10 = 0
+
+        fun onTick(
+            elapsedSec: Int,
+            inBaselineGrace: Boolean,
+            appliedCapKhz: Int?,
+            reason: String,
+            bandCenterPct: Int,
+            realFpsX10: Int?,
+        ) {
+            if (inBaselineGrace) return // warm-up ticks never count toward learning
+            sawSteadyState = true
+            lastSteadyCapKhz = appliedCapKhz
+            lastBandCenterPct = bandCenterPct
+            // A REAL thermal pre-empt (NOT the proactive one) marks the throttle onset.
+            if (!preemptFired &&
+                reason.startsWith("thermal pre-empt", ignoreCase = true)
+            ) {
+                preemptFired = true
+                firstPreemptSec = elapsedSec
+            }
+            if (realFpsX10 != null && realFpsX10 > 0) {
+                fpsSum += realFpsX10
+                fpsCount++
+                if (realFpsX10 > fpsPeakX10) fpsPeakX10 = realFpsX10
+            }
+        }
+
+        /**
+         * Convert to a [SessionOutcome], or null when no steady-state tick ever ran (the
+         * session was too short / all warm-up) — then there is nothing to learn and the
+         * caller skips the write. avgFpsHeldTarget: real FPS averaged at/above 90% of this
+         * session's own observed peak (a smooth run held its frame-rate); false when no real
+         * FPS was measured, so a clean-run cap ratchet-up only ever happens on a verified run.
+         */
+        fun toOutcome(oppStepsKhz: List<Int>): SessionOutcome? {
+            if (!sawSteadyState) return null
+            val avgHeld = if (fpsCount > 0 && fpsPeakX10 > 0) {
+                val avg = fpsSum.toDouble() / fpsCount
+                avg >= 0.90 * fpsPeakX10
+            } else {
+                false // no real FPS → not verified clean
+            }
+            return SessionOutcome(
+                preemptFiredInSteadyState = preemptFired,
+                avgFpsHeldTarget = avgHeld,
+                convergedCapKhz = lastSteadyCapKhz,
+                observedOnsetSec = firstPreemptSec,
+                observedBandCenterPct = lastBandCenterPct,
+                oppStepsKhz = oppStepsKhz,
+            )
+        }
+    }
+
     // ── Companions ────────────────────────────────────────────────────────────
 
     companion object {
         private const val TAG = "AutoTdpService"
         private const val NOTIFICATION_ID = 5511
         private const val CHANNEL_ID = "autotdp"
+
+        /**
+         * Cross-app coexistence sentinel filename, written into this service's private
+         * files dir (with our PID) while the daemon is active and deleted on every stop
+         * path. A peer perf tool with root (e.g. Nova/GameNative, via its PServer bridge)
+         * reads `/data/data/<our-pkg>/files/autotdp_active.marker`, verifies the PID is a
+         * live CalibrateSoC process, and defers so the two never fight over CPU clock
+         * control. The filename is part of the cross-app contract — do not rename without
+         * updating the peer reader.
+         */
+        const val AUTOTDP_ACTIVE_MARKER = "autotdp_active.marker"
 
         /** Rolling telemetry window depth (matches design spec: ~4 samples). */
         private const val WINDOW_SIZE = 4

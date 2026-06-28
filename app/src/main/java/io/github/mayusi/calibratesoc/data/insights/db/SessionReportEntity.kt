@@ -26,6 +26,12 @@ data class SessionReportEntity(
     val startedAtMs: Long,
     val durationMs: Long,
     val appLabel: String?,
+    /**
+     * Foreground app package name at session end (e.g. "com.rp.retroarch").
+     * Nullable — null on rows written before schema v10 (additive column).
+     * Stable machine-readable key for per-game learned params.
+     */
+    val packageName: String?,
     val profileName: String?,
 
     // FPS
@@ -53,6 +59,7 @@ data class SessionReportEntity(
         startedAtMs = startedAtMs,
         durationMs = durationMs,
         appLabel = appLabel,
+        packageName = packageName,
         profileName = profileName,
         avgFps = avgFps,
         peakFps = peakFps,
@@ -73,6 +80,7 @@ data class SessionReportEntity(
             startedAtMs = report.startedAtMs,
             durationMs = report.durationMs,
             appLabel = report.appLabel,
+            packageName = report.packageName,
             profileName = report.profileName,
             avgFps = report.avgFps,
             peakFps = report.peakFps,

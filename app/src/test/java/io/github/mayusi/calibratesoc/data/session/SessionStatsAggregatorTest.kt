@@ -50,6 +50,7 @@ class SessionStatsAggregatorTest {
             startedAtMs = id * 1_000L,
             durationMs = durationMs,
             appLabel = appLabel,
+            packageName = null,
             profileName = null,
             samples = samples,
             summary = summary,

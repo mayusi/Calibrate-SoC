@@ -1,7 +1,10 @@
 package io.github.mayusi.calibratesoc.data.autotdp
 
+import io.github.mayusi.calibratesoc.data.monitor.CpuLoadReading
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
+import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.monitor.hasTrueLoadData
+import io.github.mayusi.calibratesoc.data.thermal.CapFloor
 
 /**
  * The Smart-AutoTDP decision brain — a GOAL-GATED UTILIZATION-BAND CONTROLLER with
@@ -87,6 +90,47 @@ object AutoTdpEngine {
     private const val LOOSEN_CONFIRM_TICKS = 1
     private const val TIGHTEN_CONFIRM_TICKS = 2
 
+    // ── UNIT 2: control-loop responsiveness & stability (Axis 2) ─────────────────
+    // Asymmetric reaction: fast DOWN on a genuine thermal/throttle signal, slow on
+    // band-only noise. The dead-band / hysteresis below the kill stays as-is; this only
+    // SPLITS the tighten confirm gate by urgency. SAFETY: every new clamp is a
+    // strictly-safer ADDITIONAL upper bound; none bypasses [enforceInvariants] or the
+    // 105°C thermal kill (which still force-reverts, untouched, BELOW this layer).
+
+    /** FAST tighten regime: a genuine thermal/throttle signal acts THIS tick (no confirm). */
+    private const val TIGHTEN_CONFIRM_TICKS_FAST = 0
+
+    /** dTemp slope (°C/s) at/above which a band tighten is URGENT (die heating fast). */
+    private const val FAST_TIGHTEN_DTEMP_C_PER_S = 2.0
+
+    /** "Die within N°C of soft" window that also makes a band tighten urgent. */
+    private const val FAST_TIGHTEN_NEAR_SOFT_C = 3
+
+    /**
+     * RATE-LIMITED multi-OPP swing (384 MHz-collapse guard). A single tick may step the
+     * big cap DOWN by at most this many OPPs. ADDITIONAL upper bound applied BEFORE
+     * [enforceInvariants] (which only ever RAISES the cap toward the 40% hard floor) — it
+     * never bypasses any invariant, and the 105°C KILL is a separate force-revert path.
+     */
+    private const val MAX_CAP_STEP_PER_TICK = 2
+
+    // ── Adaptive tick cadence (cheap, allocation-light — one Int on the decision) ──
+    /** Default (calm) re-eval cadence: the existing 1 Hz. */
+    private const val CALM_TICK_MS = 1000
+    /** Faster (warming) re-eval cadence requested via [TdpDecision.nextTickHintMs]. */
+    private const val FAST_TICK_MS = 500
+    /**
+     * Service-facing mirrors (same module). [AutoTdpService] seeds its decimation cadence
+     * from [CALM_TICK_MS_DEFAULT] and clamps every honoured hint to [ADAPTIVE_TICK_FLOOR_MS]
+     * — the hard 500 ms floor that keeps the loop from ever re-evaluating faster than 2 Hz.
+     */
+    internal const val CALM_TICK_MS_DEFAULT = CALM_TICK_MS
+    internal const val ADAPTIVE_TICK_FLOOR_MS = FAST_TICK_MS
+    /** dTemp slope (°C/s) at/above which the engine REQUESTS the faster re-eval tick. */
+    private const val WARM_DTEMP_C_PER_S = 1.0
+    /** "Within N°C of soft" window that also requests the [FAST_TICK_MS] cadence. */
+    private const val NEAR_SOFT_FAST_TICK_C = 5
+
     // ── uclamp (top-app perf hint) constants — 0..1024 LAW ──────────────────────
     /** uclamp.min lower bound (no boost). */
     private const val UCLAMP_MIN = 0
@@ -159,6 +203,9 @@ object AutoTdpEngine {
         current: TdpState,
         controllerState: ControllerState = ControllerState.INITIAL,
         goalOverride: GoalProfile? = null,
+        // ── UNIT 1 (per-game learning) — both default null => cold-start identical ──
+        seed: LearnedSeed? = null,
+        sessionElapsedSec: Int? = null,
     ): TdpDecision {
         if (window.isEmpty()) {
             // No window ⇒ no classification possible. Echo the requested goal as-is
@@ -194,12 +241,39 @@ object AutoTdpEngine {
         // across ticks. (The direction handlers each re-apply classifier = state too;
         // they inherit the EWMA values from baseState.) [tick] is advanced once per
         // decision so the fan governor's rate-limit window counts real ticks.
-        val baseState = controllerState.copy(
+        val baseState0 = controllerState.copy(
             classifier = classification.state,
             gpuEwma = signals.gpuEwmaRaw,
             dTempSlopeEwma = signals.dTempSlopeRaw ?: controllerState.dTempSlopeEwma,
             tick = controllerState.tick + 1,
         )
+
+        // ── UNIT 1 (PER-GAME LEARNING): seed start cap + proactive pre-empt ────────
+        // Additive + SAFETY-SUBORDINATE. Both inert when seed == null (cold start) so
+        // behaviour is byte-identical to today. The seed only sets the STARTING cap; the
+        // proactive arm can only TIGHTEN and is skipped whenever the real thermal pre-empt
+        // is active (live heat always wins). 40% floor + reactive controller + thermal
+        // kill all still run from tick 1. We SHADOW current/baseState so the unchanged
+        // band/pre-empt when-block below transparently sees the seeded start state.
+        val (current, baseState) = seedFromLearned(seed, current, caps, baseState0)
+        // H-4 (honesty): on the tick the seed is FIRST applied, surface a LEARNED note in
+        // the decision reason (modeled-not-measured — the UI shows a "LEARNED (n sessions)"
+        // tier distinct from MEASURED). Null on every other tick → reason unchanged.
+        val seedNote: String? = if (seed != null &&
+            !baseState0.learnedSeedApplied && baseState.learnedSeedApplied) {
+            "seeded from learned cap (${seed.sessionCount} sessions)"
+        } else null
+        if (!signals.thermalPreempt(activeGoal)) {
+            val proactive = maybeProactivePreempt(
+                seed, sessionElapsedSec, current, caps, config, activeGoal,
+                signals, baseState, classification,
+            )
+            if (proactive != null) {
+                // UNIT 2: stamp the adaptive cadence hint on the proactive-pre-empt path too.
+                return applyFanGovernor(proactive, caps, activeGoal, signals)
+                    .copy(resolvedGoal = activeGoal, nextTickHintMs = nextTickHint(signals, activeGoal))
+            }
+        }
 
         // ── 1. THERMAL PRE-EMPT (highest priority, exempt from one-lever) ────────
         val raw = when {
@@ -245,7 +319,16 @@ object AutoTdpEngine {
         // followed (AUTO → the classifier's choice) onto the returned decision so the
         // daemon can surface activeGoal to the HUD without re-deriving it. Purely
         // informational — does not affect target/reason/controllerState.
-        return applyFanGovernor(raw, caps, activeGoal, signals).copy(resolvedGoal = activeGoal)
+        // UNIT 2 — ADAPTIVE CADENCE: stamp the re-eval hint for the NEXT tick (warming →
+        // 500 ms, calm → 1000 ms). The daemon honours it with a 500 ms floor; the field
+        // defaults to null on the no-telemetry early-return path so default behaviour holds.
+        val finalDecision = applyFanGovernor(raw, caps, activeGoal, signals)
+            .copy(resolvedGoal = activeGoal, nextTickHintMs = nextTickHint(signals, activeGoal))
+        return if (seedNote != null) {
+            finalDecision.copy(reason = "${finalDecision.reason} [$seedNote]")
+        } else {
+            finalDecision
+        }
     }
 
     /**
@@ -288,6 +371,147 @@ object AutoTdpEngine {
     private data class Band(val low: Int, val high: Int)
 
     private fun bandFor(goal: GoalProfile) = Band(goal.gpuBandLowPct, goal.gpuBandHighPct)
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  UNIT 1 — PER-GAME LEARNING (seed start cap + proactive pre-empt)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * The fraction of the learned throttle-onset time at which the ONE proactive
+     * tighten arms — fire BEFORE the die reaches soft temp so the device never has to
+     * actually throttle for a game whose onset we've learned. 0.85 leaves a small margin
+     * of error below the historical onset.
+     */
+    private const val PROACTIVE_ONSET_FRACTION = 0.85
+
+    /**
+     * Upper bound (× learned onset) past which the proactive arm is no longer eligible.
+     * If we somehow blew past the onset window without arming (e.g. the session clock
+     * jumped), do NOT fire a stale proactive tighten — the live reactive controller +
+     * thermal pre-empt own that regime. Keeps the proactive arm a tight one-shot.
+     */
+    private const val PROACTIVE_ONSET_UPPER_FRACTION = 1.10
+
+    /**
+     * UNIT 1: seed the STARTING big-cluster cap from the learned [seed], ONCE per session.
+     *
+     * Returns the (possibly re-capped) [current] state and the (possibly latched) [base]
+     * controller state. When seeding does not apply — no seed, no learned cap, or the
+     * seed was already applied this session ([ControllerState.learnedSeedApplied]) — both
+     * are returned UNCHANGED, so a cold start (seed == null) is byte-identical to today.
+     *
+     * SAFETY: the seed cap is snapped to a REAL OPP and clamped to the 40% hard floor via
+     * [CapFloor.snapCapToOpp]; if it lands at/above the top OPP the cap is cleared to null
+     * (stock — "no cap needed"). The result is passed through [enforceInvariants] so MM-1
+     * / MM-2 / the CAP-FLOOR invariant all hold on the seeded state. The seed ONLY sets
+     * the starting operating point — it skips the slow reactive walk-down but can never
+     * push below the floor or disable any live safety path (pre-empt / kill run from tick 1).
+     */
+    private fun seedFromLearned(
+        seed: LearnedSeed?,
+        current: TdpState,
+        caps: TdpCaps,
+        base: ControllerState,
+    ): Pair<TdpState, ControllerState> {
+        if (seed == null || base.learnedSeedApplied) return current to base
+        val learnedCap = seed.safeSustainedCapKhz ?: return current to base
+        val steps = caps.bigClusterOppStepsKhz
+        if (steps.isEmpty()) {
+            // No OPP table to snap to — refuse to seed an off-table cap; latch so we
+            // don't retry every tick. The reactive controller proceeds from stock.
+            return current to base.copy(learnedSeedApplied = true)
+        }
+        // Snap to a real OPP AND raise to the 40% hard floor (SAFETY). A value at/above
+        // the top OPP means "no cap" -> clear to null (never hold a redundant top-OPP cap).
+        val snapped = CapFloor.snapCapToOpp(learnedCap, steps)
+        val topOpp = steps.last()
+        val seededCap: Int? = if (snapped >= topOpp) null else snapped
+        // Only re-seed the cap lever; leave every other actuator at its current value so
+        // the seed sets the operating POINT, not a whole tuned state.
+        val seededState = enforceInvariants(
+            current.copy(bigClusterCapKhz = seededCap),
+            caps,
+            // Goal is irrelevant to the cap-floor/MM invariants we rely on here; pass the
+            // DEFAULT so ACT-2 (park/uclamp) leaves the untouched actuators alone.
+            GoalProfile.DEFAULT,
+        )
+        return seededState to base.copy(learnedSeedApplied = true)
+    }
+
+    /**
+     * UNIT 1: the ONE proactive thermal tighten, armed near 0.85 × the learned onset.
+     *
+     * Returns a [TdpDecision] that steps the big-cluster cap DOWN one notch (never below
+     * the 40% hard floor) BEFORE the die reaches soft temp, or null when not eligible.
+     *
+     * Eligibility (ALL required):
+     *   - a learned [LearnedSeed.throttleOnsetSec] exists (we know WHEN this game throttles),
+     *   - a session clock ([sessionElapsedSec]) is available,
+     *   - the proactive arm has not already fired this session ([proactivePreemptArmed]),
+     *   - the session clock is within the arm window:
+     *     0.85 × onset <= elapsed <= 1.10 × onset (a tight one-shot, never stale).
+     *
+     * The caller already guarantees the live thermal pre-empt is NOT active this tick
+     * (genuine heat takes the real pre-empt path), so this only ever fires PROACTIVELY.
+     * It can ONLY TIGHTEN (one cap notch); the normal band controller loosens it back
+     * over subsequent ticks if the workload turns out not to need it. The latch makes it
+     * fire at most once per onset window.
+     */
+    private fun maybeProactivePreempt(
+        seed: LearnedSeed?,
+        sessionElapsedSec: Int?,
+        current: TdpState,
+        caps: TdpCaps,
+        config: AutoTdpProfileConfig,
+        goal: GoalProfile,
+        signals: WindowSignals,
+        base: ControllerState,
+        classification: ClassificationResult,
+    ): TdpDecision? {
+        val onset = seed?.throttleOnsetSec ?: return null
+        val elapsed = sessionElapsedSec ?: return null
+        if (base.proactivePreemptArmed) return null
+        if (onset <= 0) return null
+        val armAt = onset * PROACTIVE_ONSET_FRACTION
+        val armUntil = onset * PROACTIVE_ONSET_UPPER_FRACTION
+        if (elapsed < armAt || elapsed > armUntil) return null
+
+        // ONE cap notch down, respecting the budget floor (hard-ceiling goals) AND the
+        // 40% hard floor inside stepCapDown. If the cap can't move (already at/below the
+        // effective floor) we still latch the arm so we don't re-evaluate every tick.
+        val capFloorKhz: Int? = if (goal.hasHardPowerCeiling) {
+            deriveBudgetCap(caps, config.targetMilliWatts ?: 0)
+        } else null
+        val stepped = stepCapDown(current.bigClusterCapKhz, caps, capFloorKhz)
+        val next = enforceInvariants(
+            if (stepped.changed) current.copy(bigClusterCapKhz = stepped.cap) else current,
+            caps,
+            goal,
+        )
+        val acted = next != current
+        // Latch the arm (one-shot) and record a tighten so the next loosen still honours
+        // the cross-actuator cool-down — mirrors preemptTighten's bookkeeping.
+        val newState = base.copy(
+            classifier = classification.state,
+            proactivePreemptArmed = true,
+            currentDirection = Direction.TIGHTEN,
+            confirmTicks = TIGHTEN_CONFIRM_TICKS,
+            quietTicks = 0,
+            lastActedDirection = Direction.TIGHTEN,
+            activeLever = null,
+        )
+        val note = if (acted) {
+            "proactive: learned onset ~${onset}s — tighten early (cap -> ${next.bigClusterCapKhz?.div(1000)} MHz)"
+        } else {
+            "proactive: learned onset ~${onset}s — already at floor"
+        }
+        return TdpDecision(
+            next,
+            reason("proactive pre-empt -> tighten", goal, note),
+            HoldReason.GPU_BOUND_CAPPING,
+            newState,
+        )
+    }
 
     // ════════════════════════════════════════════════════════════════════════════
     //  DIRECTION HANDLERS
@@ -455,8 +679,17 @@ object AutoTdpEngine {
         base: ControllerState,
         classification: ClassificationResult,
     ): TdpDecision {
+        // UNIT 2 — ASYMMETRIC REACTION: a tighten driven by a genuine thermal/throttle
+        // signal acts THIS tick (FAST, 0 confirm); a band-only tighten on calm thermals
+        // keeps the 2-tick confirm so noisy GPU% can never hunt the cap. LOOSEN is
+        // untouched (still 1 confirm) — the asymmetry is fast-down / slow-up.
+        val urgency = classifyTightenUrgency(signals, goal)
+        val confirmTarget = when (urgency) {
+            TightenUrgency.FAST -> TIGHTEN_CONFIRM_TICKS_FAST
+            TightenUrgency.BAND -> TIGHTEN_CONFIRM_TICKS
+        }
         val confirm = base.advanceConfirm(Direction.TIGHTEN)
-        if (confirm.confirmTicks < TIGHTEN_CONFIRM_TICKS) {
+        if (confirm.confirmTicks < confirmTarget) {
             return hold(
                 current, goal, signals, confirm, classification,
                 HoldReason.IDLE_HOLDING,
@@ -474,7 +707,14 @@ object AutoTdpEngine {
         }
 
         val (next0, leverNote, lever) = applyTightenLever(current, caps, config, goal, base.activeLever)
-        val next = enforceInvariants(next0, caps, goal)
+        // UNIT 2 — RATE-LIMITED multi-OPP swing: clamp the cap so it falls by at most
+        // MAX_CAP_STEP_PER_TICK OPPs this tick. Strictly-safer ADDITIONAL upper bound — it
+        // can only RAISE the post-lever cap back up, never push it lower — applied BEFORE
+        // enforceInvariants (which then applies the 40% hard floor on top). The current band
+        // path only steps one OPP, so this is defence-in-depth against any future lever
+        // computing a larger jump; the 105°C kill path is separate + unaffected.
+        val rateLimited = clampCapStep(from = current, to = next0, caps = caps)
+        val next = enforceInvariants(rateLimited, caps, goal)
         val acted = next != current
         val newState = base
             .copy(classifier = classification.state)
@@ -595,6 +835,84 @@ object AutoTdpEngine {
             }
         }
         return Triple(current, "at tighten floor (nothing left to tighten)", Lever.CAP)
+    }
+
+    // ── UNIT 2: tighten urgency (asymmetric fast-down) ───────────────────────────
+
+    /**
+     * How urgently a band TIGHTEN should land. [FAST] = a genuine thermal/throttle signal,
+     * act THIS tick (no confirm) — reacting to real heat in 1 tick is the point; the
+     * multi-tick confirm exists only to ride out band-only GPU% noise, which a hot /
+     * fast-heating / kernel-throttling die is NOT. [BAND] = a band-only tighten on calm
+     * thermals — keep the conservative 2-tick confirm so noisy GPU% can never hunt the cap.
+     */
+    private enum class TightenUrgency { FAST, BAND }
+
+    /**
+     * Split a band tighten into FAST (thermal/throttle) vs BAND (calm GPU%). FAST fires on
+     * ANY (OR) of the genuine heat/throttle signals, all strictly BELOW the 105°C kill
+     * (a separate force-revert path never replaced here):
+     *   1. smoothed die ≥ soft − [FAST_TIGHTEN_NEAR_SOFT_C] (essentially at soft);
+     *   2. dTemp slope ≥ [FAST_TIGHTEN_DTEMP_C_PER_S] °C/s (heating fast); OR
+     *   3. any cooling_device cur_state > 0 (kernel throttling NOW).
+     * This NEVER originates a tighten — the band edge (gpu < band.low) already decided to
+     * tighten; urgency only chooses the confirm CADENCE (1 tick vs 2).
+     *
+     * NOTE: the design also lists "realFps < goal floor" as a 4th FAST trigger, but the
+     * existing contract consumes real FPS ONLY as a DON'T-tighten floor (ContextClassifier
+     * §4) and no concrete per-goal FPS floor exists. Wiring an FPS-driven FAST tighten would
+     * invert that documented semantic and invent a number, so it is deliberately deferred —
+     * the three thermal/throttle arms are the unambiguous, SAFETY-preserving urgency signals.
+     * Allocation-light: pure scalars, no collections.
+     */
+    private fun classifyTightenUrgency(signals: WindowSignals, goal: GoalProfile): TightenUrgency {
+        val soft = goal.softDieTempC
+        val die = signals.smoothedDieTempC
+        val nearSoft = die != null && die >= soft - FAST_TIGHTEN_NEAR_SOFT_C
+        val heatingFast = signals.dTempSlopeCPerS?.let { it >= FAST_TIGHTEN_DTEMP_C_PER_S } ?: false
+        val throttlingNow = (signals.coolingMaxState ?: 0) > 0
+        return if (nearSoft || heatingFast || throttlingNow) TightenUrgency.FAST else TightenUrgency.BAND
+    }
+
+    /**
+     * UNIT 2 — RATE-LIMITED multi-OPP swing. Clamp [to]'s big cap so it falls by at most
+     * [MAX_CAP_STEP_PER_TICK] OPP steps below [from]'s cap this tick. One-directional UPPER
+     * bound: it can only RAISE a too-low proposed cap back up, never lower a cap — strictly
+     * safer, never bypasses the CAP-FLOOR / MM / thermal-kill invariants (those run AFTER in
+     * [enforceInvariants] and on the kill path). Returns [to] unchanged when the cap rose,
+     * held, or fell by ≤ the limit, or when the OPP table is degenerate. Allocation-light:
+     * OPP-index integer arithmetic only.
+     */
+    private fun clampCapStep(from: TdpState, to: TdpState, caps: TdpCaps): TdpState {
+        val steps = caps.bigClusterOppStepsKhz
+        if (steps.size < 2) return to
+        val fromIdx = capIndex(from.bigClusterCapKhz, steps)
+        val toIdx = capIndex(to.bigClusterCapKhz, steps)
+        val fall = fromIdx - toIdx // > 0 ⇒ the cap dropped this many OPPs
+        if (fall <= MAX_CAP_STEP_PER_TICK) return to // rose, held, or within the per-tick limit
+        val clampedIdx = (fromIdx - MAX_CAP_STEP_PER_TICK).coerceIn(0, steps.lastIndex)
+        return to.copy(bigClusterCapKhz = steps[clampedIdx])
+    }
+
+    // ── UNIT 2: adaptive tick cadence ────────────────────────────────────────────
+
+    /**
+     * The re-eval cadence (ms) the engine REQUESTS for the NEXT tick, surfaced on
+     * [TdpDecision.nextTickHintMs]. The daemon honours it by gating how often it processes
+     * the 1 Hz telemetry stream (with a hard [FAST_TICK_MS] floor) — no new threads, no
+     * faster polling; the shared MonitorService stays 1 Hz.
+     *   - WARMING → [FAST_TICK_MS]: die heating (slope ≥ [WARM_DTEMP_C_PER_S]) OR within
+     *     [NEAR_SOFT_FAST_TICK_C] of the goal's soft target. React sooner.
+     *   - CALM → [CALM_TICK_MS] (the default 1 Hz).
+     * Allocation-light: pure scalar comparisons returning one Int. SAFETY: floored at
+     * [FAST_TICK_MS] so the cadence can never request faster than 2 Hz (battery safety).
+     */
+    private fun nextTickHint(signals: WindowSignals, goal: GoalProfile): Int {
+        val die = signals.smoothedDieTempC
+        val slope = signals.dTempSlopeCPerS
+        val heating = slope != null && slope >= WARM_DTEMP_C_PER_S
+        val nearSoft = die != null && die >= goal.softDieTempC - NEAR_SOFT_FAST_TICK_C
+        return if (heating || nearSoft) FAST_TICK_MS else CALM_TICK_MS
     }
 
     // ── HOLD ─────────────────────────────────────────────────────────────────────
@@ -1378,4 +1696,10 @@ data class TdpDecision(
     val holdReason: HoldReason = HoldReason.NO_TELEMETRY,
     val controllerState: ControllerState = ControllerState.INITIAL,
     val resolvedGoal: GoalProfile = GoalProfile.DEFAULT,
+    /**
+     * Hint to the daemon for how long to wait before the next tick (ms).
+     * Null = use the current fixed cadence unchanged (default behavior preserved).
+     * UNIT 2 (adaptive cadence) fills this field; the daemon clamps it to a 500 ms floor.
+     */
+    val nextTickHintMs: Int? = null,
 )
