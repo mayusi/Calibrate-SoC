@@ -43,6 +43,12 @@ object InsightsAggregator {
      *   rate across ≥ [MIN_SESSIONS_FOR_PROFILE_RANK] sessions. Empty map when
      *   no app has enough data.
      *
+     * [bestProfilePerPackage] — same ranking logic but keyed by packageName
+     *   for reliable cross-session lookup (packageName is the stable key;
+     *   appLabel can differ across installs). Empty map when no package has
+     *   enough data. Used by the Dashboard recommendation card and
+     *   [GameRecommender].
+     *
      * [insufficientDataReason] — set to a human-readable string when the
      *   entire input has too little data to produce any meaningful rollup
      *   (e.g. "Only 1 session recorded — play more to see trends.").
@@ -52,6 +58,7 @@ object InsightsAggregator {
         val batterySavedThisWeekMwh: Double?,
         val tempTrendCPerSession: Double?,
         val bestProfilePerApp: Map<String, BestProfileEntry>,
+        val bestProfilePerPackage: Map<String, BestProfileByPackage>,
         val insufficientDataReason: String?,
     )
 
@@ -66,6 +73,27 @@ object InsightsAggregator {
      */
     data class BestProfileEntry(
         val appLabel: String,
+        val profileName: String,
+        val avgFps: Float?,
+        val avgThrottleEventsPerSession: Double,
+        val sessionCount: Int,
+    )
+
+    /**
+     * The profile that produced the best measured performance for one package.
+     *
+     * [packageName] is the stable Android package name (the lookup key).
+     * [appLabel] is the most-recent non-null display label for this package
+     *   (carry-forward for display; may be null when never recorded).
+     * [profileName] is the profile/preset name that won the ranking.
+     * [avgFps] is the mean FPS across sessions for this (pkg, profile) pair
+     *   where FPS was available. Null when none had FPS data.
+     * [avgThrottleEventsPerSession] is the mean throttle count — lower is better.
+     * [sessionCount] is how many sessions contributed to this entry.
+     */
+    data class BestProfileByPackage(
+        val packageName: String,
+        val appLabel: String?,
         val profileName: String,
         val avgFps: Float?,
         val avgThrottleEventsPerSession: Double,
@@ -88,6 +116,7 @@ object InsightsAggregator {
                 batterySavedThisWeekMwh = null,
                 tempTrendCPerSession = null,
                 bestProfilePerApp = emptyMap(),
+                bestProfilePerPackage = emptyMap(),
                 insufficientDataReason = "No sessions recorded yet — start a session to see insights.",
             )
         }
@@ -100,9 +129,13 @@ object InsightsAggregator {
         // ── Temp trend (simple first-difference slope) ──────────────────────
         val tempTrendCPerSession: Double? = computeTempTrend(allReports)
 
-        // ── Best profile per app ────────────────────────────────────────────
+        // ── Best profile per app (label-keyed, existing behaviour) ───────────
         val bestProfilePerApp: Map<String, BestProfileEntry> =
             computeBestProfilePerApp(allReports)
+
+        // ── Best profile per package (package-keyed, new) ────────────────────
+        val bestProfilePerPackage: Map<String, BestProfileByPackage> =
+            computeBestProfilePerPackage(allReports)
 
         // ── Insufficiency note ─────────────────────────────────────────────
         val insufficientDataReason: String? = when {
@@ -117,6 +150,7 @@ object InsightsAggregator {
             batterySavedThisWeekMwh = batterySavedThisWeekMwh,
             tempTrendCPerSession = tempTrendCPerSession,
             bestProfilePerApp = bestProfilePerApp,
+            bestProfilePerPackage = bestProfilePerPackage,
             insufficientDataReason = insufficientDataReason,
         )
     }
@@ -189,28 +223,107 @@ object InsightsAggregator {
         val byApp: Map<String, BestProfileEntry> = candidates
             .groupBy { it.appLabel }
             .mapValues { (_, entries) ->
-                entries.maxWithOrNull(profileComparator)!!
+                entries.maxWithOrNull(profileComparatorEntry)!!
             }
 
         return byApp
     }
 
     /**
-     * Comparator: higher avgFps wins (null FPS ranks last), then lower throttle rate.
+     * For each package, find which profile delivered the highest sustained average
+     * FPS (primary) and lowest throttle-events-per-session (tiebreaker).
+     * Uses the same ranking logic as [computeBestProfilePerApp] but groups by
+     * [SessionReport.packageName] instead of [SessionReport.appLabel].
+     *
+     * Only considers reports where packageName != null && profileName != null.
+     * A (packageName, profileName) pair must have ≥ [MIN_SESSIONS_FOR_PROFILE_RANK]
+     * sessions before it qualifies for ranking.
+     *
+     * Carries the most-recent non-null appLabel for each package as the display name.
      */
-    private val profileComparator: Comparator<BestProfileEntry> = Comparator { a, b ->
-        val aFps = a.avgFps
-        val bFps = b.avgFps
-        when {
-            aFps != null && bFps != null -> {
-                val fpsDiff = aFps.compareTo(bFps)
-                if (fpsDiff != 0) fpsDiff
-                else b.avgThrottleEventsPerSession.compareTo(a.avgThrottleEventsPerSession)
-            }
-            aFps != null -> 1   // a wins: has FPS data, b doesn't
-            bFps != null -> -1  // b wins
-            // Both null: prefer lower throttle rate
-            else -> b.avgThrottleEventsPerSession.compareTo(a.avgThrottleEventsPerSession)
+    internal fun computeBestProfilePerPackage(
+        reports: List<SessionReport>,
+    ): Map<String, BestProfileByPackage> {
+        // Only consider reports that have both a package name and a profile name.
+        val eligible = reports.filter { it.packageName != null && it.profileName != null }
+        if (eligible.isEmpty()) return emptyMap()
+
+        // Group by (packageName, profileName).
+        val grouped: Map<Pair<String, String>, List<SessionReport>> = eligible
+            .groupBy { Pair(it.packageName!!, it.profileName!!) }
+
+        // Filter pairs with enough sessions.
+        val qualified = grouped.filter { it.value.size >= MIN_SESSIONS_FOR_PROFILE_RANK }
+        if (qualified.isEmpty()) return emptyMap()
+
+        // Build a candidate entry per (package, profile) pair.
+        val candidates: List<BestProfileByPackage> = qualified.map { (key, sessions) ->
+            val (packageName, profileName) = key
+
+            val fpsSessions = sessions.filter { it.avgFps != null }
+            val avgFps: Float? = if (fpsSessions.isEmpty()) null
+                else fpsSessions.sumOf { it.avgFps!!.toDouble() }.toFloat() / fpsSessions.size
+
+            val avgThrottlePerSession = sessions.sumOf { it.throttleEventCount }.toDouble() /
+                sessions.size
+
+            // Carry the most-recent non-null appLabel for this package.
+            val appLabel = sessions
+                .sortedByDescending { it.startedAtMs }
+                .firstOrNull { it.appLabel != null }
+                ?.appLabel
+
+            BestProfileByPackage(
+                packageName = packageName,
+                appLabel = appLabel,
+                profileName = profileName,
+                avgFps = avgFps,
+                avgThrottleEventsPerSession = avgThrottlePerSession,
+                sessionCount = sessions.size,
+            )
         }
+
+        // For each package, pick the best profile using the shared ranking comparator.
+        return candidates
+            .groupBy { it.packageName }
+            .mapValues { (_, entries) ->
+                entries.maxWithOrNull(profileComparatorByPackage)!!
+            }
+    }
+
+    /**
+     * Comparator for [BestProfileEntry]: higher avgFps wins (null FPS ranks last),
+     * then lower throttle rate as tiebreaker.
+     */
+    private val profileComparatorEntry: Comparator<BestProfileEntry> = Comparator { a, b ->
+        rankFpsThrottle(a.avgFps, a.avgThrottleEventsPerSession, b.avgFps, b.avgThrottleEventsPerSession)
+    }
+
+    /**
+     * Comparator for [BestProfileByPackage]: same ranking logic as [profileComparatorEntry].
+     */
+    private val profileComparatorByPackage: Comparator<BestProfileByPackage> = Comparator { a, b ->
+        rankFpsThrottle(a.avgFps, a.avgThrottleEventsPerSession, b.avgFps, b.avgThrottleEventsPerSession)
+    }
+
+    /**
+     * Shared ranking helper: higher avgFps wins (null FPS ranks last),
+     * then lower throttle rate as tiebreaker. Returns a comparator-style int.
+     */
+    private fun rankFpsThrottle(
+        aFps: Float?,
+        aThrottle: Double,
+        bFps: Float?,
+        bThrottle: Double,
+    ): Int = when {
+        aFps != null && bFps != null -> {
+            val fpsDiff = aFps.compareTo(bFps)
+            if (fpsDiff != 0) fpsDiff
+            else bThrottle.compareTo(aThrottle)
+        }
+        aFps != null -> 1   // a wins: has FPS data, b doesn't
+        bFps != null -> -1  // b wins
+        // Both null: prefer lower throttle rate
+        else -> bThrottle.compareTo(aThrottle)
     }
 }

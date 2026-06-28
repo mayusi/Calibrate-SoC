@@ -16,6 +16,7 @@ import io.github.mayusi.calibratesoc.data.scorelog.ExternalScoreDao
 import io.github.mayusi.calibratesoc.data.session.SessionDao
 import io.github.mayusi.calibratesoc.data.share.AndroidBase64Encoder
 import io.github.mayusi.calibratesoc.data.share.Base64Encoder
+import io.github.mayusi.calibratesoc.data.share.GameTuneShareCodec
 import io.github.mayusi.calibratesoc.data.share.PresetShareCodec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -119,4 +120,10 @@ object AppModule {
     @Singleton
     fun providePresetShareCodec(json: Json, base64: Base64Encoder): PresetShareCodec =
         PresetShareCodec(json, base64)
+
+    /** Game tune share codec — injected into GameTuneViewModel for CSOC2 share/import. */
+    @Provides
+    @Singleton
+    fun provideGameTuneShareCodec(json: Json, base64: Base64Encoder): GameTuneShareCodec =
+        GameTuneShareCodec(json, base64)
 }

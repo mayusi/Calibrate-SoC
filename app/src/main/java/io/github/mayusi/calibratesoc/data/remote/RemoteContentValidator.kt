@@ -2,7 +2,9 @@ package io.github.mayusi.calibratesoc.data.remote
 
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
+import io.github.mayusi.calibratesoc.data.share.PresetShareCodec
 import io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
+import kotlinx.serialization.Serializable
 
 /**
  * Pure-Kotlin (no Android runtime) validator for remote OTA content.
@@ -19,9 +21,29 @@ internal object RemoteContentValidator {
 
     /** Hardcoded GitHub raw URLs — the base URL is never derived from user input. */
     private const val BASE = "https://raw.githubusercontent.com/mayusi/Calibrate-SoC/main/content"
-    const val MANIFEST_URL = "$BASE/manifest.json"
-    const val ADAPTERS_URL = "$BASE/adapters.json"
-    const val PRESETS_URL  = "$BASE/presets.json"
+    const val MANIFEST_URL   = "$BASE/manifest.json"
+    const val ADAPTERS_URL   = "$BASE/adapters.json"
+    const val PRESETS_URL    = "$BASE/presets.json"
+    const val GAME_TUNES_URL = "$BASE/game_tunes.json"
+
+    // ── Community game tunes data class ──────────────────────────────────────
+
+    /**
+     * A community-contributed tune entry fetched from [GAME_TUNES_URL].
+     *
+     * [tuneCode] is a CSOC2 share code (prefix "CSOC2:") — it is validated for
+     * syntactic plausibility here but NOT decoded; decoding is the responsibility
+     * of GameTuneShareCodec at import time.
+     */
+    @Serializable
+    data class CommunityGameTune(
+        val tuneCode: String,
+        val gameDisplayName: String,
+        val packageName: String,
+        val authorHandle: String = "",
+        val targetDeviceKeys: List<String> = emptyList(),
+        val notes: String = "",
+    )
 
     // ── Validation regexes ────────────────────────────────────────────────────
     //
@@ -117,6 +139,53 @@ internal object RemoteContentValidator {
                 return "extraSysfs value for '$key' contains disallowed characters"
             }
         }
+        return null
+    }
+
+    /**
+     * Validates a [CommunityGameTune] fetched from [GAME_TUNES_URL].
+     * Returns null if valid, or a human-readable error string on the first failing constraint.
+     *
+     * NOTE: [CommunityGameTune.tuneCode] is only checked for syntactic plausibility
+     * (non-blank, correct prefix, length within cap). Actual decoding and semantic
+     * validation are deferred to GameTuneShareCodec at import time.
+     */
+    fun validateCommunityTune(tune: CommunityGameTune): String? {
+        // packageName: non-blank, ≤ 256 chars, alphanumeric + dots + underscores only
+        if (tune.packageName.isBlank()) return "packageName must not be blank"
+        if (tune.packageName.length > 256) return "packageName exceeds 256 characters"
+        if (!Regex("^[A-Za-z0-9._]+$").matches(tune.packageName))
+            return "packageName '${tune.packageName}' contains disallowed characters"
+
+        // gameDisplayName: non-blank, ≤ 256 chars, no control characters
+        if (tune.gameDisplayName.isBlank()) return "gameDisplayName must not be blank"
+        if (tune.gameDisplayName.length > 256) return "gameDisplayName exceeds 256 characters"
+        if (DISPLAY_UNSAFE.containsMatchIn(tune.gameDisplayName))
+            return "gameDisplayName contains control characters"
+
+        // tuneCode: non-blank, must start with "CSOC2:", length ≤ MAX_BASE64_LENGTH
+        if (tune.tuneCode.isBlank()) return "tuneCode must not be blank"
+        if (!tune.tuneCode.startsWith("CSOC2:")) return "tuneCode must start with 'CSOC2:'"
+        if (tune.tuneCode.length > PresetShareCodec.MAX_BASE64_LENGTH)
+            return "tuneCode exceeds maximum allowed length"
+
+        // authorHandle: optional, ≤ 64 chars, no control characters
+        if (tune.authorHandle.length > 64) return "authorHandle exceeds 64 characters"
+        if (DISPLAY_UNSAFE.containsMatchIn(tune.authorHandle))
+            return "authorHandle contains control characters"
+
+        // notes: optional, ≤ 512 chars, no control characters
+        if (tune.notes.length > 512) return "notes exceeds 512 characters"
+        if (DISPLAY_UNSAFE.containsMatchIn(tune.notes))
+            return "notes contains control characters"
+
+        // targetDeviceKeys: each entry must match [a-z0-9_], ≤ 64 chars
+        for (deviceKey in tune.targetDeviceKeys) {
+            if (deviceKey.length > 64) return "targetDeviceKeys entry '$deviceKey' exceeds 64 characters"
+            if (!Regex("^[a-z0-9_]+$").matches(deviceKey))
+                return "targetDeviceKeys entry '$deviceKey' contains disallowed characters"
+        }
+
         return null
     }
 }

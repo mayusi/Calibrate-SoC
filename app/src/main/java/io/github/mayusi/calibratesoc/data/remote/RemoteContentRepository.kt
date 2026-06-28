@@ -65,6 +65,7 @@ class RemoteContentRepository @Inject constructor(
 
     @Volatile private var remoteAdapters: List<DeviceAdapter> = emptyList()
     @Volatile private var remotePresets: List<Preset> = emptyList()
+    @Volatile private var _remoteCommunityTunes: List<RemoteContentValidator.CommunityGameTune> = emptyList()
 
     /** True after the first successful (or cache-hit) load so callers can
      *  tell whether we have data beyond the bundled set. */
@@ -78,6 +79,10 @@ class RemoteContentRepository @Inject constructor(
 
     /** Remote-only community preset list. Merged into the preset list by [PresetGenerator]. */
     fun remotePresets(): List<Preset> = remotePresets
+
+    /** Community game tunes fetched from [GAME_TUNES_URL]. Empty until a successful fetch or cache warm. */
+    @Suppress("INTERNAL_TYPE_ARGUMENT_IN_PUBLIC_SIGNATURE")
+    internal fun communityTunes(): List<RemoteContentValidator.CommunityGameTune> = _remoteCommunityTunes
 
     // ── Refresh ───────────────────────────────────────────────────────────────
 
@@ -112,10 +117,11 @@ class RemoteContentRepository @Inject constructor(
 
     private fun cacheDir(): File = File(context.filesDir, "remote_content").also { it.mkdirs() }
 
-    private fun manifestCacheFile()  = File(cacheDir(), "manifest.json")
-    private fun adaptersCacheFile()  = File(cacheDir(), "adapters.json")
-    private fun presetsCacheFile()   = File(cacheDir(), "presets.json")
-    private fun lastFetchFile()      = File(cacheDir(), "last_fetch_ms.txt")
+    private fun manifestCacheFile()   = File(cacheDir(), "manifest.json")
+    private fun adaptersCacheFile()   = File(cacheDir(), "adapters.json")
+    private fun presetsCacheFile()    = File(cacheDir(), "presets.json")
+    private fun gameTunesFile()       = File(cacheDir(), "game_tunes.json")
+    private fun lastFetchFile()       = File(cacheDir(), "last_fetch_ms.txt")
 
     /** Warm [remoteAdapters] and [remotePresets] from the on-disk cache
      *  (set on a previous launch when network was available). */
@@ -146,7 +152,9 @@ class RemoteContentRepository @Inject constructor(
             }
         }
 
-        if (remoteAdapters.isNotEmpty() || remotePresets.isNotEmpty()) {
+        loadCommunityTunesFromCache()
+
+        if (remoteAdapters.isNotEmpty() || remotePresets.isNotEmpty() || _remoteCommunityTunes.isNotEmpty()) {
             _loaded.set(true)
         }
     }
@@ -182,13 +190,13 @@ class RemoteContentRepository @Inject constructor(
 
         Log.i(TAG, "Remote content version ${manifest.version} (cached $cachedVersion) — fetching data files")
 
-        // 2. Fetch adapters.json
-        val adaptersJson = fetchText(ADAPTERS_URL) ?: run {
+        // 2. Fetch adapters.json (1 MB cap — files are tiny in practice; cap is defence-in-depth)
+        val adaptersJson = fetchTextCapped(ADAPTERS_URL, 1 * 1024 * 1024) ?: run {
             Log.w(TAG, "Could not fetch remote adapters — keeping existing cache")
             null
         }
-        // 3. Fetch presets.json
-        val presetsJson = fetchText(PRESETS_URL) ?: run {
+        // 3. Fetch presets.json (1 MB cap)
+        val presetsJson = fetchTextCapped(PRESETS_URL, 1 * 1024 * 1024) ?: run {
             Log.w(TAG, "Could not fetch remote presets — keeping existing cache")
             null
         }
@@ -244,7 +252,37 @@ class RemoteContentRepository @Inject constructor(
             }
         }
 
-        // 6. Persist manifest + throttle timestamp.
+        // 6. Fetch game_tunes.json (2 MB cap). A 404 / network error is non-fatal —
+        //    the file may not exist yet on the repo.
+        val tunesBody = fetchTextCapped(GAME_TUNES_URL, 2 * 1024 * 1024)
+        if (tunesBody != null) {
+            val parsed = runCatching {
+                json.decodeFromString<List<RemoteContentValidator.CommunityGameTune>>(tunesBody)
+            }.getOrElse { e ->
+                Log.w(TAG, "Remote game_tunes.json failed to parse — keeping existing cache", e)
+                null
+            }
+            if (parsed != null) {
+                val valid = mutableListOf<RemoteContentValidator.CommunityGameTune>()
+                val rejected = mutableListOf<String>()
+                for (tune in parsed) {
+                    val err = validateCommunityTune(tune)
+                    if (err == null) valid.add(tune)
+                    else rejected.add("tune '${tune.gameDisplayName}': $err")
+                }
+                if (rejected.isNotEmpty()) {
+                    Log.w(TAG, "Rejected ${rejected.size} community tune(s): $rejected")
+                }
+                gameTunesFile().writeText(tunesBody)
+                _remoteCommunityTunes = valid
+                Log.i(TAG, "Applied ${valid.size} community game tune(s)")
+            }
+        } else {
+            // null = 404 or network error; treat as empty list, not a hard failure.
+            Log.d(TAG, "game_tunes.json not available — community tunes list stays empty")
+        }
+
+        // 7. Persist manifest + throttle timestamp.
         manifestCacheFile().writeText(manifestJson)
         recordFetch()
         _loaded.set(true)
@@ -298,6 +336,35 @@ class RemoteContentRepository @Inject constructor(
         runCatching { lastFetchFile().writeText(System.currentTimeMillis().toString()) }
     }
 
+    /**
+     * Wraps [fetchText] with a hard size cap. Returns null (and logs a warning) if the
+     * response body exceeds [maxBytes]. Use this for all OTA fetches so an oversized
+     * response can never exhaust memory.
+     */
+    private fun fetchTextCapped(url: String, maxBytes: Int): String? {
+        val body = fetchText(url) ?: return null
+        if (body.length > maxBytes) {
+            Log.w(TAG, "OTA response from $url exceeds size cap ($maxBytes bytes) — discarding")
+            return null
+        }
+        return body
+    }
+
+    /** Loads and validates the community tunes cache file into [_remoteCommunityTunes]. */
+    private fun loadCommunityTunesFromCache() {
+        val f = gameTunesFile()
+        if (!f.exists()) return
+        runCatching {
+            val raw = f.readText()
+            val parsed = json.decodeFromString<List<RemoteContentValidator.CommunityGameTune>>(raw)
+            val validated = parsed.filter { validateCommunityTune(it) == null }
+            _remoteCommunityTunes = validated
+            Log.d(TAG, "Warmed ${validated.size} community tune(s) from disk cache")
+        }.onFailure { e ->
+            Log.w(TAG, "Could not load game_tunes cache — will re-fetch", e)
+        }
+    }
+
     // ── Validation — delegates to pure-JVM RemoteContentValidator ────────────
 
     /** Delegates to [RemoteContentValidator.validateAdapter]. */
@@ -308,6 +375,10 @@ class RemoteContentRepository @Inject constructor(
     internal fun validatePreset(preset: Preset): String? =
         RemoteContentValidator.validatePreset(preset)
 
+    /** Delegates to [RemoteContentValidator.validateCommunityTune]. */
+    internal fun validateCommunityTune(tune: RemoteContentValidator.CommunityGameTune): String? =
+        RemoteContentValidator.validateCommunityTune(tune)
+
     companion object {
         private const val TAG = "RemoteContent"
 
@@ -316,8 +387,9 @@ class RemoteContentRepository @Inject constructor(
 
         // URLs are defined in RemoteContentValidator (pure-JVM) so unit tests
         // can verify them without loading this Android class.
-        val MANIFEST_URL get() = RemoteContentValidator.MANIFEST_URL
-        val ADAPTERS_URL get() = RemoteContentValidator.ADAPTERS_URL
-        val PRESETS_URL  get() = RemoteContentValidator.PRESETS_URL
+        val MANIFEST_URL    get() = RemoteContentValidator.MANIFEST_URL
+        val ADAPTERS_URL    get() = RemoteContentValidator.ADAPTERS_URL
+        val PRESETS_URL     get() = RemoteContentValidator.PRESETS_URL
+        val GAME_TUNES_URL  get() = RemoteContentValidator.GAME_TUNES_URL
     }
 }

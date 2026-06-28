@@ -102,6 +102,11 @@ class NavRouteMatchingTest {
         assertThat(Destination.isBottomBarVisible("some_unknown_screen")).isFalse()
     }
 
+    @Test
+    fun `off-nav game_tunes hides bar`() {
+        assertThat(Destination.isBottomBarVisible("game_tunes/com.example.game")).isFalse()
+    }
+
     // ─── activeDestFor ───────────────────────────────────────────────────────────
 
     @Test
@@ -202,5 +207,10 @@ class NavRouteMatchingTest {
     @Test
     fun `empty route falls back to Dashboard`() {
         assertThat(Destination.activeDestFor("")).isEqualTo(Destination.Dashboard)
+    }
+
+    @Test
+    fun `game_tunes sub-route resolves to Tune`() {
+        assertThat(Destination.activeDestFor("game_tunes/{packageName}")).isEqualTo(Destination.Tune)
     }
 }

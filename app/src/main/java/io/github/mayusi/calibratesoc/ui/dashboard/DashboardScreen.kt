@@ -17,6 +17,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,18 +46,24 @@ import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
 import io.github.mayusi.calibratesoc.ui.capability.tierAccent
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneProbe
+import io.github.mayusi.calibratesoc.data.insights.GameRecommendation
+import io.github.mayusi.calibratesoc.data.insights.RecommendationTier
 import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
 import io.github.mayusi.calibratesoc.data.monitor.EstimateBasis
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
+import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.intelligence.IntelligencePanelCard
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.KvRow
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.MetricTile
 import io.github.mayusi.calibratesoc.ui.components.PanelAccentEdge
+import io.github.mayusi.calibratesoc.ui.components.SectionHeader
 import io.github.mayusi.calibratesoc.ui.components.StatBar
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.theme.Spacing
@@ -85,6 +94,21 @@ fun DashboardScreen(
     // PERF-2: battery % is read in the ViewModel via a sticky receiver, NOT via a
     // per-tick registerReceiver binder call on the composition thread.
     val batteryPct by viewModel.batteryPct.collectAsStateWithLifecycle()
+    val recommendation by viewModel.recommendation.collectAsStateWithLifecycle()
+    val profileStore by viewModel.profileStore.collectAsStateWithLifecycle()
+    val recommendApplyResult by viewModel.recommendApplyResult.collectAsStateWithLifecycle()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(recommendApplyResult) {
+        when (val r = recommendApplyResult) {
+            is DashboardViewModel.RecommendApplyResult.Success ->
+                snackbarHostState.showSnackbar("Applied '${r.profileName}' to ${r.appLabel}")
+            is DashboardViewModel.RecommendApplyResult.Error ->
+                snackbarHostState.showSnackbar(r.reason)
+            else -> Unit
+        }
+        viewModel.clearRecommendApplyResult()
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -106,6 +130,20 @@ fun DashboardScreen(
                 onToggleRecord = { viewModel.toggleRecording() },
                 onOpenSessions = onOpenSessions,
             )
+        }
+
+        // Feature A: "Best for THIS game" recommendation card — only when a
+        // recommendation can be honestly made (null = show nothing).
+        recommendation?.let { rec ->
+            item {
+                GameRecommendationCard(
+                    recommendation = rec,
+                    profileStore = profileStore,
+                    onApply = { pkg, label, profile ->
+                        viewModel.applyRecommendation(pkg, label, profile)
+                    },
+                )
+            }
         }
 
         if (latest == null) {
@@ -149,7 +187,130 @@ fun DashboardScreen(
         }
 
         item { BatteryCard(current, batteryEstimate) }
+        item { IntelligencePanelCard(batteryEstimate = batteryEstimate) }
         item { RamCard(current) }
+    }
+}
+
+// --- Feature A: Game Recommendation Card ---------------------------------
+
+/**
+ * "Best for THIS game" card surfaced on the Dashboard for the current / last
+ * foreground game.
+ *
+ * Shows NOTHING when [recommendation] is null — caller guards with let { }.
+ *
+ * Tiers:
+ *  MEASURED  — backed by the user's own sessions (≥2). Emerald pill "PROVEN FOR YOU".
+ *  SUGGESTED — backed by KnownGames classifier only. Amber pill "SUGGESTED".
+ *
+ * Honest edge cases:
+ *  - Profile renamed/deleted → apply emits an error snackbar; no write.
+ *  - Already applied → "✓ APPLIED" pill + disabled button.
+ *  - No foreground package → card not shown (recommendation is null).
+ */
+@Composable
+private fun GameRecommendationCard(
+    recommendation: GameRecommendation,
+    profileStore: ProfileStore,
+    onApply: (packageName: String, appLabel: String, profileName: String) -> Unit,
+) {
+    val accent = when (recommendation.tier) {
+        RecommendationTier.MEASURED -> AccentBar.Emerald
+        RecommendationTier.SUGGESTED -> AccentBar.Amber
+    }
+
+    // Check whether this profile is already applied to this package.
+    val alreadyApplied = recommendation.profileName?.let { pName ->
+        val profile = profileStore.profiles.firstOrNull { it.name == pName }
+        val bundle = profileStore.perAppBundles[recommendation.packageName]
+        profile != null && bundle?.profileId == profile.id
+    } ?: false
+
+    ArsenalPanel(accent = accent) {
+        // Header row: app label + tier pill
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = (recommendation.appLabel ?: recommendation.packageName).uppercase(),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                letterSpacing = 0.06.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(Spacing.group))
+            when (recommendation.tier) {
+                RecommendationTier.MEASURED ->
+                    StatusPill("PROVEN FOR YOU", AccentBar.Emerald)
+                RecommendationTier.SUGGESTED ->
+                    StatusPill("SUGGESTED", AccentBar.Amber)
+            }
+        }
+
+        // Evidence string
+        Text(
+            text = recommendation.evidence,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        // MEASURED: show measured KV rows
+        if (recommendation.tier == RecommendationTier.MEASURED) {
+            recommendation.profileName?.let { name ->
+                KvRow(label = "Profile", value = name)
+            }
+            recommendation.avgFps?.let { fps ->
+                KvRow(label = "Avg FPS", value = "%.0f fps".format(fps))
+            }
+            recommendation.avgThrottlePerSession?.let { t ->
+                KvRow(label = "Throttles/session", value = "%.1f".format(t))
+            }
+            KvRow(label = "Sessions", value = "${recommendation.sessionCount}")
+        }
+
+        // SUGGESTED: show the AutoTDP hint
+        if (recommendation.tier == RecommendationTier.SUGGESTED) {
+            recommendation.suggestedAutoTdpProfile?.let { profile ->
+                KvRow(
+                    label = "AutoTDP suggestion",
+                    value = profile.name.replace('_', ' ').lowercase()
+                        .replaceFirstChar { it.uppercase() },
+                )
+            }
+        }
+
+        // Apply button row — only for MEASURED with a named profile
+        if (recommendation.tier == RecommendationTier.MEASURED &&
+            recommendation.profileName != null
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (alreadyApplied) {
+                    StatusPill("✓ APPLIED", AccentBar.Emerald)
+                }
+                ArsenalButton(
+                    label = if (alreadyApplied) "APPLIED" else "APPLY TO THIS GAME",
+                    onClick = {
+                        onApply(
+                            recommendation.packageName,
+                            recommendation.appLabel ?: recommendation.packageName,
+                            recommendation.profileName,
+                        )
+                    },
+                    style = ArsenalButtonStyle.Secondary,
+                    accent = AccentBar.Emerald,
+                    enabled = !alreadyApplied,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
     }
 }
 

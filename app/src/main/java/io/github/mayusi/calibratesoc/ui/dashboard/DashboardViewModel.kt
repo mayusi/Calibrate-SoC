@@ -4,7 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.BatteryManager
+import android.os.Build
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +16,10 @@ import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
+import io.github.mayusi.calibratesoc.data.insights.GameRecommendation
+import io.github.mayusi.calibratesoc.data.insights.GameRecommender
+import io.github.mayusi.calibratesoc.data.insights.InsightsAggregator
+import io.github.mayusi.calibratesoc.data.insights.db.SessionReportDao
 import io.github.mayusi.calibratesoc.data.monitor.BatteryChargeReader
 import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
 import io.github.mayusi.calibratesoc.data.monitor.EstimateBasis
@@ -22,15 +28,21 @@ import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.computeBatteryEstimate
 import io.github.mayusi.calibratesoc.data.monitor.smoothedPowerMilliW
+import io.github.mayusi.calibratesoc.data.profiles.PerAppBundle
+import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import io.github.mayusi.calibratesoc.data.session.SessionRecorder
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
+import io.github.mayusi.calibratesoc.ui.insights.InsightsViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
@@ -53,6 +65,8 @@ class DashboardViewModel @Inject constructor(
     private val batteryChargeReader: BatteryChargeReader,
     private val sessionRecorder: SessionRecorder,
     autoTdpController: AutoTdpController,
+    private val sessionReportDao: SessionReportDao,
+    private val profileRepository: ProfileRepository,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
@@ -158,6 +172,77 @@ class DashboardViewModel @Inject constructor(
     private val _batteryPct = MutableStateFlow<Int?>(null)
     val batteryPct: StateFlow<Int?> = _batteryPct.asStateFlow()
 
+    // ── Game recommendation ────────────────────────────────────────────────────
+
+    /**
+     * Result of a one-tap "Apply" action on the recommendation card.
+     * Mirrors [InsightsViewModel.ApplyResult] for a local snackbar.
+     */
+    sealed interface RecommendApplyResult {
+        data object Idle : RecommendApplyResult
+        data class Success(val appLabel: String, val profileName: String) : RecommendApplyResult
+        data class Error(val reason: String) : RecommendApplyResult
+    }
+
+    private val _recommendApplyResult = MutableStateFlow<RecommendApplyResult>(RecommendApplyResult.Idle)
+    val recommendApplyResult: StateFlow<RecommendApplyResult> = _recommendApplyResult.asStateFlow()
+
+    fun clearRecommendApplyResult() { _recommendApplyResult.value = RecommendApplyResult.Idle }
+
+    /**
+     * Current game recommendation for the foreground (or last-seen foreground) package.
+     *
+     * Recomputed whenever the foreground package or session reports change.
+     * Holds the last non-null foreground package so the card persists when
+     * the user navigates back to CalibrateSoC.
+     * Null when no recommendation can be honestly made (no data, no KnownGames hit).
+     */
+    val recommendation: StateFlow<GameRecommendation?> = combine(
+        _history.map { samples ->
+            // Walk newest-first to find the last non-null foreground package.
+            samples.lastOrNull { it.foregroundPackage != null }?.foregroundPackage
+        },
+        sessionReportDao.observeAll().map { entities -> entities.map { it.toDomain() } },
+    ) { fgPkg, reports ->
+        val pkg = fgPkg ?: return@combine null
+        val appLabel = resolveAppLabel(appContext, pkg)
+        val weekStart = InsightsViewModel.weekStartMs()
+        val weekEnd = System.currentTimeMillis()
+        val weekReports = reports.filter { it.startedAtMs in weekStart..weekEnd }
+        val summary = InsightsAggregator.compute(reports, weekReports)
+        GameRecommender.recommendFor(pkg, appLabel, summary)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * Current profile store, used to show "✓ APPLIED" state on the card.
+     */
+    val profileStore: StateFlow<io.github.mayusi.calibratesoc.data.profiles.ProfileStore> =
+        profileRepository.store
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), profileRepository.snapshot())
+
+    /**
+     * Apply the recommended profile to the foreground game package.
+     * Preserves all other bundle fields; only updates profileId.
+     */
+    fun applyRecommendation(packageName: String, appLabel: String, profileName: String) {
+        viewModelScope.launch {
+            val store = profileRepository.snapshot()
+            val profile = store.profiles.firstOrNull { it.name == profileName }
+            if (profile == null) {
+                _recommendApplyResult.value = RecommendApplyResult.Error(
+                    "Profile \"$profileName\" no longer exists — it may have been renamed or deleted. No changes were made.",
+                )
+                return@launch
+            }
+            val existing = store.perAppBundles[packageName]
+            val updated = (existing ?: PerAppBundle()).copy(profileId = profile.id)
+            profileRepository.setBundle(packageName, updated)
+            _recommendApplyResult.value = RecommendApplyResult.Success(appLabel, profileName)
+        }
+    }
+
+    // ── Battery % ──────────────────────────────────────────────────────────────
+
     /**
      * Sticky ACTION_BATTERY_CHANGED receiver. Registering with a null receiver
      * would only give a one-shot read; a real receiver keeps [_batteryPct] fresh
@@ -232,6 +317,23 @@ class DashboardViewModel @Inject constructor(
 
     companion object {
         const val HISTORY_SAMPLES = 60
+
+        /**
+         * Best-effort resolution of a package name to a human-readable app label.
+         * Returns null on any failure (app uninstalled, PM exception). Never throws.
+         * IO-safe: call from a coroutine or withContext(Dispatchers.IO).
+         */
+        internal fun resolveAppLabel(context: Context, packageName: String): String? =
+            runCatching {
+                val pm = context.packageManager
+                val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getApplicationInfo(packageName, PackageManager.ApplicationInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.getApplicationInfo(packageName, 0)
+                }
+                pm.getApplicationLabel(info).toString().takeIf { it.isNotBlank() }
+            }.getOrNull()
     }
 }
 

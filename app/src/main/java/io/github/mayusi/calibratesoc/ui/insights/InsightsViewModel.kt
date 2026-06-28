@@ -77,6 +77,7 @@ class InsightsViewModel @Inject constructor(
                 batterySavedThisWeekMwh = null,
                 tempTrendCPerSession = null,
                 bestProfilePerApp = emptyMap(),
+                bestProfilePerPackage = emptyMap(),
                 insufficientDataReason = "Loading…",
             ),
         )
@@ -172,6 +173,47 @@ class InsightsViewModel @Inject constructor(
             // ── Step 4: write ──────────────────────────────────────────────────
             profileRepository.setBundle(packageName!!, updated)
 
+            _applyResult.value = ApplyResult.Success(
+                appLabel = appLabel,
+                profileName = profileName,
+                packageName = packageName,
+            )
+        }
+    }
+
+    /**
+     * Package-keyed variant of [applyBestProfile].
+     *
+     * Skips the fragile PackageManager label-scan by using [packageName] directly
+     * as the bundle key (which is what [ProfileRepository.setBundle] and
+     * [ProfileStore.perAppBundles] index on anyway).
+     *
+     * Steps:
+     * 1. Resolve [profileName] → UserProfile via [ProfileRepository.snapshot].
+     *    If the profile no longer exists: error, no write.
+     * 2. Preserve all existing bundle fields; update only profileId.
+     * 3. Call [ProfileRepository.setBundle]. Emit [ApplyResult.Success].
+     *
+     * KEEP [applyBestProfile] (label-keyed) for existing InsightsScreen panels.
+     */
+    fun applyBestProfileByPackage(
+        packageName: String,
+        appLabel: String,
+        profileName: String,
+    ) {
+        viewModelScope.launch {
+            val store = profileRepository.snapshot()
+            val profile = store.profiles.firstOrNull { it.name == profileName }
+            if (profile == null) {
+                _applyResult.value = ApplyResult.Error(
+                    "Profile \"$profileName\" no longer exists — " +
+                        "it may have been renamed or deleted. No changes were made.",
+                )
+                return@launch
+            }
+            val existing = store.perAppBundles[packageName]
+            val updated = (existing ?: PerAppBundle()).copy(profileId = profile.id)
+            profileRepository.setBundle(packageName, updated)
             _applyResult.value = ApplyResult.Success(
                 appLabel = appLabel,
                 profileName = profileName,

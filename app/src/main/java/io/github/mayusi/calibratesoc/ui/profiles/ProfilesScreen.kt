@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.profiles.UserProfile
+import io.github.mayusi.calibratesoc.data.profiles.PerAppBundle
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
@@ -99,6 +100,7 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
 
     var editingApp by remember { mutableStateOf<String?>(null) }
     var bundleEditingApp by remember { mutableStateOf<String?>(null) }
+    var gameTuneApp by remember { mutableStateOf<String?>(null) }
     var sharingProfile by remember { mutableStateOf<UserProfile?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
 
@@ -315,6 +317,26 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
         PerAppBundleScreen(
             packageName = pkg,
             onDone = { bundleEditingApp = null },
+            onOpenGameTunes = { gameTuneApp = pkg },
+        )
+    }
+
+    // Game Tunes hub — share / import / community for a specific game.
+    // Launched inline (same pattern as PerAppBundleScreen) so no nav
+    // controller threading is needed through TuneHubScreen.
+    gameTuneApp?.let { pkg ->
+        val gameTuneStore by viewModel.store.collectAsStateWithLifecycle()
+        val bundle: PerAppBundle? = gameTuneStore.perAppBundles[pkg]
+        val profile: UserProfile? = bundle?.profileId?.let { id ->
+            gameTuneStore.profiles.firstOrNull { it.id == id }
+        }
+        GameTuneScreen(
+            packageName = pkg,
+            gameDisplayName = viewModel.resolveAppLabel(pkg).ifBlank { pkg },
+            bundle = bundle,
+            profile = profile,
+            currentDeviceKey = null,
+            onDone = { gameTuneApp = null },
         )
     }
 }

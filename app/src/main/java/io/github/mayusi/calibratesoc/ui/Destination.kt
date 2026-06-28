@@ -47,6 +47,10 @@ sealed class Destination(val route: String, val label: String) {
 
     // ── Off-nav deep-links ───────────────────────────────────────────
     data object DeviceInfo : Destination("device_info", "Device")
+    /** Per-game tune share / import / community hub — pushed from the per-app bundle editor. */
+    data object GameTunes : Destination("game_tunes/{packageName}", "Game Tunes") {
+        fun route(packageName: String) = "game_tunes/${packageName}"
+    }
     /** Session detail / timeline — sub-screen of Sessions. */
     data object SessionDetail : Destination("session_detail/{sessionId}", "Session") {
         fun route(id: Long) = "session_detail/$id"
@@ -77,6 +81,7 @@ sealed class Destination(val route: String, val label: String) {
                 AutoTdp.route,
                 Profiles.route,
                 TuneHistory.route,
+                GameTunes.route,
             )
 
         /** Routes that belong to the Performance hub. */

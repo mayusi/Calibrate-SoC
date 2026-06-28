@@ -85,6 +85,7 @@ fun PerAppBundleScreen(
     packageName: String,
     viewModel: PerAppBundleViewModel = hiltViewModel(),
     onDone: () -> Unit = {},
+    onOpenGameTunes: () -> Unit = {},
 ) {
     val store by viewModel.store.collectAsStateWithLifecycle()
     val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
@@ -283,6 +284,17 @@ fun PerAppBundleScreen(
                     onDone()
                 },
                 accent = AccentBar.Emerald,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        // ── Game Tunes — share / import / community ───────────────────────
+        item {
+            ArsenalButton(
+                label = "Game Tunes — share & import",
+                onClick = onOpenGameTunes,
+                accent = Color(0xFF6D5BF6),
+                style = ArsenalButtonStyle.Secondary,
                 modifier = Modifier.fillMaxWidth(),
             )
         }

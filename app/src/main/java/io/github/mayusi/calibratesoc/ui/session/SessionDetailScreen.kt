@@ -33,12 +33,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.insights.PerPackageHistory
 import io.github.mayusi.calibratesoc.data.session.GameSession
 import io.github.mayusi.calibratesoc.data.session.SessionSummary
 import io.github.mayusi.calibratesoc.data.session.SessionStatsAggregator
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
+import io.github.mayusi.calibratesoc.ui.components.MetricLineChart
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartCard
 import io.github.mayusi.calibratesoc.ui.components.MetricLineChartOverlay
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
@@ -72,6 +74,7 @@ fun SessionDetailScreen(
     val fullSummary by viewModel.fullSummary.collectAsStateWithLifecycle()
     val throttleEvents by viewModel.throttleEvents.collectAsStateWithLifecycle()
     val throttleSummary by viewModel.throttleSummary.collectAsStateWithLifecycle()
+    val perGameHistory by viewModel.perGameHistory.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -192,6 +195,27 @@ fun SessionDetailScreen(
                         "rising temps is worth investigating.",
                     points = s.samples.map { it.batteryW?.toFloat() ?: 0f },
                 )
+            }
+            // Chart (e): CPU load % over time — the only recorded-but-never-drawn metric.
+            item {
+                MetricLineChartCard(
+                    title = "CPU load over time",
+                    caption = "Average CPU load across all cores (%). " +
+                        "Sustained 100 % load with rising temps and dropping clocks is the " +
+                        "classic throttle signature — cross-reference with the temperature " +
+                        "and clock charts above.",
+                    points = s.samples.map { it.cpuLoadPct.toFloat() },
+                )
+            }
+            // Feature B2: Per-game aggregate history card.
+            // Only shown when packageName is known and ≥2 sessions exist
+            // (ViewModel sets perGameHistory=null for <2 sessions).
+            // Snapshot to a local val first — smart cast on delegated property is blocked.
+            val historySnapshot = perGameHistory
+            if (historySnapshot != null) {
+                item {
+                    PerGameHistoryCard(history = historySnapshot)
+                }
             }
         }
     }
@@ -451,5 +475,121 @@ private fun TempLegend(label: String, color: androidx.compose.ui.graphics.Color)
         )
         Text(label, style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+// ── Feature B2: Per-game aggregate history card ────────────────────────────
+
+/**
+ * Shows cross-session aggregate trends for the current game package.
+ *
+ * Only rendered when [history.sessionCount] >= 2; for a single session the
+ * caller shows an honest "Only 1 session" message instead.
+ *
+ * Honesty rules:
+ *  - Savings % only shown when AutoTDP was active in ≥1 qualifying session.
+ *  - Trend charts each require ≥2 points (MetricLineChart enforces this).
+ *  - Each chart caption says "each point = one session, oldest→newest."
+ *  - savedFps spread only shown when ≥2 distinct profiles with fps exist.
+ */
+@Composable
+private fun PerGameHistoryCard(history: PerPackageHistory) {
+    val appLabel = history.appLabel ?: history.packageName
+    SectionCard("${appLabel.uppercase()} over time") {
+        if (history.sessionCount < 2) {
+            Text(
+                "Only ${history.sessionCount} session recorded for this game — " +
+                    "play more to see trends.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@SectionCard
+        }
+
+        // ── Savings headline ──────────────────────────────────────────────
+        val savedPct = history.savedPercent
+        if (savedPct != null) {
+            Text(
+                "AutoTDP saved ~${"%.1f".format(savedPct)}% of battery " +
+                    "vs the measured baseline. ${history.savingsBasis}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                history.savingsBasis,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        history.savedFps?.let { spread ->
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "+${"%.0f".format(spread)} fps vs your other tune for this game " +
+                    "(measured profile spread — MEASURED).",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Avg FPS trend ────────────────────────────────────────────────
+        if (history.avgFpsTrend.size >= 2) {
+            Text(
+                "Avg FPS per session (oldest→newest)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Each point = one session. Only sessions with FPS data are shown.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MetricLineChart(points = history.avgFpsTrend, heightDp = 100)
+            Spacer(Modifier.height(Spacing.group))
+        }
+
+        // ── Peak temp trend ──────────────────────────────────────────────
+        if (history.peakTempTrend.size >= 2) {
+            Text(
+                "Peak CPU temp per session (°C, oldest→newest)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Each point = one session. Rising trend with throttle events " +
+                    "suggests a thermal build-up problem.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MetricLineChart(points = history.peakTempTrend, heightDp = 100)
+            Spacer(Modifier.height(Spacing.group))
+        }
+
+        // ── Battery draw trend ───────────────────────────────────────────
+        if (history.batteryPerHourTrend.size >= 2) {
+            Text(
+                "Avg battery draw per session (mWh/hr, oldest→newest)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Each point = one session (energy ÷ duration). " +
+                    "Lower is more efficient.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MetricLineChart(points = history.batteryPerHourTrend, heightDp = 100)
+        }
+
+        Spacer(Modifier.height(Spacing.dense))
+        Text(
+            "All values are from your real recorded sessions. " +
+                "${history.sessionCount} sessions total for this game.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
