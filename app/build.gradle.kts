@@ -26,8 +26,8 @@ android {
         applicationId = "io.github.mayusi.calibratesoc"
         minSdk = 29              // Android 10 — earliest still in use on handhelds
         targetSdk = 35
-        versionCode = 36
-        versionName = "0.1.35-alpha"
+        versionCode = 37
+        versionName = "0.1.36-alpha"
 
         ndk {
             // arm64 only. Every supported handheld is aarch64.
@@ -102,6 +102,16 @@ android {
         compose = true
         buildConfig = true
         aidl = true
+    }
+    testOptions {
+        unitTests {
+            // Unmocked android.util.* (notably Log) returns defaults instead of
+            // throwing "not mocked". Without this, any test that exercises code
+            // touching Log fails ONLY when a sibling test class leaves a leaked
+            // mockkStatic(Log) state behind — an order-dependent flake. This makes
+            // the whole suite robust to test ordering/sharding.
+            isReturnDefaultValues = true
+        }
     }
     packaging {
         resources.excludes += setOf(

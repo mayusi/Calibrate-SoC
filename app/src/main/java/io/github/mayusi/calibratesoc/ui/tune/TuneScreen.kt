@@ -121,7 +121,10 @@ fun TuneScreen(
         return
     }
 
-    val canWriteSysfs = report.privilege == PrivilegeTier.ROOT
+    // PServer-live devices (Odin, RP6) write sysfs as root via the vendor binder even
+    // when the PrivilegeTier is VENDOR_SETTINGS rather than ROOT — Apply works directly
+    // for both, so treat pserverSysfsLive as equivalent to full sysfs write access.
+    val canWriteSysfs = report.privilege == PrivilegeTier.ROOT || report.pserverSysfsLive
     val hasVendorControls = adapter?.vendorAppPackage?.startsWith("com.odin") == true ||
         adapter?.vendorAppPackage?.startsWith("com.ayn") == true ||
         adapter?.vendorAppPackage?.startsWith("com.rp") == true ||
@@ -140,6 +143,7 @@ fun TuneScreen(
             item {
                 VendorCard(
                     adapter = ad,
+                    pserverLive = report.pserverSysfsLive,
                     onOpenFanCurve = {
                         runCatching { OdinIntents.openFanCurveEditor(context) }
                     },
@@ -155,6 +159,7 @@ fun TuneScreen(
                     presets = presets,
                     canApply = canWriteSysfs,
                     canGenerateScript = true,
+                    pserverLive = report.pserverSysfsLive,
                 ) { preset, action ->
                     when (action) {
                         PresetAction.APPLY -> {
@@ -268,7 +273,16 @@ fun TuneScreen(
     }
 
     if (showSaveProfileDialog) {
+        // Per-tier honesty for the "Re-apply on boot" toggle. On a PServer-live /
+        // root / AYANEO-binder / chmod-direct device the boot-reapply engine writes
+        // the tune automatically each boot; on a chmod-only vendor device it still
+        // needs the one-tap boot script (we post a reminder).
+        val bootIsAutomatic = report.pserverSysfsLive ||
+            report.ayaneoBinderLive ||
+            report.privilege == PrivilegeTier.ROOT ||
+            report.sysfsDirectlyWritable
         SaveProfileDialog(
+            bootIsAutomatic = bootIsAutomatic,
             onSave = { name, description, applyOnBoot ->
                 viewModel.saveAsProfile(name, description, applyOnBoot)
                 showSaveProfileDialog = false
@@ -370,21 +384,32 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
                 StatusPill(text = key, accent = AccentBar.Neutral)
             }
         }
-        val explainer = when (report.privilege) {
-            PrivilegeTier.ROOT ->
+        // PServer-LIVE is the strongest path and is NOT one of the PrivilegeTier
+        // values — it's a cross-vendor root runner (AYN Odin + Retroid RP6 confirmed)
+        // that becomes available whenever transact() round-trips. When it's live,
+        // custom MHz / GPU / governor writes Apply DIRECTLY — no script, no vendor
+        // round-trip — so it must take precedence over the tier-based copy below
+        // (otherwise a Retroid, which resolves to VENDOR_SETTINGS, wrongly shows the
+        // old "owned by firmware, generate a script" message even though PServer can
+        // write everything as root).
+        val explainer = when {
+            report.pserverSysfsLive ->
+                "PServer live — Apply works for everything directly (custom CPU/GPU MHz, governors, DDR), no script and no reboot needed."
+            report.privilege == PrivilegeTier.ROOT ->
                 "Magisk/KernelSU detected. Direct sysfs writes available — Apply works for everything."
-            PrivilegeTier.VENDOR_SETTINGS ->
+            report.privilege == PrivilegeTier.VENDOR_SETTINGS ->
                 "${vb.brand} tier active. Vendor tuning is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
-            PrivilegeTier.SHIZUKU ->
+            report.privilege == PrivilegeTier.SHIZUKU ->
                 "Shizuku bound. Custom MHz needs root or the script path. Vendor tuning pending UserService support."
-            PrivilegeTier.NONE ->
+            else ->
                 "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor tunes:\nadb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
         }
         Text(
             explainer,
             style = MaterialTheme.typography.bodySmall,
-            color = when (report.privilege) {
-                PrivilegeTier.ROOT, PrivilegeTier.VENDOR_SETTINGS -> Color(0xFF999999)
+            color = when {
+                report.pserverSysfsLive -> AccentBar.Emerald
+                report.privilege == PrivilegeTier.ROOT || report.privilege == PrivilegeTier.VENDOR_SETTINGS -> Color(0xFF999999)
                 else -> AccentBar.Blue
             },
         )
@@ -396,6 +421,7 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
 @Composable
 private fun VendorCard(
     adapter: DeviceAdapter,
+    pserverLive: Boolean,
     onOpenFanCurve: () -> Unit,
 ) {
     val brand = when {
@@ -410,16 +436,29 @@ private fun VendorCard(
         else -> io.github.mayusi.calibratesoc.data.vendor.VendorBrand.GENERIC
     }
     ArsenalPanel(accent = AccentBar.Neutral, title = "VENDOR CONTROLS — ${adapter.displayName}") {
+        // Fan/performance MODE tiles (Quick Settings) are still owned by the firmware
+        // vendor daemon on every device — we don't replicate those here.
         Text(
-            "${brand.brand}'s performance and fan modes are owned by the firmware's vendor daemon, which only accepts root-elevated writes. Pull down Quick Settings to flip those modes with ${brand.brand}'s own tiles — they work perfectly and we don't duplicate them here.",
+            "${brand.brand}'s performance and fan modes are owned by the firmware's vendor daemon. Pull down Quick Settings to flip those modes with ${brand.brand}'s own tiles — they work perfectly and we don't duplicate them here.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF999999),
         )
-        Text(
-            "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the tune list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
-        )
+        if (pserverLive) {
+            // PServer root is live — custom MHz / GPU / governor / DDR Apply DIRECTLY,
+            // no script and no root setup required. Fan curve editor still works via the
+            // vendor binder (separate from PServer sysfs writes).
+            Text(
+                "PServer root is live on this device — custom CPU & GPU MHz caps Apply directly from the tune list below. No script, no root setup needed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AccentBar.Emerald,
+            )
+        } else {
+            Text(
+                "What this app DOES control, no root needed: custom CPU & GPU MHz caps via the tune list below — tap Generate script and run it via ${brand.settingsApp} → Run script as Root. With Magisk/KernelSU you also get Apply once and Install at boot.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+        }
         if (adapter.fanAdapter?.supportsCurve == true) {
             Spacer(Modifier.height(Spacing.group))
             ArsenalButton(
@@ -517,7 +556,7 @@ private fun LastScriptCard(
             color = Color.White,
         )
         Text(
-            "Run it via your device's 'Run script as Root', then tap Verify.",
+            "If you used the script path: run it via your device's 'Run script as Root', then tap Verify. If Apply worked directly, just tap Verify.",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF999999),
         )
@@ -557,7 +596,7 @@ private fun VerifyResultBlock(vr: TuneViewModel.VerifyResult) {
                 style = MaterialTheme.typography.bodySmall,
             )
             vr.anyMismatch -> Text(
-                "✗ Not applied — a cluster is still at its old clock. Re-run the script (a vendor daemon may have clamped it).",
+                "✗ Not applied — a cluster is still at its old clock. Re-apply or re-run the script; a vendor daemon may have clamped it.",
                 color = AccentBar.Red,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.bodySmall,
@@ -569,7 +608,7 @@ private fun VerifyResultBlock(vr: TuneViewModel.VerifyResult) {
                 style = MaterialTheme.typography.bodySmall,
             )
             vr.allUnreadable -> Text(
-                "Can't read the clocks back on this firmware (SELinux blocks it). The script runs as root — if you saw its output it applied. Check the Dashboard CPU MHz to confirm.",
+                "Can't read the clocks back on this firmware (SELinux blocks it). If Apply or the script ran without error, it applied. Check the Dashboard CPU MHz to confirm.",
                 color = AccentBar.Amber,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.bodySmall,
@@ -604,10 +643,11 @@ private fun PresetsCard(
     presets: List<Preset>,
     canApply: Boolean,
     canGenerateScript: Boolean,
+    pserverLive: Boolean = false,
     onAction: (Preset, PresetAction) -> Unit,
 ) {
     val canInstallAtBoot = canApply
-    PresetsCardInner(presets, canApply, canGenerateScript, canInstallAtBoot, onAction)
+    PresetsCardInner(presets, canApply, canGenerateScript, canInstallAtBoot, pserverLive, onAction)
 }
 
 @Composable
@@ -616,6 +656,7 @@ private fun PresetsCardInner(
     canApply: Boolean,
     canGenerateScript: Boolean,
     canInstallAtBoot: Boolean,
+    pserverLive: Boolean,
     onAction: (Preset, PresetAction) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.group)) {
@@ -650,9 +691,15 @@ private fun PresetsCardInner(
         }
 
         Text(
-            "Community Tuned recipes are verified on your exact device; built-in tunes are " +
-                "generated from your kernel's own OPP table. Without root, use Generate script " +
-                "to run the same tune via your device's settings → Run script as Root.",
+            if (pserverLive) {
+                "Community Tuned recipes are verified on your exact device; built-in tunes are " +
+                    "generated from your kernel's own OPP table. PServer is live — tap Apply " +
+                    "and clocks change immediately, no script and no root setup needed."
+            } else {
+                "Community Tuned recipes are verified on your exact device; built-in tunes are " +
+                    "generated from your kernel's own OPP table. Without root, use Generate script " +
+                    "to run the same tune via your device's settings → Run script as Root."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFF777777),
         )
@@ -1347,6 +1394,7 @@ private fun UnknownDeviceConfirmDialog(
 
 @Composable
 private fun SaveProfileDialog(
+    bootIsAutomatic: Boolean,
     onSave: (name: String, description: String, applyOnBoot: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1381,6 +1429,19 @@ private fun SaveProfileDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = applyOnBoot, onCheckedChange = { applyOnBoot = it })
                     Text("Re-apply on boot", style = MaterialTheme.typography.bodyMedium)
+                }
+                if (applyOnBoot) {
+                    Text(
+                        if (bootIsAutomatic) {
+                            "Works automatically on this device — the tune re-applies itself each " +
+                                "boot, no script needed."
+                        } else {
+                            "On this device the tune still needs the one-tap boot script — we'll " +
+                                "remind you to run it after a reboot."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF999999),
+                    )
                 }
             }
         },
@@ -1541,28 +1602,51 @@ private fun AdvancedUnlockCard(
         hiltViewModel(),
 ) {
     val grants by viewModel.grants.collectAsStateWithLifecycle()
+    val pserverLive by viewModel.pserverSysfsLive.collectAsStateWithLifecycle()
+    val selinuxEnforcing by viewModel.selinuxEnforcing.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var lastPath by remember { mutableStateOf<String?>(null) }
     val vs = remember {
         OdinIntents.vendorSettingsName(context)
     }
 
-    ArsenalPanel(accent = AccentBar.Neutral, title = "ADVANCED UNLOCK") {
-        Text(
-            "Tuning already works — tunes generate a script you run as root (no setup needed). " +
-                "This section only unlocks OPTIONAL extras: live FPS overlay, vendor-key writes, " +
-                "and the experimental instant ± HUD steppers.",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
-        )
-        Text(
-            "Two settings unlock everything:\n\n" +
-                "1. $vs → toggle \"Force SELinux\" ON (if your firmware has it).\n" +
-                "2. Generate + Run the unlock script (below) once per boot.\n\n" +
-                "When both are done, the SYSFS indicator goes green and the experimental HUD ± buttons can fire instant clock changes.",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF999999),
-        )
+    ArsenalPanel(accent = AccentBar.Neutral, title = "HUD & FPS PERMISSIONS") {
+        if (pserverLive) {
+            // PServer-root live tuning is ALREADY active — nothing to set up. Be
+            // honest: the script only adds OPTIONAL extras (FPS overlay, vendor keys).
+            StatusPill(text = "LIVE TUNING ACTIVE — NOTHING TO DO", accent = AccentBar.Emerald)
+            Text(
+                "PServer root is live, so AutoTDP and ± clock tuning already work with zero setup — " +
+                    "no script, no SELinux change, no root. The script below is OPTIONAL: it only adds " +
+                    "the real-FPS overlay and vendor-key writes.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+        } else {
+            Text(
+                "Tuning already works — tunes generate a script you run as root (no setup needed). " +
+                    "This section only unlocks OPTIONAL extras: live FPS overlay, vendor-key writes, " +
+                    "and the experimental instant ± HUD steppers.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+            // Honest gate copy: live tuning is unlocked by SELinux mode + PServer/vendor
+            // binder — NOT by toggling app_whiteList, and NOT by the script's chmod loops.
+            val selinuxLine = when (selinuxEnforcing) {
+                true -> "SELinux is Enforcing and we can't transact the vendor root service, so " +
+                    "live ± tuning may need $vs → \"Force SELinux\" (a LAST RESORT — it can break " +
+                    "emulators; most users should leave it off)."
+                false -> "SELinux is Permissive on this device, so the chmod-direct ± path can stick."
+                null -> "Live ± tuning is gated by your SELinux mode + the vendor root path, not by " +
+                    "this script."
+            }
+            Text(
+                "Run the unlock script (below) once to grant the HUD / FPS / vendor-key permissions.\n\n" +
+                    selinuxLine,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF999999),
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             GrantIndicator("DUMP", grants.dump, "fg app")
             GrantIndicator("USAGE", grants.usageStats, "app label")

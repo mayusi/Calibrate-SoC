@@ -76,6 +76,26 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
     val importState by viewModel.importState.collectAsStateWithLifecycle()
     val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
     val accessibilityGranted by viewModel.accessibilityGranted.collectAsStateWithLifecycle()
+    val capability by viewModel.capability.collectAsStateWithLifecycle()
+
+    // Per-tier honesty for the "Apply on boot" toggle. On a PServer-live / root /
+    // AYANEO-binder device the boot-reapply engine writes the tune automatically
+    // each boot — nothing for the user to do. On a chmod-only vendor device the
+    // tune still needs the script-at-boot path, so the toggle just flags intent +
+    // posts the boot reminder. Honest copy per tier; null until the probe settles.
+    val bootIsAutomatic = capability?.let { cap ->
+        cap.pserverSysfsLive ||
+            cap.ayaneoBinderLive ||
+            cap.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT ||
+            cap.sysfsDirectlyWritable
+    } ?: false
+    val bootHonestyNote = when {
+        capability == null -> null
+        bootIsAutomatic ->
+            "Works automatically on this device — the tune re-applies itself each boot, no script needed."
+        else ->
+            "On this device the tune still needs the one-tap boot script — we'll remind you to run it after a reboot."
+    }
 
     var editingApp by remember { mutableStateOf<String?>(null) }
     var bundleEditingApp by remember { mutableStateOf<String?>(null) }
@@ -86,6 +106,9 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
 
     // Refresh accessibility grant status each time the screen is composed.
     LaunchedEffect(Unit) { viewModel.refreshAccessibility() }
+
+    // Warm the capability report so the "Apply on boot" per-tier note settles.
+    LaunchedEffect(Unit) { viewModel.refreshCapability() }
 
     // When shareCode is populated, update the sharingProfile trigger.
     LaunchedEffect(shareCode) {
@@ -138,6 +161,7 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
                     profile = profile,
                     // Fix 3: pass active-profile awareness
                     isActive = profile.id == activeProfileId,
+                    bootHonestyNote = bootHonestyNote,
                     onApply = { viewModel.apply(profile) },
                     onDelete = { viewModel.delete(profile) },
                     onToggleBoot = { viewModel.toggleApplyOnBoot(profile) },
@@ -326,6 +350,7 @@ private fun ActiveChip() {
 private fun ProfileCard(
     profile: UserProfile,
     isActive: Boolean,
+    bootHonestyNote: String?,
     onApply: () -> Unit,
     onDelete: () -> Unit,
     onToggleBoot: () -> Unit,
@@ -386,6 +411,15 @@ private fun ProfileCard(
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onDelete) { Text("Delete") }
             Button(onClick = onApply) { Text("Apply") }
+        }
+        // Per-tier honesty: PServer-live → automatic each boot; chmod-only → needs
+        // the boot script. Only shown once the profile is flagged + the note is known.
+        if (profile.applyOnBoot && bootHonestyNote != null) {
+            Text(
+                bootHonestyNote,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

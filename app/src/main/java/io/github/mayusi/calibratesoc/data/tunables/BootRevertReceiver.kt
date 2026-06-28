@@ -19,8 +19,11 @@ import io.github.mayusi.calibratesoc.data.profiles.ProfileApplier
 import io.github.mayusi.calibratesoc.data.profiles.ProfileRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 private const val TAG = "BootRevertReceiver"
@@ -65,12 +68,24 @@ class BootRevertReceiver : BroadcastReceiver() {
     @Inject lateinit var tunableWriter: TunableWriter
     @Inject lateinit var profileRepository: ProfileRepository
     @Inject lateinit var profileApplier: ProfileApplier
+    @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val pending = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
+                // WAVE 3A: re-warm the PServer transactability probe BEFORE refresh, so
+                // pserverSysfsLive reflects the CURRENT post-boot binder state — not a
+                // value cached from before the reboot. The vendor PServer service
+                // restarts at boot, but its binder may come up slightly after our
+                // receiver; invalidating forces capabilityProbe.refresh() (which calls
+                // PServerWriter.isTransactable() internally) to do a fresh transact
+                // round-trip. Without this, a stale `false` from a pre-reboot warmup
+                // could mis-classify a PServer-LIVE device as REMINDER/UNSUPPORTED and
+                // silently skip the auto-reapply. Mirrors AutoTdpService.runDaemon's
+                // FIX-2 cache-bust discipline.
+                pServerWriter.invalidateTransactableCache()
                 val report = capabilityProbe.refresh()
 
                 // Step 1: Revert first.  Even when a profile is marked
@@ -101,23 +116,49 @@ class BootRevertReceiver : BroadcastReceiver() {
                     BootApplyMode.AUTO -> {
                         // Re-apply each profile in the background.  ProfileApplier +
                         // PresetSafetyGate ensure wrong-device profiles are still blocked.
+                        //
+                        // WAVE 3A — HONESTY/SAFETY: the reapply runs under
+                        // `NonCancellable` and is TIME-BOXED (REAPPLY_BUDGET_MS). Boot
+                        // broadcasts have a finite budget; if the system tears the
+                        // receiver down mid-reapply, NonCancellable lets the in-flight
+                        // ProfileApplier.apply() finish its current write (each write is
+                        // readback-verified inside the writer, so a half-written profile
+                        // is never silently claimed) rather than abandoning a write
+                        // partway. withTimeoutOrNull caps the total so a wedged binder at
+                        // boot cannot hang the receiver indefinitely — on timeout we stop
+                        // honestly (whatever applied is reported; the rest is left for the
+                        // next boot or a manual apply). This mirrors AutoTdpRevert's
+                        // NonCancellable discipline.
                         val applied = mutableListOf<String>()
                         val failed = mutableListOf<String>()
-                        for (profile in applyAtBoot) {
-                            val results = profileApplier.apply(
-                                profile.toPreset(),
-                                report,
-                                reason = "boot re-apply: ${profile.name}",
-                            )
-                            val allOk = results.isNotEmpty() && results.none { it is WriteResult.Rejected }
-                            if (allOk) {
-                                applied.add(profile.name)
-                                Log.i(TAG, "Boot re-applied profile '${profile.name}' (${results.size} tunables)")
-                            } else {
-                                failed.add(profile.name)
-                                val rejections = results.filterIsInstance<WriteResult.Rejected>()
-                                Log.w(TAG, "Boot re-apply failed for '${profile.name}': ${rejections.map { it.message }}")
+                        val completed = withTimeoutOrNull(REAPPLY_BUDGET_MS) {
+                            withContext(NonCancellable) {
+                                for (profile in applyAtBoot) {
+                                    val results = profileApplier.apply(
+                                        profile.toPreset(),
+                                        report,
+                                        reason = "boot re-apply: ${profile.name}",
+                                    )
+                                    val allOk = results.isNotEmpty() && results.none { it is WriteResult.Rejected }
+                                    if (allOk) {
+                                        applied.add(profile.name)
+                                        Log.i(TAG, "Boot re-applied profile '${profile.name}' (${results.size} tunables)")
+                                    } else {
+                                        failed.add(profile.name)
+                                        val rejections = results.filterIsInstance<WriteResult.Rejected>()
+                                        Log.w(TAG, "Boot re-apply failed for '${profile.name}': ${rejections.map { it.message }}")
+                                    }
+                                }
                             }
+                            true
+                        }
+                        if (completed == null) {
+                            Log.w(
+                                TAG,
+                                "Boot re-apply timed out after ${REAPPLY_BUDGET_MS}ms — " +
+                                    "applied ${applied.size}/${applyAtBoot.size} before the budget. " +
+                                    "Remaining profiles will re-apply on next boot or manual apply.",
+                            )
                         }
                         if (applied.isNotEmpty()) {
                             postAppliedNotification(context, applied)
@@ -218,5 +259,14 @@ class BootRevertReceiver : BroadcastReceiver() {
         const val CHANNEL_ID = "calibratesoc.boot_tune"
         const val NOTIF_ID_APPLIED = 7374
         const val NOTIF_ID_REMINDER_BASE = 7380 // 7380, 7381, 7382 … one per profile
+
+        /**
+         * WAVE 3A: total time budget for the boot AUTO-reapply loop. A boot-completed
+         * broadcast plus goAsync() has a generous (~10s ANR) budget, but a wedged
+         * vendor binder at early boot must never hang us indefinitely. 8s leaves
+         * headroom under the broadcast budget while comfortably covering a handful of
+         * profiles × a few readback-verified writes each (each write is ~tens of ms).
+         */
+        const val REAPPLY_BUDGET_MS = 8_000L
     }
 }

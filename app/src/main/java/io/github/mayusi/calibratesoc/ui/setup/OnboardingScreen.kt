@@ -147,6 +147,26 @@ fun OnboardingScreen(
         ),
     )
 
+    // Wave 3C — the NEW reality: on PServer-live / root / AYANEO-binder devices
+    // (the common Odin + RP6 case) live tuning is ALREADY active with zero setup.
+    // The unlock script, Force-SELinux step, and the whole "advanced unlock" chore
+    // are UNNECESSARY for tuning here — the app auto-detected the device and set
+    // itself up. We surface that as a clean "all set, nothing to do" success state
+    // and offer the HUD/FPS-permissions script only as an OPTIONAL enhancement.
+    //
+    // Reuses the same no-Permissive-live-path signal the Force-SELinux gate uses,
+    // so "live already" and "don't offer Force SELinux" stay perfectly consistent.
+    // Conservative on an unsettled probe (cap == null → not yet "live").
+    val liveAlreadyActive = cap != null && ForceSelinuxGate.hasAnyNoPermissiveLivePath(
+        ForceSelinuxGate.Signals(
+            sysfsDirectlyWritable = grants.sysfsWritable,
+            pserverSysfsLive = cap.pserverSysfsLive,
+            ayaneoBinderLive = cap.ayaneoBinderLive,
+            isRoot = cap.privilege ==
+                io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT,
+        ),
+    )
+
     // Full-screen scary-skip dialog: shown when the user tries to bypass
     // the forced advanced step on an applicable device.
     var showScarySkipDialog by remember { mutableStateOf(false) }
@@ -292,9 +312,12 @@ fun OnboardingScreen(
             onFinished()
         }
 
-        // On applicable devices, the "skip advanced" exit path must go
-        // through ScarySkipDialog instead of silently entering the app.
-        val requestSkip: () -> Unit = if (advancedApplicable) {
+        // On applicable devices the "skip advanced" exit path normally goes
+        // through ScarySkipDialog (live tuning would be unavailable) — BUT on a
+        // PServer-live / root / AYANEO-binder device there is genuinely NOTHING
+        // being skipped (tuning is already live), so skipping the OPTIONAL HUD-
+        // permissions step is friction-free and must never show the scary dialog.
+        val requestSkip: () -> Unit = if (advancedApplicable && !liveAlreadyActive) {
             { showScarySkipDialog = true }
         } else {
             enterApp
@@ -308,10 +331,29 @@ fun OnboardingScreen(
                 AdvPhase.Ask -> AdvancedAskStep(
                     vendorName = vendorName,
                     advancedApplicable = advancedApplicable,
+                    // When a no-Permissive live path already exists (PServer-root,
+                    // AYANEO binder, or root), live tuning is ALREADY active — there is
+                    // nothing to set up. Show the positive affirmation + let the user skip
+                    // the whole advanced flow instead of walking the script guide.
+                    liveAlreadyActive = cap != null &&
+                        ForceSelinuxGate.hasAnyNoPermissiveLivePath(
+                            ForceSelinuxGate.Signals(
+                                sysfsDirectlyWritable = grants.sysfsWritable,
+                                pserverSysfsLive = cap.pserverSysfsLive,
+                                ayaneoBinderLive = cap.ayaneoBinderLive,
+                                isRoot = cap.privilege ==
+                                    io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT,
+                            ),
+                        ),
+                    pserverSysfsLive = cap?.pserverSysfsLive == true,
+                    selinuxEnforcing = cap?.selinuxEnforcing,
                     // Script-first: opting into advanced unlock goes straight to
-                    // the unlock SCRIPT (pm grants + PServer whitelist). Force
+                    // the unlock SCRIPT (pm grants for HUD/FPS/vendor keys). Force
                     // SELinux is never on the default path.
                     onYes = { advancedPhase = AdvPhase.ScriptGuide },
+                    // "Already live → nothing to do" goes straight to the celebrate/enter
+                    // screen (no scary-skip dialog — there is nothing being skipped).
+                    onAlreadyLiveContinue = { advancedPhase = AdvPhase.Done },
                     onNo = requestSkip,
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
@@ -366,6 +408,8 @@ fun OnboardingScreen(
             )
             allDoneStepIdx -> AllDoneStep(
                 advancedApplicable = advancedApplicable,
+                liveAlreadyActive = liveAlreadyActive,
+                pserverSysfsLive = cap?.pserverSysfsLive == true,
                 onSetupAdvanced = { advancedPhase = AdvPhase.Ask },
                 onEnterApp = enterApp,
                 onBack = { stepIdx-- },
@@ -631,17 +675,23 @@ private fun WelcomeStep(onNext: () -> Unit, onSkipAll: () -> Unit) {
 }
 
 /**
- * Final universal step — all 3 permissions done. Branches the terminal
- * flow: if advanced unlock is achievable on this device, offer a clear
- * choice between setting it up now or confirming the scary skip dialog;
- * otherwise just let the user in.
+ * Final universal step — all 3 permissions done. Branches the terminal flow
+ * on what the capability probe actually found:
  *
- * On applicable devices, [onSkipAdvanced] routes through ScarySkipDialog.
- * On non-applicable devices, [onSkipAdvanced] == [onEnterApp] (same lambda).
+ *  - [liveAlreadyActive] (PServer-live / root / AYANEO-binder — the common Odin
+ *    + RP6 case): the app AUTO-DETECTED the device and live tuning is already
+ *    on with ZERO setup. Show a clean "all set, nothing to do" success state.
+ *    The HUD/FPS-permissions script is offered only as a clearly-OPTIONAL
+ *    enhancement (no scary dialog, easy skip).
+ *  - applicable but NOT live: honest "this device needs the one-time setup"
+ *    path; [onSkipAdvanced] routes through ScarySkipDialog.
+ *  - non-applicable: just let the user in.
  */
 @Composable
 private fun AllDoneStep(
     advancedApplicable: Boolean,
+    liveAlreadyActive: Boolean,
+    pserverSysfsLive: Boolean,
     onSetupAdvanced: () -> Unit,
     onEnterApp: () -> Unit,
     onBack: () -> Unit,
@@ -661,6 +711,78 @@ private fun AllDoneStep(
                 tint = MaterialTheme.colorScheme.tertiary,
                 modifier = Modifier.size(48.dp),
             )
+
+            // ── PServer-live / root / AYANEO-binder → "all set, nothing to do" ──
+            // The app detected the device and set itself up. Tuning is LIVE now —
+            // custom MHz/GPU/governor Apply instantly, no script, no reboot.
+            if (liveAlreadyActive) {
+                Text(
+                    "You're all set!",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        if (pserverSysfsLive) "PServer live — full root tuning" else "Live tuning active",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+                Text(
+                    "We detected your device and set it up automatically — live tuning is active. " +
+                        "Custom CPU/GPU clocks, governors, and AutoTDP Apply instantly from inside the " +
+                        "app: no script, no reboot, nothing to configure.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = onEnterApp,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Enter app") }
+
+                // OPTIONAL enhancement — clearly framed as a nice-to-have, never required.
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "Optional: in-game FPS + per-app auto-profiles",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Want a real in-game FPS counter and per-app auto-switching? Grant 3 extra " +
+                                "permissions with a one-tap script. Totally optional — tuning already " +
+                                "works without it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = onSetupAdvanced,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Grant HUD & FPS permissions (optional)") }
+                    }
+                }
+                OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back") }
+                return@Column
+            }
+
+            // ── Not live but applicable: honest one-time-setup path (unchanged) ──
             Text(
                 "You're set up!",
                 style = MaterialTheme.typography.titleLarge,
@@ -679,7 +801,7 @@ private fun AllDoneStep(
                 ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "One more thing — live in-app tuning (required for this device)",
+                            "One more thing — live in-app tuning (this device needs setup)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )
@@ -695,14 +817,14 @@ private fun AllDoneStep(
                 Button(
                     onClick = onSetupAdvanced,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Set up advanced tuning") }
+                ) { Text("Set up live tuning") }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(onClick = onBack) { Text("Back") }
-                    // On applicable devices this routes through ScarySkipDialog
-                    // so the user sees the consequences before skipping.
+                    // On applicable-but-not-live devices this routes through
+                    // ScarySkipDialog so the user sees the consequences before skipping.
                     OutlinedButton(
                         onClick = onSkipAdvanced,
                         modifier = Modifier.weight(1f),
@@ -896,7 +1018,11 @@ private fun GrantsChecklist(grants: AdvancedPermissionsScript.Grants) {
 private fun AdvancedAskStep(
     vendorName: String,
     advancedApplicable: Boolean,
+    liveAlreadyActive: Boolean,
+    pserverSysfsLive: Boolean,
+    selinuxEnforcing: Boolean?,
     onYes: () -> Unit,
+    onAlreadyLiveContinue: () -> Unit,
     onNo: () -> Unit,
 ) {
     Card(
@@ -907,14 +1033,63 @@ private fun AdvancedAskStep(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // ── "Already unlocked" branch ──────────────────────────────────────
+            // A no-Permissive live path (PServer-root, AYANEO/Retroid binder, or
+            // root) is already active. Live tuning works zero-setup — celebrate and
+            // let the user skip the whole advanced flow.
+            if (liveAlreadyActive) {
+                AdvCardHeader(
+                    Icons.Outlined.Check,
+                    "Live tuning active — nothing to do",
+                    "Your device tunes live with no setup",
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        if (pserverSysfsLive) "PServer root — LIVE" else "Vendor / root path — LIVE",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+                Text(
+                    "AutoTDP, live ± clock tuning, and the HUD controls all work right now — no " +
+                        "script, no SELinux change, no root needed. You can still run the unlock " +
+                        "script if you want the real-FPS overlay and vendor-key writes, but it's " +
+                        "optional.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(onClick = onAlreadyLiveContinue, modifier = Modifier.fillMaxWidth()) {
+                    Text("Great — continue")
+                }
+                OutlinedButton(onClick = onYes, modifier = Modifier.fillMaxWidth()) {
+                    Text("Run the script anyway (optional extras)")
+                }
+                return@Column
+            }
+
             AdvCardHeader(
                 Icons.Outlined.Bolt,
-                if (advancedApplicable) "Advanced unlock (required for live tuning)" else "Advanced unlock (optional)",
+                if (advancedApplicable) "HUD & FPS permissions" else "HUD & FPS permissions (optional)",
             )
             Text(
-                "Turn this on and you get real in-game FPS, vendor tuning without Shizuku, " +
-                    "and — on devices with a custom kernel — instant ± clock changes right from the HUD. " +
-                    "On stock handhelds clock tuning still works through the one-tap script.",
+                "Grant these and you get a real in-game FPS counter, per-app auto-profiles, vendor " +
+                    "tuning without Shizuku, and — on devices with a custom kernel — instant ± clock " +
+                    "changes right from the HUD. Core clock tuning already works without this on " +
+                    "supported handhelds.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -924,12 +1099,28 @@ private fun AdvancedAskStep(
                     "No system-wide SELinux changes needed.",
             )
             if (advancedApplicable) {
-                Text(
-                    "Your device supports this setup. Without it, AutoTDP, live tuning, and HUD controls " +
-                        "are unavailable — the app will be read-only.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                // Honest distinction: when SELinux is ENFORCING and a vendor binder
+                // is present but our UID can't transact, live sysfs tuning needs the
+                // Force-SELinux last resort. We surface that truthfully rather than
+                // implying the script alone unlocks it.
+                if (selinuxEnforcing == true) {
+                    Text(
+                        "Your device is on SELinux Enforcing and we can't transact the vendor root " +
+                            "service from our UID, so live ± clock tuning may need the Force-SELinux " +
+                            "toggle (a LAST RESORT — it can break emulators). The script below still " +
+                            "grants the HUD / FPS / vendor-key permissions, which work on Enforcing.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        "Your device supports this setup. The script grants HUD / FPS / vendor-key " +
+                            "permissions; live tuning runs via the vendor root path when your firmware " +
+                            "allows it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             } else {
                 Text(
                     "It's completely optional. Monitoring, the HUD, and benchmarks already work without it — " +

@@ -49,6 +49,18 @@ class ProfilesViewModel @Inject constructor(
     val store: StateFlow<ProfileStore> =
         repository.store.stateIn(viewModelScope, SharingStarted.Eagerly, repository.snapshot())
 
+    /**
+     * Latest capability snapshot — so the Profiles "Apply on boot" toggle can be
+     * honest per device tier:
+     *   - PServer-live / root / AYANEO-binder  → boot re-apply is AUTOMATIC (the
+     *     boot-reapply engine writes it for you, no script needed each boot).
+     *   - VENDOR_SETTINGS (chmod-only)          → still needs the script-at-boot
+     *     path; the toggle only flags intent + posts the boot reminder.
+     * Null until the first [CapabilityProbe.refresh] lands.
+     */
+    val capability: StateFlow<io.github.mayusi.calibratesoc.data.capability.CapabilityReport?> =
+        capabilityProbe.report
+
     private val _installedApps = MutableStateFlow<List<InstalledApp>>(emptyList())
     val installedApps: StateFlow<List<InstalledApp>> = _installedApps.asStateFlow()
 
@@ -87,6 +99,15 @@ class ProfilesViewModel @Inject constructor(
     /** Re-read the system accessibility setting. Call from screen resume. */
     fun refreshAccessibility() {
         _accessibilityGranted.value = checkAccessibilityGranted()
+    }
+
+    /**
+     * Warm/refresh the capability report so the "Apply on boot" per-tier note is
+     * settled (PServer-live → automatic vs chmod-only → needs boot script). Cheap
+     * + idempotent; the probe memoises the live-write tier for the session.
+     */
+    fun refreshCapability() {
+        viewModelScope.launch { capabilityProbe.refresh() }
     }
 
     private fun checkAccessibilityGranted(): Boolean {

@@ -11,30 +11,39 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Routes a tunable to the right writer for the current privilege tier.
+ * Routes a tunable to the right writer, strongest tier first.
+ *
+ * TIER PRECEDENCE (per node-family, strongest first):
+ *   1. PServer-LIVE (report.pserverSysfsLive) — full ROOT sysfs/settings/governor/
+ *      cpufreq/GPU/DDR on ANY device that has it (cross-vendor: AYN Odin + Retroid
+ *      Pocket 6 confirmed). STRONGEST. Gated by SELinux mode, not app_whiteList.
+ *   2. Vendor fan binder (AYANEO fan / Retroid FanProvider) — FAN nodes ONLY.
+ *   3. Vendor general binder (AYANEO AyaAidlService) — only when NOT pserverSysfsLive.
+ *   4. ROOT (Magisk + opt-in) → RootWriter.
+ *   5. SHIZUKU → ShizukuWriter (probe-confirmed nodes only).
+ *   6. chmod-direct (sysfsDirectlyWritable) → UnlockedFileWriter.
+ *   7. NONE → NoopWriter.
  *
  * Routing rules:
- *   * SETTINGS_SYSTEM on AYN devices where PServer is bindable →
- *     PServerWriter (langerhans-style root proxy). AYN's vendor
- *     daemon ignores plain Settings.System writes from third-party
- *     apps — only the PServer-proxied path actually flips the kernel.
- *   * SETTINGS_SYSTEM elsewhere → SettingsKeyWriter (works on devices
- *     where the vendor service subscribes to ContentObserver events
- *     normally, OR where the user just wants the value persisted).
+ *   * SETTINGS_SYSTEM when PServer is TRANSACTABLE (any device) → PServerWriter:
+ *     a `settings put` run by PServer's root shell beats an app-UID putString.
+ *     Cold-path fallback: a vendor handheld with the binder published also
+ *     prefers PServer; everything else → SettingsKeyWriter.
  *   * VENDOR_INTENT → SettingsKeyWriter (legacy path, never observed
  *     to be exercised in v1 but kept for AYANEO AYASpace integration).
+ *   * SYSFS when report.pserverSysfsLive AND NOT a vendor fan node → PServerWriter
+ *     FIRST. This lights up (for free) DDR/bus devfreq, uclamp, IO scheduler,
+ *     input-boost, governor tunables — all already discovered by CapabilityProbe —
+ *     on any PServer-live device. Wins over the AYANEO binder and the chmod/
+ *     vendor-settings ladder. The vendor FAN node is carved out
+ *     ([isFanOnlyBinderNode]) so it stays on the vendor binder.
+ *   * SYSFS on AYANEO binder (when NOT pserverSysfsLive) → AyaneoVendorWriter
+ *     for the bindable node families.
  *   * SYSFS on Root tier → RootWriter (libsu).
  *   * SYSFS on Shizuku tier AND node passed the per-node write probe →
  *     ShizukuWriter (shell-UID binder write).
  *   * SYSFS on Shizuku tier AND node NOT probe-confirmed →
  *     NoopWriter with CapabilityDenied (honest: shell can't write this node).
- *   * SYSFS on VENDOR_SETTINGS / NONE when PServer is TRANSACTABLE (whitelist
- *     step has been run) → PServerWriter. PServer runs as root and can write
- *     any sysfs node without per-boot chmod. This is the "PServer-LIVE" tier
- *     for AutoTDP on AYN Odin 2/3/Thor.
- *     HONESTY: [PServerWriter.transactableNow] is only true when the probe
- *     confirmed PServer ran our command (whitelist add succeeded). If the step
- *     hasn't been done, it returns false and we fall through honestly.
  *   * SYSFS with unlock-script chmod 666 → UnlockedFileWriter.
  *   * SYSFS else → NoopWriter (the Generate script path covers SYSFS
  *     without a live SysfsWriter).
@@ -63,31 +72,61 @@ class WriterRegistry @Inject constructor(
     fun writerFor(id: TunableId, report: CapabilityReport): SysfsWriter =
         when (id.kind) {
             TunableKind.SETTINGS_SYSTEM -> {
-                // Pick PServer when this is a vendor handheld (AYN/Odin,
-                // AYANEO, Retroid) AND the service is actually published
-                // on the binder. The binder() call is cheap (one
-                // reflection invocation). On devices without a vendor
-                // perf app, SettingsKeyWriter is the right choice — it
-                // works on stock kernels that wire perf controls through
-                // public Settings keys.
-                if (report.vendorApps.anyVendorPerfApp && pserver.binder() != null) pserver else settings
+                // STRONGEST first: when PServer is confirmed transactable, route the
+                // settings write through it on ANY device. A `settings put system`
+                // executed by PServer's ROOT shell is strictly better than an app-UID
+                // ContentResolver putString — it lands regardless of WRITE_SECURE_SETTINGS
+                // and survives vendor services that ignore third-party Settings writes.
+                // transactableNow() reads the memoised real-transact probe (warmed in
+                // CapabilityProbe.refresh) — honest, never a binder()!=null false positive.
+                //
+                // COLD-PATH fallback (probe not warmed yet, or non-PServer device):
+                // keep the brand-gated path — a vendor handheld with the binder published
+                // still prefers PServer; everything else uses SettingsKeyWriter, which
+                // works on stock kernels that wire perf controls through public Settings keys.
+                when {
+                    pserver.transactableNow() -> pserver
+                    report.vendorApps.anyVendorPerfApp && pserver.binder() != null -> pserver
+                    else -> settings
+                }
             }
             TunableKind.VENDOR_INTENT -> settings
             TunableKind.SYSFS -> {
+                // PSERVER-LIVE is the STRONGEST sysfs tier on ANY device that has it
+                // (cross-vendor: AYN Odin + Retroid Pocket 6 both confirmed). PServer runs
+                // as ROOT, so it writes cpufreq / GPU / DDR-bus devfreq / governor / uclamp /
+                // IO-scheduler / input-boost nodes directly — no per-boot chmod, no vendor
+                // overlay. It therefore wins over the AYANEO vendor binder and over the
+                // chmod-direct / vendor-settings ladder for sysfs.
+                //
+                // FAN CARVE-OUT: the ONE family PServer must NOT steal is the vendor fan
+                // node. On a device that is BOTH PServer-live and AYANEO-binder-live, the
+                // hwmon pwm-fan node stays on the AYANEO binder (which drives the fan via
+                // presets/curve — the binder owns fan actuation). isFanOnlyBinderNode()
+                // matches the hwmon pwm-fan path families so the fan stays vendor-routed.
+                // (The Retroid fan is a SEPARATE FanCurveController, not in this registry —
+                // its MAX31760 I2C has no writable sysfs node — so there is no conflict
+                // there: RP6 tunes CPU/GPU via PServer here AND keeps its fan binder.)
+                //
+                // HONESTY: report.pserverSysfsLive is only true when a REAL transact
+                // round-trip confirmed PServer ran our command (warmed in CapabilityProbe).
+                if (report.pserverSysfsLive && !isFanOnlyBinderNode(id.target)) {
+                    pserver
+                }
                 // AYANEO VENDOR-BINDER LIVE tier (ZERO-SETUP, no root/Shizuku/script):
                 // when the gamewindow AyaAidlService is bindable, route the BINDABLE node
                 // families (CPU cluster scaling_max_freq / scaling_governor, GPU devfreq
                 // max_freq, fan pwm) to AyaneoVendorWriter. The overlay (uid=system)
                 // actuates the privileged write; AyaneoVendorWriter reads the node back to
-                // verify. This takes precedence over the privilege-tier ladder below
-                // because it is the device's NATIVE live path and needs no setup.
+                // verify. Reached only when NOT pserverSysfsLive (PServer-root is stronger),
+                // OR for the fan node which the binder owns even alongside PServer.
                 //
                 // HONESTY: only BINDABLE nodes route here. Non-bindable SYSFS (cpu/online
                 // core-parking, min-freq floor, GPU pwrlevel, devfreq min, uclamp, /proc)
                 // fall through to the tier ladder → NoopWriter, so isLiveWritable honestly
                 // reports them as not live-writable on AYANEO. ayaneoBinderLive is only
                 // true when a REAL bind round-trip confirmed the service is bindable.
-                if (report.ayaneoBinderLive && AyaneoVendorWriter.isBindableNode(id.target)) {
+                else if (report.ayaneoBinderLive && AyaneoVendorWriter.isBindableNode(id.target)) {
                     ayaneo
                 } else when (report.privilege) {
                     PrivilegeTier.ROOT -> root
@@ -101,15 +140,14 @@ class WriterRegistry @Inject constructor(
                     PrivilegeTier.VENDOR_SETTINGS,
                     PrivilegeTier.NONE -> {
                     when {
-                        // PServer-LIVE tier: AYN devices where the one-time whitelist
-                        // step has been run. PServer executes our shell commands as root,
-                        // so no per-boot chmod is needed. This is the best live path for
-                        // AutoTDP on Odin 2/3/Thor (faster + no chmod-resets-on-boot).
-                        // HONESTY: report.pserverSysfsLive is only true when CapabilityProbe
-                        // confirmed a real transact round-trip during refresh(). If it's false
-                        // (whitelist step not done, or non-AYN device), we fall through to
-                        // UnlockedFileWriter or NoopWriter — never pretend PServer works.
-                        report.pserverSysfsLive -> pserver
+                        // NOTE: the PServer-LIVE non-fan case is already handled at the TOP
+                        // of this SYSFS branch (it is the strongest tier on any device).
+                        // We do NOT re-route pserverSysfsLive here, because the only way to
+                        // reach this point with pserverSysfsLive == true is a FAN node that
+                        // was deliberately carved out for the vendor binder — routing it to
+                        // PServer would defeat that carve-out. So the fan node correctly
+                        // continues down to the chmod/noop ladder if the vendor binder
+                        // wasn't live.
 
                         // Unlock-script tier: the chmod 666 the script applied made
                         // certain nodes app-UID-writable without root. Route those to
@@ -136,4 +174,31 @@ class WriterRegistry @Inject constructor(
      */
     fun isLiveWritable(id: TunableId, report: CapabilityReport): Boolean =
         writerFor(id, report) !is NoopWriter
+
+    /**
+     * True when [path] is a vendor FAN node that PServer-LIVE must NOT steal from
+     * the vendor binder. The fan is owned by the vendor's overlay/binder (which
+     * actuates it via presets/curves), not by a raw sysfs duty write — so even on
+     * a PServer-live device the fan node stays on the vendor binder.
+     *
+     * Matches the generic hwmon pwm-fan path families (covers the AYANEO
+     * `soc:pwm-fan` hwmon pwm node and any analogous hwmon-PWM fan path). This is
+     * the ONLY carve-out from the "PServer wins sysfs" rule.
+     *
+     * (The Retroid Pocket 6 fan has NO writable sysfs node — MAX31760 over I2C —
+     * and is driven by a separate FanCurveController that is not part of this
+     * registry, so there is no fan node here for PServer to even consider on RP6.)
+     */
+    internal fun isFanOnlyBinderNode(path: String): Boolean =
+        FAN_PWM_NODE.containsMatchIn(path)
+
+    private companion object {
+        /**
+         * hwmon PWM fan node families. Matches the AYANEO `soc:pwm-fan` hwmon pwm
+         * node and any hwmon path ending in a `pwmN` duty file — the vendor-binder
+         * fan surface. Deliberately broad over hwmon/pwm so a future device's fan
+         * node is also carved out of PServer routing.
+         */
+        private val FAN_PWM_NODE = Regex("""(?:pwm-fan/.*|hwmon\d+/)pwm\d+$""")
+    }
 }

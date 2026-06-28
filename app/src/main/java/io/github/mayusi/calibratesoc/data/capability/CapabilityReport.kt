@@ -62,16 +62,27 @@ data class CapabilityReport(
      */
     val sysfsDirectlyWritable: Boolean = false,
     /**
-     * True when AYN's PServerBinder is present AND our package is in its
-     * `app_whiteList` (i.e. transact() succeeded on the probe no-op).
+     * True when the `PServerBinder` root runner is transactable from our UID
+     * (i.e. transact() succeeded on the probe no-op).
      *
-     * When true, [WriterRegistry] routes SYSFS tunables on AYN/Odin devices
-     * to [PServerWriter] instead of [UnlockedFileWriter]/[NoopWriter].
-     * PServer runs as root, so no per-boot chmod is needed — this is the
-     * best live-write tier available on non-rooted AYN handhelds.
+     * CROSS-VENDOR: `PServerBinder` is a shared firmware signature, NOT AYN-only.
+     * Confirmed live on BOTH the AYN Odin 3 AND the Retroid Pocket 6 — both ship
+     * the same general `/system/bin/pservice` root runner. Any device where
+     * `getService("PServerBinder")` + a transact probe succeeds is PServer-LIVE.
+     *
+     * GATED BY SELINUX MODE, NOT `app_whiteList`. The old narrative (our package
+     * must be added to AYN's `app_whiteList`) is FALSE — `pservice` never checks
+     * that key (proven on-device: the app ran root with the package removed from
+     * the whitelist). The real gate is SELinux: PERMISSIVE / transactable firmware
+     * → works zero-setup; ENFORCING-blocked → no app-only fix.
+     *
+     * When true, [WriterRegistry] routes SYSFS tunables to [PServerWriter] on ANY
+     * device that has it — full root sysfs/cpufreq/GPU/DDR/governor writes, no
+     * per-boot chmod. This is the STRONGEST live-write tier and takes precedence
+     * over chmod-direct and vendor-settings for sysfs.
      *
      * Set by [CapabilityProbe] via [PServerWriter.isTransactable()]. The result
-     * is memoised for the session; false before the whitelist step, true after.
+     * is memoised for the session.
      *
      * HONESTY: This field is only true when a REAL transact round-trip
      * confirmed PServer ran our command. `binder != null` is NOT sufficient
@@ -101,6 +112,27 @@ data class CapabilityReport(
      * simply never uses the park lever on this device (it skips to the cap lever).
      */
     val ayaneoBinderLive: Boolean = false,
+    /**
+     * SELinux enforcement mode — the SINGLE signal that actually gates app-UID
+     * live tuning on these handhelds (NOT `app_whiteList`, which is a confirmed
+     * no-op for PServer).
+     *
+     *   - `true`  = Enforcing. When no live path exists (no PServer / vendor
+     *     binder / root) the chmod-direct path won't stick, and the only lever
+     *     is the vendor "Force SELinux" toggle (a LAST RESORT — breaks many
+     *     emulators).
+     *   - `false` = Permissive. chmod-direct can stick.
+     *   - `null`  = unknown (could not read). Rendered honestly as "unknown",
+     *     never guessed.
+     *
+     * Set by [CapabilityProbe] via [SelinuxProbe]: a world-readable read of
+     * `/sys/fs/selinux/enforce`, upgraded to an authoritative `getenforce` root
+     * read when [pserverSysfsLive] is true.
+     *
+     * Appended at the END of the data class so existing serialized reports
+     * (which lack this field) still deserialize — append-only schema evolution.
+     */
+    val selinuxEnforcing: Boolean? = null,
 )
 
 @Serializable

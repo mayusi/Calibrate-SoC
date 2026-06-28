@@ -8,8 +8,11 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -31,6 +34,24 @@ class AdvancedUnlockViewModel @Inject constructor(
      * [CapabilityProbe.refresh] lands.
      */
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /**
+     * Convenience signals for the "already unlocked" UX copy. Derived straight
+     * off [capability] so the advanced-unlock flow can render the honest state
+     * without each call-site re-reading the report:
+     *
+     *   - [pserverSysfsLive]: PServer-root live tuning is active (nothing to do).
+     *   - [selinuxEnforcing]: SELinux mode (true=Enforcing, false=Permissive,
+     *     null=unknown) — the REAL gate, used to distinguish "needs Force-SELinux"
+     *     (Enforcing + binder present, no live path) from the normal ladder.
+     */
+    val pserverSysfsLive: StateFlow<Boolean> = capabilityProbe.report
+        .map { it?.pserverSysfsLive == true }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val selinuxEnforcing: StateFlow<Boolean?> = capabilityProbe.report
+        .map { it?.selinuxEnforcing }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun deployScript(): AdvancedPermissionsScript.Deployed = script.deploy()
 

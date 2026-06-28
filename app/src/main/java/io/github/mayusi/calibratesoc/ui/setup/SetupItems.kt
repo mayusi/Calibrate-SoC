@@ -254,9 +254,11 @@ object ForceSelinuxSetupItem : SetupItem {
  */
 object UnlockScriptSetupItem : SetupItem {
     override val id = "unlock_script"
-    override val title = "Run the unlock script"
+    override val title = "HUD & FPS permissions (optional)"
     override val rationale =
-        "One-time setup. Tap Generate — we write calibratesoc_unlock.sh " +
+        "Optional extra for the in-game FPS counter, per-app auto-profiles, and " +
+            "vendor-key writes. On PServer devices (Odin, Retroid) core tuning is " +
+            "already live without this. Tap Generate — we write calibratesoc_unlock.sh " +
             "into your CalibrateSoC folder, then open Odin Settings → " +
             "Run script as Root. Pick that file from the list."
 

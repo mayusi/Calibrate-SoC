@@ -1,0 +1,418 @@
+package io.github.mayusi.calibratesoc.data.tunables.writer
+
+import com.google.common.truth.Truth.assertThat
+import io.github.mayusi.calibratesoc.data.fancurve.ConfigFileMetadata
+import io.github.mayusi.calibratesoc.data.fancurve.FanCurveScript
+import org.junit.Test
+
+/**
+ * Provably-safe command guard test.
+ *
+ * Two tables:
+ *  - ALLOW: every REAL command shape produced by an executeShell / writeSysfs /
+ *    writeSettingsSystem call-site. This IS the regression suite — if any of these
+ *    starts failing, the guard would break a legitimate app feature (tuning,
+ *    /proc/stat reads, the fan curve, app reaping, FPS sampling).
+ *  - DENY: destructive / out-of-allow-list commands that MUST be blocked, plus the
+ *    proof that the Odin fan-script carve-out is path-tight (a fan-script-LOOKING
+ *    command aimed at a non-Odin path is denied).
+ */
+class PServerCommandGuardTest {
+
+    private fun allow(cmd: String) {
+        val v = PServerCommandGuard.inspect(cmd)
+        assertThat(v).isInstanceOf(PServerCommandGuard.Verdict.Allow::class.java)
+    }
+
+    private fun deny(cmd: String) {
+        val v = PServerCommandGuard.inspect(cmd)
+        assertThat(v).isInstanceOf(PServerCommandGuard.Verdict.Deny::class.java)
+    }
+
+    // ── The real fan-curve apply script, built from the production builder ────
+    private fun realFanScript(): String =
+        FanCurveScript.buildApplyScript(
+            newXmlBase64 = "PD94bWwgdmVyc2lvbj0nMS4wJz8+PG1hcD48L21hcD4=",
+            original = ConfigFileMetadata(
+                ownerGroup = "system:system",
+                mode = "660",
+                seContext = "u:object_r:system_app_data_file:s0",
+            ),
+        )
+
+    private fun realFanScriptUnknownMeta(): String =
+        FanCurveScript.buildApplyScript(
+            newXmlBase64 = "AAAA",
+            original = ConfigFileMetadata.UNKNOWN,
+        )
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ALLOW TABLE — every legitimate call shape MUST pass
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun allowTable_allRealShapesPass() {
+        val allowed = listOf(
+            // 1. cat sysfs / cat /proc/stat (HardwareScanner, CpuLoadSource, etc.)
+            "cat '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'",
+            "cat /sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq",
+            "cat /proc/stat",
+            "cat '/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq'",
+
+            // 2. StorageSpeedTester drop_caches flush (the ONE allowed /proc/sys write)
+            "sync; echo 3 > /proc/sys/vm/drop_caches",
+
+            // 3. writeSysfs chmod-sandwich (TunableWriter / PServerWriter.writeSysfs)
+            "chmod 666 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq' && " +
+                "printf %s '2745600' > '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'; " +
+                "chmod 444 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'",
+            "chmod 644 '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq' && " +
+                "printf %s '1000000' > '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq'; " +
+                "chmod 444 '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq'",
+
+            // 4. settings put/get system (writeSettingsSystem, fan-curve read)
+            "settings put system 'fan_mode' '4'",
+            "settings put system fan_mode 4",
+            "settings get system fan_mode",
+            "settings put system performance_mode '2'",
+
+            // 5. pm grant — our packages + the three known perms
+            "pm grant io.github.mayusi.calibratesoc android.permission.DUMP",
+            "pm grant io.github.mayusi.calibratesoc.debug android.permission.DUMP",
+            "pm grant io.github.mayusi.calibratesoc android.permission.PACKAGE_USAGE_STATS",
+            "pm grant io.github.mayusi.calibratesoc.debug android.permission.WRITE_SECURE_SETTINGS",
+
+            // 6. am force-stop / set-inactive (AppReaper)
+            "am force-stop com.foo.game",
+            "am force-stop 'com.foo.game'; am set-inactive 'com.foo.game' true",
+
+            // 7. SurfaceFlinger dumpsys trio + gfxinfo (GameFpsSampler)
+            "dumpsys SurfaceFlinger --list",
+            "dumpsys SurfaceFlinger --version",
+            "dumpsys SurfaceFlinger --latency 'SurfaceView[com.foo/com.foo.MainActivity]#0'",
+            // layer name containing shell metacharacters (must stay one quoted token)
+            "dumpsys SurfaceFlinger --latency 'Surf;ace|View && weird #0'",
+            "dumpsys gfxinfo com.foo.game",
+
+            // 8. fan-curve apply script (the legitimate Odin path with mv/rm/chown/kill)
+            realFanScript(),
+            realFanScriptUnknownMeta(),
+
+            // 9. read helpers
+            "getprop ro.product.model",
+            "getprop",
+            "getenforce",
+            "service list",
+            "stat -c '%U:%G %a' '${FanCurveScript.CONFIG_XML_PATH}'",
+            "stat -c '%C' '${FanCurveScript.CONFIG_XML_PATH}'",
+
+            // 10. chaining + pipe + daemon hooks
+            "stop perfd",
+            "start perfd",
+            "stop vendor.perf-hal-1-0; stop vendor.perf-hal-2-0",
+            "start vendor.perf-hal-1-0; start vendor.perf-hal-2-0",
+            // pipe form: cat | grep, service list | grep
+            "cat /proc/stat | grep 'cpu'",
+            "service list | grep -q 'PServerBinder'",
+
+            // fan-curve verification reads (FanCurveScript read commands)
+            FanCurveScript.readConfigCommand(),
+            FanCurveScript.readFanDutyCommand(),
+            FanCurveScript.readFanPeriodCommand(),
+            FanCurveScript.readFanStateCommand(),
+            FanCurveScript.readFanModeCommand(),
+            FanCurveScript.readConfigMetadataCommand(),
+
+            // the no-op transactability probe
+            "true",
+
+            // 11. WAVE 2: perf node families that PServer-LIVE now writes. These are
+            // the chmod-sandwich shapes PServerWriter.writeSysfs emits for the nodes
+            // CapabilityProbe already discovers (DDR/bus devfreq, IO scheduler,
+            // input-boost) — all clean /sys nodes, so they pass the existing /sys rule.
+            sandwich("/sys/class/devfreq/19091000.cpubw/max_freq", "1804000000"),
+            sandwich("/sys/class/devfreq/19091000.cpubw/min_freq", "300000000"),
+            sandwich("/sys/block/sda/queue/scheduler", "mq-deadline"),
+            sandwich("/sys/block/sda/queue/read_ahead_kb", "128"),
+            sandwich("/sys/module/cpu_boost/parameters/input_boost_freq", "0:1804800"),
+
+            // 12. WAVE 2: cgroup-boost carve-out — uclamp (/dev/cpuctl) + schedtune
+            // (/dev/stune). These are NOT /sys or /proc, so they exercise the NARROW
+            // allow widening. Only the exact modeled node shapes are permitted.
+            sandwich("/dev/cpuctl/top-app/cpu.uclamp.min", "20"),
+            sandwich("/dev/cpuctl/foreground/cpu.uclamp.max", "80"),
+            sandwich("/dev/stune/top-app/schedtune.boost", "30"),
+            sandwich("/dev/stune/foreground/schedtune.prefer_idle", "1"),
+            "cat '/dev/cpuctl/top-app/cpu.uclamp.min'",
+
+            // 13. WAVE 3B: root foreground-package reads (RootForegroundReader).
+            // dumpsys activity activities — narrowly gated to the `activities`
+            // sub-command only. Piped through grep (grep on the allow-list already).
+            "dumpsys activity activities | grep 'mResumedActivity'",
+            // dumpsys window — bare form only (no args). Contains mCurrentFocus.
+            "dumpsys window | grep 'mCurrentFocus'",
+        )
+        val failures = allowed.filter {
+            PServerCommandGuard.inspect(it) !is PServerCommandGuard.Verdict.Allow
+        }
+        assertThat(failures).isEmpty()
+    }
+
+    /** The exact chmod-sandwich PServerWriter.writeSysfs emits for a sysfs write. */
+    private fun sandwich(path: String, value: String): String =
+        "chmod 666 '$path' && printf %s '$value' > '$path'; chmod 444 '$path'"
+
+    // Individual ALLOW assertions (so a single regression names the exact shape).
+
+    @Test fun allow_catSysfs() = allow("cat '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+    @Test fun allow_catProcStat() = allow("cat /proc/stat")
+    @Test fun allow_dropCachesFlush() = allow("sync; echo 3 > /proc/sys/vm/drop_caches")
+    @Test fun allow_chmodSandwich() = allow(
+        "chmod 666 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq' && " +
+            "printf %s '2745600' > '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'; " +
+            "chmod 444 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'",
+    )
+    @Test fun allow_settingsPut() = allow("settings put system fan_mode 4")
+    @Test fun allow_settingsGet() = allow("settings get system fan_mode")
+    @Test fun allow_pmGrantDebug() = allow("pm grant io.github.mayusi.calibratesoc.debug android.permission.DUMP")
+    @Test fun allow_amForceStop() = allow("am force-stop com.foo")
+    @Test fun allow_amReaperPair() = allow("am force-stop 'com.foo'; am set-inactive 'com.foo' true")
+    @Test fun allow_sfList() = allow("dumpsys SurfaceFlinger --list")
+    @Test fun allow_sfVersion() = allow("dumpsys SurfaceFlinger --version")
+    @Test fun allow_sfLatency() = allow("dumpsys SurfaceFlinger --latency 'Layer#0'")
+    @Test fun allow_getenforce() = allow("getenforce")
+    @Test fun allow_fanScript() = allow(realFanScript())
+    @Test fun allow_fanScriptUnknownMeta() = allow(realFanScriptUnknownMeta())
+    @Test fun allow_stopPerfd() = allow("stop perfd")
+    @Test fun allow_startPerfd() = allow("start perfd")
+
+    // WAVE 2 — newly-routed perf nodes (chmod-sandwich) MUST pass.
+    @Test fun allow_ddrDevfreqMaxSandwich() =
+        allow(sandwich("/sys/class/devfreq/19091000.cpubw/max_freq", "1804000000"))
+    @Test fun allow_ioSchedulerSandwich() =
+        allow(sandwich("/sys/block/sda/queue/scheduler", "mq-deadline"))
+    @Test fun allow_inputBoostSandwich() =
+        allow(sandwich("/sys/module/cpu_boost/parameters/input_boost_freq", "0:1804800"))
+    @Test fun allow_uclampMinSandwich() =
+        allow(sandwich("/dev/cpuctl/top-app/cpu.uclamp.min", "20"))
+    @Test fun allow_uclampMaxSandwich() =
+        allow(sandwich("/dev/cpuctl/top-app/cpu.uclamp.max", "80"))
+    @Test fun allow_schedtuneBoostSandwich() =
+        allow(sandwich("/dev/stune/top-app/schedtune.boost", "30"))
+    @Test fun allow_schedtunePreferIdleSandwich() =
+        allow(sandwich("/dev/stune/foreground/schedtune.prefer_idle", "1"))
+
+    // WAVE 3B — root foreground-package reads (RootForegroundReader).
+    // The two new dumpsys subjects must pass; all other activity sub-commands
+    // and dumpsys window with extra args must be denied (tightness proof below).
+    @Test fun allow_dumpsysActivityActivities() =
+        allow("dumpsys activity activities | grep 'mResumedActivity'")
+    @Test fun allow_dumpsysActivityTopActivity() =
+        allow("dumpsys activity top-activity | grep 'mResumedActivity'")
+    @Test fun allow_dumpsysWindow() =
+        allow("dumpsys window | grep 'mCurrentFocus'")
+    // bare (no grep) forms are also valid — grep is optional in the pipe
+    @Test fun allow_dumpsysActivityActivitiesBare() =
+        allow("dumpsys activity activities")
+    @Test fun allow_dumpsysWindowBare() =
+        allow("dumpsys window")
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DENY TABLE — every destructive / out-of-allow-list command MUST be blocked
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun denyTable_allDestructiveBlocked() {
+        val denied = listOf(
+            // the device-wipe class
+            "rm -rf /",
+            "rm -rf /sdcard",
+            "rm -rf \"\$X\"/*",
+            "rm -rf '/sdcard'/*",
+            "dd if=/dev/zero of=/dev/block/sda",
+            "dd if=/dev/zero of=/dev/block/bootdevice/by-name/userdata bs=4M",
+            // arbitrary writes to non-sysfs targets
+            "printf x > /data/foo",
+            "printf x > /sdcard/x",
+            "echo pwned > /system/build.prop",
+            "echo x > /data/local/tmp/x",
+            // general mv / cp / ln / chmod / chown outside sysfs + odin
+            "mv /data/a /data/b",
+            "cp /data/a /data/b",
+            "ln -s /data/a /data/b",
+            "chmod 666 /data/x",
+            "chmod 777 /system/bin/sh",
+            "chown root:root /data/x",
+            // SELinux toggle — absolute deny
+            "setenforce 0",
+            "setenforce 1",
+            // device-kill primitives
+            "reboot",
+            "reboot recovery",
+            "poweroff",
+            "svc power reboot",
+            // package destruction
+            "pm uninstall com.foo",
+            "pm clear com.foo",
+            "pm disable com.foo",
+            // pm grant to a foreign package / unknown perm
+            "pm grant com.evil.app android.permission.DUMP",
+            "pm grant io.github.mayusi.calibratesoc android.permission.INSTALL_PACKAGES",
+            // traversal + dangerous nodes
+            "cat /sys/../etc/passwd",
+            "cat '/proc/sys/kernel/../../etc/shadow'",
+            "echo x > /sys/class/thermal/thermal_zone0/trip_point_0_temp",
+            "printf %s 'x' > '/proc/sysrq-trigger'",
+            "printf %s '4400000' > '/sys/class/power_supply/battery/constant_charge_current_max'",
+            "cat /proc/kmem",
+            // raw control characters / NUL / newline injection
+            "cat /sys/devices/x\u0000rm -rf /",         // embedded NUL byte (escaped — no raw NUL in source)
+            "cat /sys/devices/x\nrm -rf /",             // raw newline (outside fan script)
+            "cat /sys/a /sys/b",                        // multi-arg cat (only one path allowed)
+            "cat /etc/passwd",                          // non-sysfs read
+            // unknown verbs / formats
+            "format",
+            "mkfs.ext4 /dev/block/sda",
+            "make_ext4fs /dev/block/sda",
+            "su -c 'rm -rf /'",
+            "sh -c 'rm -rf /'",
+            "busybox rm -rf /",
+            "content insert --uri content://x",
+            "am start -a android.intent.action.VIEW",
+            "am broadcast -a com.foo.ACTION",
+            // start/stop of a NON-perf service
+            "stop netd",
+            "start zygote",
+            "stop perfd; rm -rf /",
+            // redirect to /system / arbitrary
+            "printf %s 'x' > /system/lib/libc.so",
+            // WAVE 2 — the cgroup-boost carve-out is NARROW, NOT a blanket /dev/ allow.
+            // Any /dev path that isn't the exact modeled uclamp/schedtune node stays denied.
+            "printf %s 'x' > '/dev/block/sda'",
+            "printf %s 'x' > '/dev/cpuctl/top-app/cgroup.procs'",   // wrong file in cpuctl
+            "printf %s 'x' > '/dev/cpuctl/../something/cpu.uclamp.min'", // traversal
+            "printf %s 'x' > '/dev/stune/top-app/tasks'",          // wrong file in stune
+            "printf %s 'x' > '/dev/cpuctl/top-app/cpu.shares'",    // not a boost node
+            "printf %s 'x' > '/dev/ptmx'",
+            "cat '/dev/kmsg'",
+            // WAVE 3B — dumpsys activity/window tightness proof.
+            // Only the exact two sub-commands and bare window form are permitted;
+            // anything else (services, broadcasts, arbitrary sub-commands) must deny.
+            "dumpsys activity services",            // disallowed sub-command
+            "dumpsys activity broadcasts",          // disallowed sub-command
+            "dumpsys activity all",                 // disallowed sub-command
+            "dumpsys activity",                     // missing required sub-command arg
+            "dumpsys activity activities extra",    // too many args
+            "dumpsys window extra-arg",             // window takes no args
+            "dumpsys batterystats",                 // not on allow-list
+            "dumpsys package com.foo",              // not on allow-list
+        )
+        val leaked = denied.filter {
+            PServerCommandGuard.inspect(it) !is PServerCommandGuard.Verdict.Deny
+        }
+        assertThat(leaked).isEmpty()
+    }
+
+    // Individual DENY assertions (named for fast diagnosis).
+
+    @Test fun deny_rmRfRoot() = deny("rm -rf /")
+    @Test fun deny_rmRfSdcard() = deny("rm -rf /sdcard")
+    @Test fun deny_rmGlobVar() = deny("rm -rf \"\$X\"/*")
+    @Test fun deny_ddBlock() = deny("dd if=/dev/zero of=/dev/block/sda")
+    @Test fun deny_printfToData() = deny("printf x > /data/foo")
+    @Test fun deny_printfToSdcard() = deny("printf x > /sdcard/x")
+    @Test fun deny_mvData() = deny("mv /data/a /data/b")
+    @Test fun deny_setenforce() = deny("setenforce 0")
+    @Test fun deny_reboot() = deny("reboot")
+    @Test fun deny_pmUninstall() = deny("pm uninstall com.foo")
+    @Test fun deny_traversal() = deny("cat /sys/../etc/passwd")
+    @Test fun deny_dangerousThermalNode() =
+        deny("echo x > /sys/class/thermal/thermal_zone0/trip_point_0_temp")
+    @Test fun deny_chmodData() = deny("chmod 666 /data/x")
+    @Test fun deny_nulByte() = deny("cat /sys/devices/x\u0000rm -rf /")
+    @Test fun deny_multiArgCat() = deny("cat /sys/a /sys/b")
+    @Test fun deny_nonSysfsRead() = deny("cat /etc/passwd")
+    @Test fun deny_format() = deny("format")
+    @Test fun deny_redirectToSystem() = deny("printf %s 'x' > /system/lib/libc.so")
+    // WAVE 2 — cgroup carve-out tightness.
+    @Test fun deny_devBlockWrite() = deny("printf %s 'x' > '/dev/block/sda'")
+    @Test fun deny_cpuctlWrongFile() = deny("printf %s 'x' > '/dev/cpuctl/top-app/cgroup.procs'")
+    @Test fun deny_stuneWrongFile() = deny("printf %s 'x' > '/dev/stune/top-app/tasks'")
+    @Test fun deny_cgroupTraversal() = deny("printf %s 'x' > '/dev/cpuctl/../x/cpu.uclamp.min'")
+    @Test fun deny_devPtmx() = deny("printf %s 'x' > '/dev/ptmx'")
+    // WAVE 3B — dumpsys activity/window carve-out tightness.
+    // Only `activities` and `top-activity` sub-commands are allowed; anything else
+    // (services, broadcasts, arbitrary sub-commands, missing sub-command) is denied.
+    // dumpsys window takes NO extra args — any arg after window is denied.
+    @Test fun deny_dumpsysActivityServices() = deny("dumpsys activity services")
+    @Test fun deny_dumpsysActivityBroadcasts() = deny("dumpsys activity broadcasts")
+    @Test fun deny_dumpsysActivityAll() = deny("dumpsys activity all")
+    @Test fun deny_dumpsysActivityNoSubCmd() = deny("dumpsys activity")
+    @Test fun deny_dumpsysActivityTooManyArgs() = deny("dumpsys activity activities extra")
+    @Test fun deny_dumpsysWindowWithArg() = deny("dumpsys window extra-arg")
+    @Test fun deny_dumpsysBatterystats() = deny("dumpsys batterystats")
+    @Test fun deny_dumpsysPackage() = deny("dumpsys package com.foo")
+
+    // ── The fan-carve-out tightness proof ─────────────────────────────────────
+    // A command that LOOKS like the fan script but aims at a non-Odin path must
+    // be denied. This proves rm-f/mv/chown are permitted ONLY for the Odin config.
+
+    @Test
+    fun deny_fanScriptLookalike_nonOdinTmp() {
+        // Same `if printf … | base64 -d` opening, but the tmp/redirect target is /sdcard.
+        val evil = "if printf %s 'AAAA' | base64 -d > '/sdcard/evil.tmp' && " +
+            "mv -f '/sdcard/evil.tmp' '/sdcard/evil' && chmod '660' '/sdcard/evil'" +
+            "; then rm -f '/sdcard/evil'; else rm -f '/sdcard/evil'; exit 1; fi"
+        deny(evil)
+    }
+
+    @Test
+    fun deny_fanScriptLookalike_rmToSdcard() {
+        // The tight-carve-out proof from the spec: a fan-script-LOOKING rm aimed
+        // at /sdcard must DENY.
+        deny("rm -f /sdcard/x")
+    }
+
+    @Test
+    fun deny_fanScriptLookalike_killForeignProcess() {
+        val evil = "if printf %s 'AAAA' | base64 -d > '${FanCurveScript.CONFIG_XML_PATH}.calibrate.tmp' && " +
+            "mv -f '${FanCurveScript.CONFIG_XML_PATH}.calibrate.tmp' '${FanCurveScript.CONFIG_XML_PATH}'" +
+            "; then kill -9 \$(pidof com.android.systemui); else exit 1; fi"
+        deny(evil)
+    }
+
+    @Test
+    fun deny_fanScriptLookalike_extraDestructiveTail() {
+        // Genuine fan-script prefix but a smuggled `rm -rf /` in the success tail.
+        val base = realFanScript()
+        val tampered = base.replace("; fi", "; rm -rf /; fi")
+        deny(tampered)
+    }
+
+    @Test
+    fun deny_bareRmFofOdin_outsideFanScript() {
+        // A bare `rm -f <odin-tmp>` NOT inside the fan-script structure is still
+        // denied — rm is hard-denied in the generic path; the carve-out only
+        // applies to the whole validated if/fi blob.
+        deny("rm -f '${FanCurveScript.CONFIG_XML_PATH}.calibrate.tmp'")
+    }
+
+    // ── Pipe / chaining segment isolation ─────────────────────────────────────
+
+    @Test
+    fun deny_pipeWithDestructiveRightSide() {
+        // Every segment must independently pass; a benign left side cannot smuggle
+        // a destructive right side.
+        deny("cat /proc/stat | rm -rf /")
+    }
+
+    @Test
+    fun deny_chainWithOneBadSegment() {
+        deny("settings put system fan_mode 4 && rm -rf /sdcard")
+    }
+
+    @Test
+    fun allow_pipeCatGrep() {
+        allow("cat /proc/stat | grep cpu")
+    }
+}

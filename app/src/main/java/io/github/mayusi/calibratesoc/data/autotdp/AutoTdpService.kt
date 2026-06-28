@@ -116,6 +116,17 @@ class AutoTdpService : Service() {
      */
     private var revert: AutoTdpRevert? = null
 
+    /**
+     * WAVE 3A: session-level perfd lifecycle. On a PServer-LIVE device we stop the
+     * vendor perf daemons ONCE when the daemon engages and restart them ONCE on
+     * exit (surgical + reversible) instead of the per-write thrash. Like [revert]
+     * it is rebuilt at daemon start and its restore is NonCancellable + idempotent
+     * so EVERY exit path (stopDaemon / onDestroy / onTaskRemoved / the finally)
+     * restarts the daemons exactly once — they can NEVER be left stopped. Null
+     * before the daemon resolves capabilities (nothing has been stopped yet).
+     */
+    private var perfDaemons: PerfDaemonController? = null
+
     override fun onCreate() {
         super.onCreate()
         batteryManager = getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
@@ -153,10 +164,19 @@ class AutoTdpService : Service() {
     override fun onDestroy() {
         val report = sessionReport
         val revertHandle = revert
+        val perfHandle = perfDaemons
         if (report != null && revertHandle != null) {
             runCatching {
                 kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
             }.onFailure { Log.w(TAG, "onDestroy revert failed", it) }
+        }
+        // WAVE 3A: restart the vendor perf daemons before teardown. NonCancellable +
+        // idempotent inside restoreForSession; runBlocking so it completes before the
+        // process can be reclaimed. No-op if an earlier exit path already restored.
+        if (perfHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { perfHandle.restoreForSession() }
+            }.onFailure { Log.w(TAG, "onDestroy perfd restore failed", it) }
         }
         loopJob?.cancel()
         loopJob = null
@@ -173,10 +193,20 @@ class AutoTdpService : Service() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         val report = sessionReport
         val revertHandle = revert
+        val perfHandle = perfDaemons
         if (report != null && revertHandle != null) {
             runCatching {
                 kotlinx.coroutines.runBlocking { revertHandle.revertNow(report) }
             }.onFailure { Log.w(TAG, "onTaskRemoved revert failed", it) }
+        }
+        // WAVE 3A: restart the vendor perf daemons on swipe-away too — the sibling of the
+        // revert path. NonCancellable + idempotent; runBlocking so it lands before the
+        // process is killed. Without this, a swipe-away mid-session could leave the vendor
+        // perf daemons stopped until reboot.
+        if (perfHandle != null) {
+            runCatching {
+                kotlinx.coroutines.runBlocking { perfHandle.restoreForSession() }
+            }.onFailure { Log.w(TAG, "onTaskRemoved perfd restore failed", it) }
         }
         super.onTaskRemoved(rootIntent)
     }
@@ -190,6 +220,11 @@ class AutoTdpService : Service() {
         // a stop before capabilities resolve has nothing stale to revert against.
         sessionReport = null
         revert = AutoTdpRevert(tunableWriter)
+        // WAVE 3A: a fresh, single-session perfd controller. The daemon list is filled
+        // in once capabilities + adapter resolve (runDaemon, after the LIVE gate). Built
+        // here as a no-op (empty daemons) so a stop before capabilities resolve has a
+        // valid handle whose restore is a safe no-op.
+        perfDaemons = PerfDaemonController(pServerWriter, tunableWriter, emptyList())
 
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -301,10 +336,32 @@ class AutoTdpService : Service() {
         // (AYN/Retroid expose it as `fan_mode`). Null when this device has no
         // controllable fan key — in which case the fan governor's writes are
         // honestly skipped by TdpStateTransition.delta. We never invent a key.
-        val fanModeKey: String? = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+        val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
+        val fanModeKey: String? = adapter
             ?.fanAdapter
             ?.takeIf { it.kind == io.github.mayusi.calibratesoc.data.devicedb.FanAdapterKind.SETTINGS_KEY }
             ?.target
+
+        // ── WAVE 3A: session-level perfd stop (PServer-LIVE only) ─────────────────
+        // Rebuild the controller with THIS device's declared perf daemons, then stop
+        // them ONCE for the whole session. Gated on pserverSysfsLive: only the PServer
+        // root tier can surgically stop/start init services. On every OTHER tier
+        // (AYANEO binder, Shizuku, chmod) the per-write daemon dance in TunableWriter
+        // stays the right tool, so we pass enabled=false and the controller is a no-op.
+        // The restore is wired into EVERY exit path below (stopDaemon / onDestroy /
+        // onTaskRemoved / the finally), NonCancellable + idempotent — the daemons can
+        // never be left stopped. Commands route via PServer.executeShell → the guard,
+        // which allow-lists only `stop`/`start <perf-daemon>`.
+        val perfDaemonController = PerfDaemonController(
+            pServerWriter = pServerWriter,
+            tunableWriter = tunableWriter,
+            daemons = adapter?.perfDaemonsToStopOnWrite.orEmpty(),
+        )
+        perfDaemons = perfDaemonController
+        val perfStopped = perfDaemonController.stopForSession(enabled = report.pserverSysfsLive)
+        if (perfStopped) {
+            Log.i(TAG, "Session perfd stop engaged: ${adapter?.perfDaemonsToStopOnWrite} (PServer-LIVE)")
+        }
 
         Log.i(TAG, "Starting LIVE daemon: profile=${config.profile}, caps=$caps")
         // sessionStartEpochMs marks the RUNNING transition — used for the heartbeat
@@ -592,6 +649,12 @@ class AutoTdpService : Service() {
             } else {
                 Log.i(TAG, "Revert already performed by an earlier exit path (no-op)")
             }
+            // ── WAVE 3A: restart the vendor perf daemons (CRITICAL — NonCancellable) ──
+            // Mirror of the revert above: the perfd restart MUST land on every exit so
+            // the device is never left with vendor perf management disabled. restoreForSession
+            // is NonCancellable + idempotent, so it completes even though this finally rides
+            // the cancelled loopJob, and is a no-op if an earlier exit path already restored.
+            perfDaemons?.restoreForSession()
             // ── WAVE 3a: release clock ownership (un-suppresses the throttle guard). ──
             // No-op if a later owner (Game Boost) already took over — release() checks.
             arbiter.release(io.github.mayusi.calibratesoc.data.boost.BoostArbiter.ClockOwner.AUTO_TDP)
@@ -676,6 +739,7 @@ class AutoTdpService : Service() {
         )
         val report = sessionReport
         val revertHandle = revert
+        val perfHandle = perfDaemons
         serviceScope.launch {
             // Revert to stock FIRST (NonCancellable inside revertNow), awaiting completion
             // so the device is back at kernel-default clocks before we tear down.
@@ -687,6 +751,11 @@ class AutoTdpService : Service() {
                     }
                 }.onFailure { Log.w(TAG, "stopDaemon revert failed", it) }
             }
+            // WAVE 3A: restart the vendor perf daemons (NonCancellable + idempotent).
+            // Paired with the session-level stop in runDaemon — must land on this exit
+            // path too so the daemons are never left stopped. No-op if already restored.
+            runCatching { perfHandle?.restoreForSession() }
+                .onFailure { Log.w(TAG, "stopDaemon perfd restore failed", it) }
             // Now it is safe to cancel the loop (its finally's revert is a latched no-op)
             // and stop the service.
             loopJob?.cancel()

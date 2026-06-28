@@ -282,6 +282,89 @@ class TunableWriterTest {
         coVerify(atLeast = 1) { pServerWriter.executeShell(match { it.startsWith("start ") }) }
     }
 
+    // ── WAVE 3A: session-level perfd suppression of the per-write daemon dance ──
+
+    /**
+     * When a session-level owner (AutoTDP's PerfDaemonController) has stopped the
+     * vendor perf daemons for the whole session, [TunableWriter.setPerfDaemonsSessionStopped]
+     * is true and the per-write `stop`/`start` hooks must be SUPPRESSED — otherwise the
+     * per-tick `start` post-hook would restart the daemons and defeat the session stop.
+     * The write itself (and the chmod-lock) must still happen.
+     */
+    @Test
+    fun `per-write daemon dance is suppressed while a session-level perfd stop is active`() = runTest {
+        val odin3Adapter = io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter(
+            key = "ayn_odin3",
+            displayName = "AYN Odin 3",
+            vendorAppPackage = null,
+            fanAdapter = null,
+            perfPresetAdapter = null,
+            perfDaemonsToStopOnWrite = listOf("perfd", "vendor.perf-hal-1-0"),
+            chmodLockCpuFreqWrites = true,
+        )
+        val adapterRegistry = mockk<DeviceAdapterRegistry>()
+        every { adapterRegistry.lookup("ayn_odin3") } returns odin3Adapter
+        val rootWriter = mockk<RootWriter>(relaxed = true)
+        val routedRegistry = mockk<WriterRegistry>()
+        every { routedRegistry.writerFor(any(), any()) } returns pServerWriter
+        val w = TunableWriter(routedRegistry, store, adapterRegistry, rootWriter, pServerWriter)
+
+        val odin3Report = REPORT.copy(device = REPORT.device.copy(knownHandheldKey = "ayn_odin3"))
+        val id = Tunables.cpuMaxFreq(6)
+        coEvery { pServerWriter.read(id) } returns "4320000"
+        coEvery { pServerWriter.write(id, "1958400") } returns WriteResult.Success(id, "4320000", "1958400")
+        coEvery { pServerWriter.executeShell(any()) } returns (0 to "")
+
+        // Session-level owner has stopped the daemons; suppress the per-write dance.
+        w.setPerfDaemonsSessionStopped(true)
+        val result = w.write(id, "1958400", odin3Report, "AutoTDP cap (session perfd stopped)")
+
+        assertThat(result).isInstanceOf(WriteResult.Success::class.java)
+        // The write still happened…
+        coVerify(exactly = 1) { pServerWriter.write(id, "1958400") }
+        // …but NO per-write stop/start hooks were issued (the session owns the daemons).
+        coVerify(exactly = 0) { pServerWriter.executeShell(match { it.startsWith("stop ") }) }
+        coVerify(exactly = 0) { pServerWriter.executeShell(match { it.startsWith("start ") }) }
+    }
+
+    /**
+     * Clearing the suppression restores the per-write dance for the next write — proving
+     * the flag is not sticky and the suppression is per-session, not permanent.
+     */
+    @Test
+    fun `clearing the session perfd flag restores the per-write daemon dance`() = runTest {
+        val odin3Adapter = io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter(
+            key = "ayn_odin3",
+            displayName = "AYN Odin 3",
+            vendorAppPackage = null,
+            fanAdapter = null,
+            perfPresetAdapter = null,
+            perfDaemonsToStopOnWrite = listOf("perfd"),
+            chmodLockCpuFreqWrites = true,
+        )
+        val adapterRegistry = mockk<DeviceAdapterRegistry>()
+        every { adapterRegistry.lookup("ayn_odin3") } returns odin3Adapter
+        val rootWriter = mockk<RootWriter>(relaxed = true)
+        val routedRegistry = mockk<WriterRegistry>()
+        every { routedRegistry.writerFor(any(), any()) } returns pServerWriter
+        val w = TunableWriter(routedRegistry, store, adapterRegistry, rootWriter, pServerWriter)
+
+        val odin3Report = REPORT.copy(device = REPORT.device.copy(knownHandheldKey = "ayn_odin3"))
+        val id = Tunables.cpuMaxFreq(6)
+        coEvery { pServerWriter.read(id) } returns "4320000"
+        coEvery { pServerWriter.write(id, any()) } returns WriteResult.Success(id, "4320000", "1958400")
+        coEvery { pServerWriter.executeShell(any()) } returns (0 to "")
+
+        w.setPerfDaemonsSessionStopped(true)
+        w.write(id, "1958400", odin3Report, "suppressed")
+        w.setPerfDaemonsSessionStopped(false)
+        w.write(id, "1958400", odin3Report, "restored")
+
+        // After clearing, the per-write dance resumes — stop+start issued for the 2nd write.
+        coVerify(atLeast = 1) { pServerWriter.executeShell("stop perfd") }
+        coVerify(atLeast = 1) { pServerWriter.executeShell("start perfd") }
+    }
+
     private companion object {
         val REPORT = CapabilityReport(
             device = DeviceIdentity(

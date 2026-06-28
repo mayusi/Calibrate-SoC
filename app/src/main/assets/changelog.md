@@ -1,3 +1,20 @@
+## [0.1.36-alpha] — 2026-06-27
+
+The big one: full root tuning on Retroid too, tunes that survive reboot, and a setup that just works.
+
+### Added — it just works now
+- **Retroid Pocket 6 now gets full live tuning** (custom CPU/GPU MHz, governors, DDR) directly — same power as the Odin, no script, no root setup. The app detects the device's built-in root bridge and uses it automatically.
+- **Tunes survive reboot.** Mark a tune "Apply on boot" and it re-applies itself every restart with zero action — no more re-running scripts after every reboot.
+- **Setup auto-detects your device.** On supported handhelds (Odin, Retroid) the wizard now shows "You're all set — live tuning is active, nothing to configure." The permission script is now optional (only for in-game FPS + per-app auto-profiles), never required for tuning.
+- **More accurate HUD + tuning levers** — real GPU load/clock and per-core load via the root bridge, plus memory-bandwidth, governor, and IO-scheduler controls that were previously locked.
+- **Smarter AutoTDP** — it can now hold back the vendor's perf daemon while it tunes (and always restores it), so your clock settings actually stick mid-game.
+
+### Changed — honesty
+- We discovered the "unlock whitelist" step we used to ask you to run did nothing — live tuning is gated by your device's SELinux mode, not a whitelist. Removed it; the setup story is now accurate.
+
+### Security
+- **Every command the app runs as root now passes a strict safety gate** — it can only write performance nodes and read diagnostics; destructive operations (delete/format/partition/etc.) are categorically blocked, with tests proving it.
+
 ## [0.1.35-alpha] — 2026-06-21
 
 Setup no longer pushes "Force SELinux" — it's now a clearly-warned last resort.

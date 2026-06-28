@@ -50,6 +50,7 @@ class CapabilityProbe @Inject constructor(
     private val advancedPermissionsScript: AdvancedPermissionsScript,
     private val pServerWriter: PServerWriter,
     private val ayaneoBinderClient: AyaneoBinderClient,
+    private val selinuxProbe: SelinuxProbe,
 ) {
     private val _report = MutableStateFlow<CapabilityReport?>(null)
     val report: StateFlow<CapabilityReport?> = _report.asStateFlow()
@@ -66,8 +67,11 @@ class CapabilityProbe @Inject constructor(
         // privileged-read fallback (SysfsProber.readNodeWithPrivilegedFallback →
         // PrivilegedSysfsReader) hits a populated cache on its first use. The probes
         // self-warm too, but warming here keeps the read path deterministic and lets the
-        // diagnostic below report against a settled cache. On non-AYN devices binder() is
-        // null so this returns false with no IPC.
+        // diagnostic below report against a settled cache.
+        //
+        // CROSS-VENDOR: PServerBinder is a shared firmware signature, not AYN-only —
+        // it is LIVE on both the AYN Odin 3 AND the Retroid Pocket 6. On devices that
+        // genuinely lack the service binder() is null, so this returns false with no IPC.
         val pserverSysfsLive = pServerWriter.isTransactable()
 
         // Warm the AYANEO vendor-binder availability the same way. On non-AYANEO devices
@@ -75,6 +79,17 @@ class CapabilityProbe @Inject constructor(
         // cheap package-presence short-circuit). On an AYANEO Pocket DS it performs a real
         // bind once and caches the result — the ZERO-SETUP live-write tier for AYANEO.
         val ayaneoBinderLive = ayaneoBinderClient.isAvailable()
+
+        // SELinux mode — the SINGLE honest gate for app-UID live tuning (NOT the
+        // app_whiteList, which is a confirmed no-op for PServer). World-readable
+        // /sys/fs/selinux/enforce, upgraded to an authoritative root `getenforce`
+        // via PServer when PServer is live (the file read is Permission-denied to
+        // our UID on some locked firmwares — Odin 3 / Thor — so the root read is
+        // the truth there). Null when neither read is conclusive — never guessed.
+        val selinuxEnforcing = selinuxProbe.probe(
+            pserverLive = pserverSysfsLive,
+            runGetenforce = { cmd -> pServerWriter.executeShell(cmd) },
+        )
 
         val gpu = sysfsProber.probeGpu(soc.gpuFamily)
         val thermal = sysfsProber.probeThermalZones()
@@ -149,6 +164,7 @@ class CapabilityProbe @Inject constructor(
             sysfsDirectlyWritable = sysfsDirectlyWritable,
             pserverSysfsLive = pserverSysfsLive,
             ayaneoBinderLive = ayaneoBinderLive,
+            selinuxEnforcing = selinuxEnforcing,
         ).also { _report.value = it }
     }
 

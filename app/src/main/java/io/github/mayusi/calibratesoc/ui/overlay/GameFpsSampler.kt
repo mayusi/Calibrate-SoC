@@ -42,6 +42,14 @@ private const val TAG = "CalibrateSoC-FpsSampler"
 class GameFpsSampler @Inject constructor(
     @ApplicationContext private val context: Context,
     private val pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter,
+    /**
+     * Root-backed foreground-package reader (Wave 3B). Used as the preferred
+     * foreground-package source when PServer is transactable: `dumpsys activity
+     * activities | grep mResumedActivity` is always accurate, requires no Android
+     * permission on the app UID, and is not subject to the 10-second UsageStats
+     * event window. Falls back to [currentForegroundPkg] (UsageStats) when null.
+     */
+    private val rootForegroundReader: io.github.mayusi.calibratesoc.data.monitor.RootForegroundReader,
 ) {
     private val _fps = MutableStateFlow<Int?>(null)
     val fps: StateFlow<Int?> = _fps.asStateFlow()
@@ -107,7 +115,12 @@ class GameFpsSampler @Inject constructor(
         job = scope.launch(Dispatchers.Default) {
             while (true) {
                 delay(500)
-                val pkg = currentForegroundPkg()
+                // Wave 3B: prefer the root dumpsys source when PServer is live — it is
+                // always accurate and requires no Android permission on the app UID.
+                // Falls back to the UsageStats path (which needs PACKAGE_USAGE_STATS)
+                // when PServer is unavailable. Either way, null means "unknown" and the
+                // HUD falls back honestly (no fabricated package name).
+                val pkg = rootForegroundReader.readForegroundPkg() ?: currentForegroundPkg()
                 _foregroundPkg.value = pkg
 
                 if (pkg == null) {

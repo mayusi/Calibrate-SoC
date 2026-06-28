@@ -1,7 +1,6 @@
 package io.github.mayusi.calibratesoc.data.script
 
 import android.content.Context
-import android.os.Build
 import android.os.Environment
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
@@ -48,15 +47,14 @@ class AdvancedPermissionsScript @Inject constructor(
         // Collect all variants that differ from the base (avoid duplicates if pkg == basePkg).
         val extraPkgs = listOf(basePkg, debugPkg).distinct().filter { it != pkg }
 
-        val manufacturer = Build.MANUFACTURER.orEmpty().lowercase()
-        val model = Build.MODEL.orEmpty().lowercase()
-        val isAynDevice = "ayn" in manufacturer || "odin" in model
         val body = buildString {
             appendLine("#!/system/bin/sh")
-            appendLine("# Calibrate SoC — unlock script")
-            appendLine("# This grants the app's permissions and (on AYN/Odin) whitelists it")
-            appendLine("# with PServer. That is the part that actually enables live tuning,")
-            appendLine("# and it works WITHOUT any SELinux change — keep SELinux Enforcing.")
+            appendLine("# Calibrate SoC — HUD & FPS permissions")
+            appendLine("# This grants the app's HUD / FPS / vendor-key permissions. It does")
+            appendLine("# NOT unlock live clock tuning — that is gated by SELinux mode + the")
+            appendLine("# PServer/vendor-binder root path, which this script does not change.")
+            appendLine("# Live tuning already works zero-setup on devices whose firmware lets")
+            appendLine("# our app transact PServer (or has a vendor binder, or root).")
             appendLine("#")
             appendLine("# The chmod 666 loops further down are OPTIONAL. They only help the")
             appendLine("# chmod-direct write path, and only on devices that have NO other")
@@ -78,59 +76,12 @@ class AdvancedPermissionsScript @Inject constructor(
                 appendLine("pm grant $extra android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true")
             }
             appendLine()
-            // AYN-specific PServer whitelist step.
-            // Only emitted when we detect an AYN/Odin device at script-deploy time;
-            // also includes a runtime shell guard (service list check) as defence-in-depth.
-            //
-            // FIX 3: Whitelist BOTH the current package AND all sibling variants (base +
-            // .debug) so any build the user installs works without re-running the script.
-            //
-            // MECHANISM: AYN's PServerBinder gates transact() on the caller UID matching
-            // an entry in Settings.System/app_whiteList. langerhans' OdinTools is in the
-            // list by default; we are not. Adding our package name here makes PServer
-            // accept our transacts, enabling live sysfs writes without per-boot chmod.
-            //
-            // HONESTY: This is the best-known mechanism based on:
-            //   (a) the error message in PServerWriter.write() which names app_whiteList
-            //       as the gate (and gives the exact add-command),
-            //   (b) on-device behaviour: transact returns -1/UNKNOWN_TRANSACTION before
-            //       this step, 0/success after.
-            // MUST BE VERIFIED on Odin 3 after running the script. If PServer gates on
-            // something other than this key (e.g. a file under /data/vendor/ or a SELinux
-            // label), this step will be a harmless no-op and transactableNow() will remain
-            // false — the app will then honestly fall back to UnlockedFileWriter/NoopWriter.
-            if (isAynDevice) {
-                // All package variants to whitelist (current + siblings, deduped).
-                val allPkgs = (listOf(pkg) + extraPkgs).distinct()
-                appendLine("# === 1a. AYN/Odin PServer whitelist (PSERVER-LIVE tier) ===")
-                appendLine("# This adds our package(s) to PServer's app_whiteList so the binder")
-                appendLine("# accepts our transact() calls. After this, Calibrate SoC can write")
-                appendLine("# sysfs nodes (cpu freq, GPU pwrlevel) via PServer's root shell —")
-                appendLine("# no per-boot chmod needed.")
-                appendLine("# Whitelists all build variants: ${allPkgs.joinToString(", ")}")
-                appendLine("# Self-guards: only runs if PServerBinder is present on this device.")
-                appendLine("if service list 2>/dev/null | grep -q 'PServerBinder'; then")
-                appendLine("  current_list=\$(settings get system app_whiteList 2>/dev/null)")
-                for (p in allPkgs) {
-                    appendLine("  # --- Whitelist $p ---")
-                    appendLine("  if echo \"\$current_list\" | grep -qF '$p'; then")
-                    appendLine("    echo 'PServer whitelist: $p already present, skipping.'")
-                    appendLine("  else")
-                    appendLine("    if [ -z \"\$current_list\" ] || [ \"\$current_list\" = 'null' ]; then")
-                    appendLine("      settings put system app_whiteList '$p'")
-                    appendLine("    else")
-                    appendLine("      settings put system app_whiteList \"\$current_list,$p\"")
-                    appendLine("    fi")
-                    appendLine("    current_list=\$(settings get system app_whiteList 2>/dev/null)")
-                    appendLine("    echo 'PServer whitelist: added $p'")
-                    appendLine("  fi")
-                }
-                appendLine("  echo 'Verify: settings get system app_whiteList'")
-                appendLine("else")
-                appendLine("  echo 'PServer whitelist: PServerBinder not present on this device, skipping.'")
-                appendLine("fi")
-            }
-            appendLine()
+            // NO app_whiteList step. PServer (`/system/bin/pservice`) does NOT gate on
+            // Settings.System/app_whiteList — proven on-device: the app ran root via
+            // PServer with our package REMOVED from the whitelist. The real gate is the
+            // device's SELinux mode (Permissive / transactable firmware → PServer works
+            // zero-setup; Enforcing-blocked → no app-only fix). Writing app_whiteList is
+            // a confirmed no-op, so the script no longer does it — it would only mislead.
             appendLine("# === 2. Stop vendor perf daemons so they can't clobber our writes ===")
             appendLine("stop perfd 2>/dev/null")
             appendLine("stop perf-hal-1-0 2>/dev/null")

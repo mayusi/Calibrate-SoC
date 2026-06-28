@@ -304,27 +304,56 @@ fun SettingsScreen(
         item {
             val tier = capability?.privilege ?: PrivilegeTier.NONE
             val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(capability)
-            val tierAccent = when (tier) {
-                PrivilegeTier.ROOT       -> AccentBar.Emerald
-                PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
-                PrivilegeTier.SHIZUKU   -> AccentBar.Blue
-                PrivilegeTier.NONE      -> AccentBar.Neutral
+            // PServer-live is the strongest tier on Odin / Retroid: the vendor root
+            // runner writes sysfs as root even when PrivilegeTier reads
+            // VENDOR_SETTINGS. Surface it as full root tuning, NOT the old
+            // "vendor keys only, custom MHz via script" story.
+            val pserverLive = capability?.pserverSysfsLive == true
+            val tierAccent = when {
+                tier == PrivilegeTier.ROOT -> AccentBar.Emerald
+                pserverLive -> AccentBar.Emerald
+                tier == PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
+                tier == PrivilegeTier.SHIZUKU -> AccentBar.Blue
+                else -> AccentBar.Neutral
             }
-            val tierChip = if (tier == PrivilegeTier.VENDOR_SETTINGS) vb.tierLabel else tier.name
-            val tierExplainer = when (tier) {
-                PrivilegeTier.ROOT ->
+            val tierChip = when {
+                pserverLive -> "PSERVER LIVE"
+                tier == PrivilegeTier.VENDOR_SETTINGS -> vb.tierLabel
+                else -> tier.name
+            }
+            val tierExplainer = when {
+                pserverLive ->
+                    "PServer live — full root tuning. ${vb.brand}'s vendor root runner writes CPU/GPU " +
+                        "clocks, governors, and DDR directly as root. Custom MHz caps, AutoTDP, and the " +
+                        "HUD ± controls Apply instantly — no script, no reboot, nothing to set up."
+                tier == PrivilegeTier.ROOT ->
                     "Full kernel-level CPU/GPU clocking + fan control + custom tunes. Magisk / KernelSU detected and root mode enabled."
-                PrivilegeTier.VENDOR_SETTINGS ->
+                tier == PrivilegeTier.VENDOR_SETTINGS ->
                     "${vb.brand} tier active. Vendor performance + fan modes apply instantly via the same Settings.System keys ${vb.brand}'s own Quick Settings tile uses. Custom MHz caps via Generate script."
-                PrivilegeTier.SHIZUKU ->
+                tier == PrivilegeTier.SHIZUKU ->
                     "Monitoring + vendor tuning. Full sysfs writes pending a Shizuku UserService update."
-                PrivilegeTier.NONE ->
+                else ->
                     "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor tuning. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
+            }
+            // Honest SELinux readout — the real gate for app-UID live tuning.
+            val selinuxLine = when (capability?.selinuxEnforcing) {
+                true -> "SELinux: Enforcing"
+                false -> "SELinux: Permissive"
+                null -> null
             }
             ArsenalPanel(accent = tierAccent, title = "PRIVILEGE TIER") {
                 StatusPill(text = tierChip, accent = tierAccent)
                 Spacer(Modifier.height(Spacing.dense))
                 Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = androidx.compose.ui.graphics.Color(0xFF999999))
+                if (selinuxLine != null) {
+                    Spacer(Modifier.height(Spacing.dense))
+                    Text(
+                        selinuxLine,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = androidx.compose.ui.graphics.Color(0xFF777777),
+                    )
+                }
             }
         }
 

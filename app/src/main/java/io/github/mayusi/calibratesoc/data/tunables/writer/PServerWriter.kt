@@ -18,9 +18,11 @@ import javax.inject.Singleton
 private const val TAG = "CalibrateSoC-PServer"
 
 /**
- * Writes to AYN devices via the private `PServerBinder` service — the same
- * path langerhans OdinTools uses on Odin 2/3/Thor to run shell commands as
- * root without the user installing Magisk.
+ * Writes via the `PServerBinder` root runner — a CROSS-VENDOR firmware signature
+ * (the same `/system/bin/pservice` root shell langerhans OdinTools uses), NOT
+ * AYN-only. Confirmed LIVE on BOTH the AYN Odin 3 AND the Retroid Pocket 6: any
+ * device where `getService("PServerBinder")` + a transact probe succeeds runs
+ * shell commands as root without the user installing Magisk.
  *
  * ## Two modes
  *
@@ -28,29 +30,27 @@ private const val TAG = "CalibrateSoC-PServer"
  * Routes `settings put system KEY VALUE` through PServer's root shell.
  * Used for fan_mode / performance_mode / etc. vendor keys.
  *
- * ### 2. SYSFS live writes (requires PServer whitelist — see below)
+ * ### 2. SYSFS live writes (requires PServer transactable — see below)
  * When [isTransactable] returns true, PServerWriter also accepts SYSFS
  * tunables and writes them by running `printf %s VALUE > PATH` through
  * PServer's root shell. Because PServer already runs as root, this needs
  * NO per-boot chmod — the write succeeds every time regardless of the
- * node's DAC mode. This is the "PServer-LIVE" tier for AutoTDP on AYN.
+ * node's DAC mode. This is the "PServer-LIVE" tier for AutoTDP on ANY
+ * device that has the binder.
  *
- * ## The whitelist gate (why transact() fails out of the box)
+ * ## The real gate is SELinux mode — NOT `app_whiteList`
  *
- * On Odin 3 and Thor, `getService("PServerBinder")` returns non-null BUT
- * `transact()` returns UNKNOWN_TRANSACTION because AYN's PServer checks
- * the caller UID against an `app_whiteList` stored in Settings.System.
- * langerhans' OdinTools is whitelisted by default; our package is not.
+ * `getService("PServerBinder")` can return non-null while `transact()` still
+ * fails. The gate is the device's SELINUX MODE, not an `app_whiteList`:
+ *   - PERMISSIVE / transactable firmware → transact succeeds, zero-setup.
+ *   - ENFORCING and our UID blocked → transact fails; there is no app-only
+ *     fix. The only lever is the vendor "Force SELinux" toggle (a LAST RESORT
+ *     — it breaks many emulators, so most users should never touch it).
  *
- * Fix: the one-time unlock script (run via Odin Settings → Run script as
- * Root) appends our package name to the `app_whiteList` key. After that,
- * transact() succeeds for our UID and [isTransactable] returns true.
- *
- * The whitelist key is `Settings.System/app_whiteList`. Evidence:
- *   - The `write()` catch block below already references this key in its
- *     error message (documented mechanism, not speculation).
- *   - On-device behaviour: transact returns UNKNOWN_TRANSACTION (binder
- *     code -1) before whitelist add, status 0 after.
+ * The old `app_whiteList` narrative is FALSE and has been removed: `pservice`
+ * never checks that key (proven on-device — the app ran root with our package
+ * REMOVED from the whitelist). Adding our package to `app_whiteList` is a no-op
+ * for PServer, so the unlock script no longer does it.
  *
  * HONESTY: [isTransactable] performs a REAL `true` no-op transact and
  * caches whether it succeeded. A mere `binder() != null` is a false
@@ -178,15 +178,17 @@ class PServerWriter @Inject constructor(
             val (status, stdout) = try {
                 transact(binder, cmd)
             } catch (se: SecurityException) {
-                Log.w(TAG, "writeSysfs(): SecurityException — UID not in app_whiteList", se)
+                Log.w(TAG, "writeSysfs(): SecurityException — PServer rejected our UID (likely Enforcing SELinux)", se)
                 // If transact suddenly fails with SecurityException after isTransactable()
-                // returned true (e.g. firmware update reset the whitelist), clear the
+                // returned true (e.g. an OTA flipped SELinux back to Enforcing), clear the
                 // memoised cache so the next isTransactable() re-probes honestly.
                 transactableCache = null
                 return@withContext WriteResult.CapabilityDenied(
                     id,
-                    "PServer rejected our UID for sysfs write. " +
-                        "Re-run the unlock script to re-add our package to app_whiteList.",
+                    "PServer rejected our UID for this sysfs write — likely Enforcing SELinux " +
+                        "blocks app-UID transacts. Live sysfs tuning needs Force-SELinux " +
+                        "(vendor toggle) as a last resort; it can break emulators, so most " +
+                        "users should leave it off.",
                 )
             } catch (t: Throwable) {
                 Log.e(TAG, "writeSysfs(): transact threw", t)
@@ -198,8 +200,8 @@ class PServerWriter @Inject constructor(
 
             // READBACK VERIFICATION — the shell exit code alone is unreliable:
             // the chmod+write+chmod sandwich always returns 0 even when the kernel
-            // silently ignores the write (e.g. still in-whitelist check, DAC issue
-            // after reboot, etc.). We cat the node back through PServer and compare.
+            // silently ignores the write (e.g. an OPP/range clamp, a DAC issue after
+            // reboot, etc.). We cat the node back through PServer and compare.
             //
             // OPP-snap tolerance: cpufreq and GPU OPP tables quantise incoming values
             // to the nearest available operating point. We accept the intended value,
@@ -295,11 +297,14 @@ class PServerWriter @Inject constructor(
             val (status, stdout) = try {
                 transact(binder, cmd)
             } catch (se: SecurityException) {
-                Log.w(TAG, "write(): SecurityException from transact — UID not in app_whiteList", se)
+                Log.w(TAG, "write(): SecurityException from transact — PServer rejected our UID (likely Enforcing SELinux)", se)
                 return@withContext WriteResult.CapabilityDenied(
                     id,
-                    "PServer rejected our UID (likely not in app_whiteList). Add via:\n" +
-                        "adb shell settings put system app_whiteList \"\$(settings get system app_whiteList),io.github.mayusi.calibratesoc.debug\"",
+                    "PServer rejected our UID — likely Enforcing SELinux blocks app-UID " +
+                        "transacts. This is gated by SELinux mode, not app_whiteList " +
+                        "(adding our package to app_whiteList does nothing for PServer). " +
+                        "Live tuning here needs the vendor Force-SELinux toggle as a last " +
+                        "resort; it can break emulators, so most users should leave it off.",
                 )
             } catch (t: Throwable) {
                 Log.e(TAG, "write(): transact threw", t)
@@ -371,7 +376,8 @@ class PServerWriter @Inject constructor(
 
     // Cached result of the real-transact probe. null = not yet probed.
     // Can be reset via [invalidateTransactableCache] so re-entry to the app
-    // after running the whitelist unlock script picks up the new state.
+    // after a SELinux-mode change (e.g. the user flipped Force-SELinux) picks up
+    // the new transactability state.
     @Volatile internal var transactableCache: Boolean? = null
 
     /**
@@ -396,27 +402,26 @@ class PServerWriter @Inject constructor(
      *
      * `getService("PServerBinder") != null` is a FALSE POSITIVE — on the
      * Odin 3 and Thor the service is registered (`service list` shows
-     * "PServerBinder: []") but transacting from our app's UID returns
-     * UNKNOWN_TRANSACTION / "unknown error" because AYN's wire format
-     * gates on the caller UID (langerhans' OdinTools is allow-listed; we
-     * are not). So we run `true` (a shell no-op that exits 0) once and
-     * cache whether the transaction round-trips with status 0.
+     * "PServerBinder: []") but transacting from our app's UID can still be
+     * blocked by the firmware's SELinux mode (Enforcing → transact fails;
+     * Permissive / transactable firmware → succeeds). So we run `true` (a shell
+     * no-op that exits 0) once and cache whether the round-trip returns status 0.
      *
      * Returns true ONLY when PServer genuinely ran our command. Safe to
      * call from any thread; result is memoized until [invalidateTransactableCache].
      *
      * Cheap guard: if the cache is false but [binder] is now non-null we
-     * allow a re-probe — binder presence after a cached-false means either
-     * the whitelist step was just run (binder existed but gated us before)
-     * or the service came up after an earlier null. Either way, one honest
-     * transact is cheaper than a stale false.
+     * allow a re-probe — binder presence after a cached-false means either the
+     * SELinux mode just changed (binder existed but blocked us before) or the
+     * service came up after an earlier null. Either way, one honest transact is
+     * cheaper than a stale false.
      */
     suspend fun isTransactable(): Boolean = withContext(Dispatchers.IO) {
         val cached = transactableCache
         // If we have a cached true, keep it.
         if (cached == true) return@withContext true
         // If we have a cached false, still allow a re-probe when binder is live —
-        // this catches the case where the app warmed before the whitelist was added.
+        // this catches the case where the app warmed before a SELinux-mode change.
         if (cached == false && binder() == null) return@withContext false
 
         val binder = binder()
@@ -467,6 +472,23 @@ class PServerWriter @Inject constructor(
      *     literal text "null" means "no output".
      */
     private fun transact(binder: IBinder, command: String): Pair<Int, String> {
+        // ── PROVABLY-SAFE COMMAND GUARD ───────────────────────────────────────
+        // This is the ONE binder.transact() in the entire app: every root command
+        // (writeSysfs chmod-sandwich, writeSettingsSystem, and every executeShell
+        // caller — AppReaper, FanCurveController, HardwareScanner, GameFpsSampler,
+        // StorageSpeedTester, CpuLoadSource, PrivilegedSysfsReader, the daemon
+        // stop/start hooks) funnels through here. Inspecting the command FIRST,
+        // before the parcel is built, makes it structurally impossible for any
+        // command to reach PServer's root shell without passing the default-deny
+        // allow-list. A destructive command (rm/dd/mkfs/reboot/setenforce/…) is
+        // blocked here and never crosses the binder.
+        when (val verdict = PServerCommandGuard.inspect(command)) {
+            is PServerCommandGuard.Verdict.Deny -> {
+                Log.e(TAG, "PServerCommandGuard BLOCKED: ${verdict.reason} | cmd=$command")
+                return -1 to "BLOCKED: ${verdict.reason}"
+            }
+            PServerCommandGuard.Verdict.Allow -> { /* fall through to transact */ }
+        }
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
@@ -550,7 +572,7 @@ class PServerWriter @Inject constructor(
      *   - Must start with /sys/ or /proc/ (kernel surfaces only).
      *   - Must not contain path-traversal sequences (`..`).
      *   - Must not contain a real NUL byte. A NUL truncates the C string the
-     *     kernel/shell ultimately sees, so `'/sys/safe ; rm -rf /'` could be
+     *     kernel/shell ultimately sees, so `'/sys/safe; rm -rf /'` could be
      *     read as `/sys/safe` by the path check yet do something else downstream.
      *     The doc previously claimed this check existed; SEC-2 makes the code match.
      *   - Must not contain newlines/spaces that would break the single-quote
@@ -563,9 +585,7 @@ class PServerWriter @Inject constructor(
      *     [TunableId]).
      */
     internal fun validateSysfsPath(path: String): String? {
-        if (!path.startsWith("/sys/") && !path.startsWith("/proc/")) {
-            return "path must start with /sys/ or /proc/ (got '$path')"
-        }
+        // Control-character / traversal checks apply to EVERY accepted family.
         if (path.contains("..")) {
             return "path contains path-traversal sequence '..' (got '$path')"
         }
@@ -576,10 +596,33 @@ class PServerWriter @Inject constructor(
         if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
             return "path contains disallowed control characters"
         }
+        // Narrow cgroup-boost carve-out: uclamp (/dev/cpuctl) and schedtune (/dev/stune)
+        // are legitimate perf levers PServer-LIVE now writes. Permit ONLY the exact
+        // modeled node shapes — kept in lockstep with PServerCommandGuard's allow-list,
+        // which is the unbypassable chokepoint that ALSO permits them. Never a blanket /dev/.
+        if (isCgroupBoostNode(path)) {
+            return null
+        }
+        if (!path.startsWith("/sys/") && !path.startsWith("/proc/")) {
+            return "path must start with /sys/ or /proc/ (or a modeled cgroup-boost node) (got '$path')"
+        }
         // SEC-2: apply the SAME dangerous-node block list the door validator uses.
         if (io.github.mayusi.calibratesoc.data.tunables.TunableMetadata.isDangerousPath(path)) {
             return "path '$path' is on the dangerous-node block list"
         }
         return null
     }
+
+    /**
+     * Exact-shape allow for the cgroup-boost perf nodes (uclamp on cpuctl, schedtune
+     * on stune) — the only non-/sys, non-/proc paths this validator accepts. Mirrors
+     * [PServerCommandGuard.isCgroupBoostNode] so the writer-local check and the
+     * unbypassable guard never drift. Slice names restricted to `[A-Za-z0-9_-]+`.
+     */
+    internal fun isCgroupBoostNode(path: String): Boolean = CGROUP_BOOST_NODE.matches(path)
 }
+
+private val CGROUP_BOOST_NODE = Regex(
+    """/dev/cpuctl/[A-Za-z0-9_-]+/cpu\.uclamp\.(min|max)""" +
+        """|/dev/stune/[A-Za-z0-9_-]+/schedtune\.(boost|prefer_idle)""",
+)

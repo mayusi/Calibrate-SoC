@@ -44,6 +44,30 @@ class TunableWriter @Inject constructor(
     private val pServerWriter: PServerWriter,
 ) {
 
+    /**
+     * WAVE 3A — when true, the per-write `stop <daemon>` / `start <daemon>`
+     * sandwich in [writeProtocolFor] is SUPPRESSED because a session-level owner
+     * (AutoTDP's [io.github.mayusi.calibratesoc.data.autotdp.PerfDaemonController])
+     * has already stopped the vendor perf daemons for the whole session and will
+     * restart them on exit. Without this, the per-write post-hook `start` would
+     * restart the daemons every tick and undo the session-level stop.
+     *
+     * Only the daemon stop/start hooks are suppressed — the chmod-lock
+     * ([WriteProtocol.relaxModeBeforeWrite] / [WriteProtocol.sealModeAfterWriteOctal])
+     * is KEPT, as a second line of defence against any daemon we couldn't stop.
+     *
+     * Process-global @Volatile (the daemons are a process-wide resource and there
+     * is at most one AutoTDP session at a time). The controller ALWAYS clears this
+     * in its NonCancellable restore block, so it can never be left stuck true.
+     */
+    @Volatile
+    private var perfDaemonsSessionStopped: Boolean = false
+
+    /** WAVE 3A — toggle the per-write daemon-dance suppression. See [perfDaemonsSessionStopped]. */
+    fun setPerfDaemonsSessionStopped(stopped: Boolean) {
+        perfDaemonsSessionStopped = stopped
+    }
+
     suspend fun write(
         id: TunableId,
         value: String,
@@ -114,9 +138,19 @@ class TunableWriter @Inject constructor(
         if (adapter.perfDaemonsToStopOnWrite.isEmpty() && !adapter.chmodLockCpuFreqWrites) {
             return WriteProtocol.NONE
         }
+        // WAVE 3A: when a session-level owner (AutoTDP's PerfDaemonController) has
+        // already stopped the vendor perf daemons for the whole session, suppress the
+        // per-write stop/start hooks — otherwise the per-tick `start` post-hook would
+        // restart the daemons and defeat the session-level stop. The chmod-lock is kept
+        // (it's a separate, complementary defence against daemons we couldn't stop).
+        val daemonsForThisWrite =
+            if (perfDaemonsSessionStopped) emptyList() else adapter.perfDaemonsToStopOnWrite
+        if (daemonsForThisWrite.isEmpty() && !adapter.chmodLockCpuFreqWrites) {
+            return WriteProtocol.NONE
+        }
         return WriteProtocol(
-            pre = adapter.perfDaemonsToStopOnWrite.map { "stop $it" },
-            post = adapter.perfDaemonsToStopOnWrite.map { "start $it" },
+            pre = daemonsForThisWrite.map { "stop $it" },
+            post = daemonsForThisWrite.map { "start $it" },
             relaxModeBeforeWrite = adapter.chmodLockCpuFreqWrites,
             sealModeAfterWriteOctal = if (adapter.chmodLockCpuFreqWrites) {
                 WriteProtocol.MODE_READ_ONLY
