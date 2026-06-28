@@ -1,3 +1,19 @@
+## [0.3.0-alpha] — 2026-06-28
+
+The new **Adaptive** mode: one dial that tunes your whole chip — CPU *and* GPU — for what you actually want.
+
+### Adaptive — a whole-SoC governor
+- **One intent, everything tuned.** Pick what you want — **Max Performance → Performance → Balanced → Efficiency → Max Battery** — and Adaptive coordinates the *entire* SoC for it: CPU clocks + governor, a brand-new **GPU governor** (it now adapts your GPU clock to load the same way AutoTDP does for the CPU), GPU over/underclock, and memory bias. It's AutoTDP, but holistic across the whole chip.
+- **Advanced (Custom) mode** lets power users dial the priorities directly — how much you value raw performance vs frame stability vs battery vs staying cool.
+- **GPU overclock, two ways, clearly explained:**
+  - *Within vendor limits (recommended)* — run your GPU at the top speed your manufacturer ships and hold it when a game needs it. Safe.
+  - *Beyond stock (experimental)* — tries to push past your manufacturer's limit *if your kernel allows it*. Calibrate tests whether your device actually accepts it and tells you honestly if it doesn't; a strong heat guard backs the GPU off well before any unsafe temperature, and everything resets when you stop.
+- **Always safe.** Every guardrail still applies — the clock floors, the 105°C thermal cutoff, and the always-restore-on-exit behavior all hold. The more-aggressive intents raise ceilings; the heat protection always wins.
+
+### Polish
+- Cleaner, more consistent UI across the dashboard, settings, insights, and the newer screens.
+- README refreshed to reflect everything the app does now.
+
 ## [0.2.0-alpha] — 2026-06-28
 
 The big one. Adaptive AutoTDP that learns your games, four new features, and a top-to-bottom quality pass.
