@@ -151,6 +151,26 @@ class PServerCommandGuardTest {
             "dumpsys activity activities | grep 'mResumedActivity'",
             // dumpsys window — bare form only (no args). Contains mCurrentFocus.
             "dumpsys window | grep 'mCurrentFocus'",
+
+            // 14. FULL one-trust setup — the special-access grants. Each is OUR
+            // package only, exact op/mode/sub-command only (see deny table for the
+            // tightness proof). pm grant POST_NOTIFICATIONS is the SDK-33 addition.
+            "pm grant io.github.mayusi.calibratesoc android.permission.POST_NOTIFICATIONS",
+            "pm grant io.github.mayusi.calibratesoc.debug android.permission.POST_NOTIFICATIONS",
+            // appops set — Usage Access + Overlay, allow + default (reset) modes.
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats allow",
+            "appops set io.github.mayusi.calibratesoc android:system_alert_window allow",
+            "appops set io.github.mayusi.calibratesoc.debug android:get_usage_stats allow",
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats default",
+            "appops set io.github.mayusi.calibratesoc android:system_alert_window default",
+            // appops get — read-only readback.
+            "appops get io.github.mayusi.calibratesoc android:get_usage_stats",
+            "appops get io.github.mayusi.calibratesoc android:system_alert_window",
+            // dumpsys deviceidle whitelist — add/remove our pkg + bare read.
+            "dumpsys deviceidle whitelist +io.github.mayusi.calibratesoc",
+            "dumpsys deviceidle whitelist +io.github.mayusi.calibratesoc.debug",
+            "dumpsys deviceidle whitelist -io.github.mayusi.calibratesoc",
+            "dumpsys deviceidle whitelist",
         )
         val failures = allowed.filter {
             PServerCommandGuard.inspect(it) !is PServerCommandGuard.Verdict.Allow
@@ -216,6 +236,24 @@ class PServerCommandGuardTest {
         allow("dumpsys activity activities")
     @Test fun allow_dumpsysWindowBare() =
         allow("dumpsys window")
+
+    // FULL one-trust setup — special-access allow shapes (our pkg, exact op/mode/sub).
+    @Test fun allow_pmGrantPostNotifications() =
+        allow("pm grant io.github.mayusi.calibratesoc android.permission.POST_NOTIFICATIONS")
+    @Test fun allow_appopsSetUsageStatsAllow() =
+        allow("appops set io.github.mayusi.calibratesoc android:get_usage_stats allow")
+    @Test fun allow_appopsSetOverlayAllow() =
+        allow("appops set io.github.mayusi.calibratesoc android:system_alert_window allow")
+    @Test fun allow_appopsSetDefaultMode() =
+        allow("appops set io.github.mayusi.calibratesoc android:get_usage_stats default")
+    @Test fun allow_appopsGetUsageStats() =
+        allow("appops get io.github.mayusi.calibratesoc android:get_usage_stats")
+    @Test fun allow_deviceidleWhitelistAddOurPkg() =
+        allow("dumpsys deviceidle whitelist +io.github.mayusi.calibratesoc")
+    @Test fun allow_deviceidleWhitelistRemoveOurPkg() =
+        allow("dumpsys deviceidle whitelist -io.github.mayusi.calibratesoc")
+    @Test fun allow_deviceidleWhitelistReadBare() =
+        allow("dumpsys deviceidle whitelist")
 
     // ─────────────────────────────────────────────────────────────────────────
     //  DENY TABLE — every destructive / out-of-allow-list command MUST be blocked
@@ -306,6 +344,31 @@ class PServerCommandGuardTest {
             "dumpsys window extra-arg",             // window takes no args
             "dumpsys batterystats",                 // not on allow-list
             "dumpsys package com.foo",              // not on allow-list
+            // FULL one-trust setup — the special-access widening is default-deny /
+            // our-package-only / exact-op-mode-subcommand-only. Everything off-pattern denies.
+            // appops on a FOREIGN package:
+            "appops set com.evil.app android:get_usage_stats allow",
+            "appops get com.evil.app android:get_usage_stats",
+            // appops with an UNKNOWN op (even on our package):
+            "appops set io.github.mayusi.calibratesoc android:write_settings allow",
+            "appops set io.github.mayusi.calibratesoc android:camera allow",
+            "appops get io.github.mayusi.calibratesoc android:camera",
+            // appops with a mode OTHER than allow/default (deny/ignore/foreign):
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats deny",
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats ignore",
+            "appops set io.github.mayusi.calibratesoc android:system_alert_window foreground",
+            // appops malformed / wrong arity / wrong sub-command:
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats",  // missing mode
+            "appops reset io.github.mayusi.calibratesoc",                        // reset wipes ALL ops
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats allow extra",
+            // deviceidle — only `whitelist` sub-command, only our pkg target:
+            "dumpsys deviceidle whitelist +com.evil.app",   // foreign pkg
+            "dumpsys deviceidle whitelist -com.evil.app",   // foreign pkg
+            "dumpsys deviceidle whitelist io.github.mayusi.calibratesoc", // missing +/- sign
+            "dumpsys deviceidle force-idle",                // disallowed sub-command
+            "dumpsys deviceidle disable",                   // disallowed sub-command
+            "dumpsys deviceidle step",                      // disallowed sub-command
+            "dumpsys deviceidle whitelist +io.github.mayusi.calibratesoc extra", // too many args
         )
         val leaked = denied.filter {
             PServerCommandGuard.inspect(it) !is PServerCommandGuard.Verdict.Deny
@@ -352,6 +415,34 @@ class PServerCommandGuardTest {
     @Test fun deny_dumpsysWindowWithArg() = deny("dumpsys window extra-arg")
     @Test fun deny_dumpsysBatterystats() = deny("dumpsys batterystats")
     @Test fun deny_dumpsysPackage() = deny("dumpsys package com.foo")
+
+    // FULL one-trust setup — widening tightness proof (default-deny / our-pkg-only).
+    @Test fun deny_appopsForeignPackage() =
+        deny("appops set com.evil.app android:get_usage_stats allow")
+    @Test fun deny_appopsGetForeignPackage() =
+        deny("appops get com.evil.app android:get_usage_stats")
+    @Test fun deny_appopsUnknownOp() =
+        deny("appops set io.github.mayusi.calibratesoc android:write_settings allow")
+    @Test fun deny_appopsCameraOp() =
+        deny("appops set io.github.mayusi.calibratesoc android:camera allow")
+    @Test fun deny_appopsModeDeny() =
+        deny("appops set io.github.mayusi.calibratesoc android:get_usage_stats deny")
+    @Test fun deny_appopsModeIgnore() =
+        deny("appops set io.github.mayusi.calibratesoc android:get_usage_stats ignore")
+    @Test fun deny_appopsMissingMode() =
+        deny("appops set io.github.mayusi.calibratesoc android:get_usage_stats")
+    @Test fun deny_appopsResetSubcommand() =
+        deny("appops reset io.github.mayusi.calibratesoc")
+    @Test fun deny_deviceidleWhitelistForeignPkg() =
+        deny("dumpsys deviceidle whitelist +com.evil.app")
+    @Test fun deny_deviceidleWhitelistNoSign() =
+        deny("dumpsys deviceidle whitelist io.github.mayusi.calibratesoc")
+    @Test fun deny_deviceidleForceIdleSubcommand() =
+        deny("dumpsys deviceidle force-idle")
+    @Test fun deny_deviceidleDisableSubcommand() =
+        deny("dumpsys deviceidle disable")
+    @Test fun deny_pmGrantPostNotificationsForeignPkg() =
+        deny("pm grant com.evil.app android.permission.POST_NOTIFICATIONS")
 
     // ── The fan-carve-out tightness proof ─────────────────────────────────────
     // A command that LOOKS like the fan script but aims at a non-Odin path must

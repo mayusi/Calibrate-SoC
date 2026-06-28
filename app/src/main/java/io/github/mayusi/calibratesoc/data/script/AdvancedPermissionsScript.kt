@@ -1,7 +1,12 @@
 package io.github.mayusi.calibratesoc.data.script
 
+import android.app.AppOpsManager
 import android.content.Context
+import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 import java.io.File
@@ -184,6 +189,265 @@ class AdvancedPermissionsScript @Inject constructor(
         return Deployed(priv.absolutePath, visibleToOdinPicker = false)
     }
 
+    /**
+     * One-trust auto-setup: grant the three advanced permissions to OUR OWN
+     * package(s) directly via PServer's root shell — no script file, no manual
+     * "Run script as Root" step. This is the in-app equivalent of the unlock
+     * script's permission grants, run through the same guarded chokepoint.
+     *
+     * HOW IT WORKS
+     *   1. If PServer is not transactable ([PServerWriter.isTransactable] false),
+     *      we return [GrantResult.NotAvailable] honestly — NO grants are issued and
+     *      we never claim a success the device can't deliver. The caller falls back
+     *      to the script path.
+     *   2. Otherwise we run `pm grant <pkg> <perm>` for each of the three perms,
+     *      for our package AND each sibling build variant (debug↔release), via
+     *      [PServerWriter.executeShell]. EVERY command passes through
+     *      [PServerCommandGuard] (which already permits exactly these grants), so
+     *      no guard widening is needed and nothing destructive can be sent.
+     *   3. After issuing the grants we RE-READ [grantsCurrentlyHeld] and report
+     *      ONLY the perms that are actually held now. A grant that didn't land
+     *      (e.g. an OTA flipped SELinux mid-flight) is reported as not-held — we
+     *      never fabricate success.
+     *
+     * Persistence: pm-granted runtime perms survive reboots, exactly like the
+     * script path. The script-deploy fallback ([deploy]) stays intact for devices
+     * with no live PServer.
+     */
+    suspend fun grantViaPServer(): GrantResult {
+        // Issue grants for our package + sibling variants. Building the package
+        // list mirrors deploy(): the current build's pkg PLUS the .debug/release
+        // sibling so a self-grant on either build covers both.
+        val pkg = context.packageName
+        val basePkg = pkg.removeSuffix(".debug")
+        val debugPkg = if (basePkg == pkg) "$pkg.debug" else pkg
+        val pkgs = listOf(pkg, basePkg, debugPkg).distinct()
+
+        return grantViaExecutor(
+            packages = pkgs,
+            isTransactable = { pServerWriter.isTransactable() },
+            executeShell = { cmd -> pServerWriter.executeShell(cmd) },
+            readback = { grantsCurrentlyHeld() },
+        )
+    }
+
+    /**
+     * FULL one-trust auto-setup: grant the app EVERYTHING it needs in a single
+     * click via PServer-root — a strict SUPERSET of [grantViaPServer]. As well as
+     * the three `pm grant` runtime perms (DUMP / PACKAGE_USAGE_STATS /
+     * WRITE_SECURE_SETTINGS) it also flips the four "special access" toggles the
+     * user otherwise grants by hand in system Settings:
+     *
+     *   - **Usage Access**          → `appops set <pkg> android:get_usage_stats allow`
+     *   - **Display over other apps** → `appops set <pkg> android:system_alert_window allow`
+     *   - **Battery unrestricted**  → `dumpsys deviceidle whitelist +<pkg>`
+     *   - **Notifications** (SDK 33+) → `pm grant <pkg> android.permission.POST_NOTIFICATIONS`
+     *
+     * All of these were proven on-device (RP6) to land via the exact PServerBinder
+     * bridge the app uses (root uid=0). Every command flows through
+     * [PServerWriter.executeShell] → [io.github.mayusi.calibratesoc.data.tunables.writer.PServerCommandGuard]
+     * (the one transact chokepoint) so nothing destructive can be smuggled.
+     *
+     * HONESTY contract — identical discipline to [grantViaPServer]:
+     *   1. If PServer is NOT transactable, returns [FullSetupResult.NotAvailable]
+     *      and issues ZERO commands. The caller keeps the script path as fallback;
+     *      it must NOT present this as a success.
+     *   2. Otherwise it issues each grant, then RE-READS every item via a real
+     *      platform check ([fullSetupReadback]) and reports per-[SetupItem] whether
+     *      it is ACTUALLY held now — never what was merely sent. [FullSetupResult
+     *      .Completed.allGranted] is computed off the readback map only.
+     *
+     * Persistence: pm-granted perms + appops + the deviceidle whitelist all survive
+     * reboots, so this is genuinely one-and-done. The boot-reapply path re-warms
+     * tuning separately; these grants do not need re-issuing.
+     */
+    suspend fun grantAllViaPServer(): FullSetupResult {
+        val pkg = context.packageName
+        val basePkg = pkg.removeSuffix(".debug")
+        val debugPkg = if (basePkg == pkg) "$pkg.debug" else pkg
+        val pkgs = listOf(pkg, basePkg, debugPkg).distinct()
+
+        return grantAllViaExecutor(
+            packages = pkgs,
+            attemptNotifications = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+            isTransactable = { pServerWriter.isTransactable() },
+            executeShell = { cmd -> pServerWriter.executeShell(cmd) },
+            readback = { fullSetupReadback() },
+        )
+    }
+
+    /**
+     * Pure, Android-free core of [grantAllViaPServer] so it can be unit-tested with
+     * a fake executor + readback. Issues every grant command via [executeShell],
+     * then returns the HONEST per-[SetupItem] held map produced by [readback].
+     *
+     * Command shapes (each a single clean segment the guard permits — see
+     * [io.github.mayusi.calibratesoc.data.tunables.writer.PServerCommandGuard]):
+     *   - `pm grant <pkg> <perm>` for the 3 base perms (and POST_NOTIFICATIONS when
+     *     [attemptNotifications]) — per package variant.
+     *   - `appops set <pkg> android:get_usage_stats allow`   (Usage Access)
+     *   - `appops set <pkg> android:system_alert_window allow` (Overlay)
+     *   - `dumpsys deviceidle whitelist +<pkg>`              (Battery unrestricted)
+     *
+     * We never trust the command status — a sibling variant that isn't installed
+     * returns non-zero, and the [readback] is the single source of truth.
+     *
+     * @param attemptNotifications when false (SDK < 33) the POST_NOTIFICATIONS grant
+     *   is SKIPPED gracefully — on those releases notifications are on by default,
+     *   so the readback still reports NOTIFICATIONS as held without us issuing it.
+     * @return [FullSetupResult.NotAvailable] when [isTransactable] is false (NO
+     *   commands issued); otherwise [FullSetupResult.Completed] with the re-read
+     *   held map and the list of commands that were issued.
+     */
+    internal suspend fun grantAllViaExecutor(
+        packages: List<String>,
+        attemptNotifications: Boolean,
+        isTransactable: suspend () -> Boolean,
+        executeShell: suspend (String) -> Pair<Int, String>?,
+        readback: () -> Map<SetupItem, Boolean>,
+    ): FullSetupResult {
+        if (!isTransactable()) {
+            // Honest: PServer can't run our command on this device. No grants issued.
+            return FullSetupResult.NotAvailable
+        }
+        val issued = ArrayList<String>()
+        // Build the per-package command list. POST_NOTIFICATIONS is only appended
+        // when attemptNotifications (SDK 33+) — on older releases it's a no-op perm.
+        val perms = buildList {
+            addAll(GRANTABLE_PERMS)
+            if (attemptNotifications) add(POST_NOTIFICATIONS_PERM)
+        }
+        for (pkg in packages) {
+            // 1. pm-grant runtime perms (DUMP / USAGE_STATS / WRITE_SECURE_SETTINGS
+            //    [+ POST_NOTIFICATIONS on SDK 33+]).
+            for (perm in perms) {
+                issued.add("pm grant $pkg $perm")
+            }
+            // 2. Special-access appops — Usage Access + Overlay (allow).
+            for (op in SPECIAL_ACCESS_OPS) {
+                issued.add("appops set $pkg $op allow")
+            }
+            // 3. Battery unrestricted — add to the deviceidle whitelist.
+            issued.add("dumpsys deviceidle whitelist +$pkg")
+        }
+        for (cmd in issued) {
+            // Run through the guarded chokepoint. Status is ignored — a sibling
+            // variant that isn't installed returns non-zero; the readback decides.
+            runCatching { executeShell(cmd) }
+        }
+        // HONESTY: re-read the live state. Only items that ACTUALLY landed are
+        // reported held — never the commands we merely sent.
+        val held = readback()
+        return FullSetupResult.Completed(held, issued)
+    }
+
+    /**
+     * Honest per-[SetupItem] readback used by [grantAllViaPServer], composed ENTIRELY
+     * of real platform checks against OUR package (never what we sent):
+     *
+     *   - [SetupItem.ROOT_PERMS]: true only when all three pm-grant perms are held
+     *     (re-uses [grantsCurrentlyHeld] → PackageManager.checkPermission).
+     *   - [SetupItem.USAGE_ACCESS]: AppOpsManager `get_usage_stats` == MODE_ALLOWED.
+     *   - [SetupItem.OVERLAY]: [Settings.canDrawOverlays].
+     *   - [SetupItem.BATTERY]: [PowerManager.isIgnoringBatteryOptimizations].
+     *   - [SetupItem.NOTIFICATIONS]: [NotificationManagerCompat.areNotificationsEnabled].
+     *
+     * Exposed (internal) so the ViewModel can re-read after refresh, and so a test
+     * can assert the map keys. No grant logic here — pure observation.
+     */
+    internal fun fullSetupReadback(): Map<SetupItem, Boolean> {
+        val grants = grantsCurrentlyHeld()
+        return linkedMapOf(
+            SetupItem.ROOT_PERMS to (grants.dump && grants.usageStats && grants.writeSecureSettings),
+            SetupItem.USAGE_ACCESS to isUsageAccessGranted(),
+            SetupItem.OVERLAY to canDrawOverlays(),
+            SetupItem.BATTERY to isIgnoringBatteryOptimizations(),
+            SetupItem.NOTIFICATIONS to areNotificationsEnabled(),
+        )
+    }
+
+    // ── Special-access platform readbacks (reused by fullSetupReadback) ─────────
+
+    /** Usage Access — AppOps `get_usage_stats` resolves to MODE_ALLOWED for us. */
+    private fun isUsageAccessGranted(): Boolean = runCatching {
+        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
+            ?: return false
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                context.packageName,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            appOps.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                context.packageName,
+            )
+        }
+        mode == AppOpsManager.MODE_ALLOWED
+    }.getOrDefault(false)
+
+    /** Display-over-other-apps (HUD overlay). */
+    private fun canDrawOverlays(): Boolean =
+        runCatching { Settings.canDrawOverlays(context) }.getOrDefault(false)
+
+    /** Battery-unrestricted (Doze exemption) for service survival. */
+    private fun isIgnoringBatteryOptimizations(): Boolean = runCatching {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            ?: return false
+        pm.isIgnoringBatteryOptimizations(context.packageName)
+    }.getOrDefault(false)
+
+    /** Notifications enabled. On SDK < 33 this is true by default (no runtime perm). */
+    private fun areNotificationsEnabled(): Boolean =
+        runCatching { NotificationManagerCompat.from(context).areNotificationsEnabled() }
+            .getOrDefault(false)
+
+    /**
+     * Pure, Android-free core of [grantViaPServer] so it can be unit-tested with a
+     * fake executor + readback. Issues `pm grant <pkg> <perm>` for every (pkg,
+     * perm) pair via [executeShell], then returns the HONEST post-grant [Grants]
+     * read back via [readback].
+     *
+     * Each command is a single clean `pm grant <pkg> <perm>` — exactly the shape
+     * [PServerCommandGuard.allowPm] permits — so it survives the guarded transact.
+     * We do NOT append `2>/dev/null || true`: the guard splits on `||`/`;` and a
+     * sibling-variant grant that fails (variant not installed) simply returns a
+     * non-zero status we ignore; the readback is the source of truth either way.
+     *
+     * @return [GrantResult.NotAvailable] when [isTransactable] is false (NO grants
+     *   issued); otherwise [GrantResult.Completed] carrying the re-read [Grants] and
+     *   the list of commands that were issued.
+     */
+    internal suspend fun grantViaExecutor(
+        packages: List<String>,
+        isTransactable: suspend () -> Boolean,
+        executeShell: suspend (String) -> Pair<Int, String>?,
+        readback: () -> Grants,
+    ): GrantResult {
+        if (!isTransactable()) {
+            // Honest: PServer can't run our command on this device. No grants issued.
+            return GrantResult.NotAvailable
+        }
+        val issued = ArrayList<String>(packages.size * GRANTABLE_PERMS.size)
+        for (pkg in packages) {
+            for (perm in GRANTABLE_PERMS) {
+                val cmd = "pm grant $pkg $perm"
+                issued.add(cmd)
+                // Run through the guarded chokepoint. We don't trust the status —
+                // a sibling variant that isn't installed returns non-zero, and the
+                // readback below is what we actually report.
+                runCatching { executeShell(cmd) }
+            }
+        }
+        // HONESTY: re-read the live grant state. Only perms that ACTUALLY landed
+        // are reported as held — never the commands we merely sent.
+        val held = readback()
+        return GrantResult.Completed(held, issued)
+    }
+
     /** Check whether the three advanced perms are granted now. The
      *  HUD calls this on each open so the FPS line / direct-write path
      *  light up automatically the moment the user runs the script. */
@@ -252,6 +516,100 @@ class AdvancedPermissionsScript @Inject constructor(
             }
         }
         return false
+    }
+
+    /**
+     * Result of [grantViaPServer].
+     *
+     *   - [NotAvailable]: PServer is not transactable on this device — NO grants
+     *     were issued. The caller must fall back to the script path; it must NOT
+     *     present this as a success.
+     *   - [Completed]: the grants were issued and [held] is the HONEST re-read of
+     *     which perms are actually granted now. [Completed.allGranted] is true only
+     *     when all three advanced perms are held; otherwise the caller should show
+     *     the honest partial state + the script fallback for what's missing.
+     */
+    sealed interface GrantResult {
+        object NotAvailable : GrantResult
+        data class Completed(
+            val held: Grants,
+            val issuedCommands: List<String>,
+        ) : GrantResult {
+            /** True only when all three advanced perms actually landed. */
+            val allGranted: Boolean
+                get() = held.dump && held.usageStats && held.writeSecureSettings
+        }
+    }
+
+    /**
+     * The complete set of things one-trust full setup grants — each a row in the
+     * onboarding/settings checklist. STABLE contract the UI compiles against; do not
+     * reorder or rename without updating the UI.
+     *
+     *   - [ROOT_PERMS]    — the three `pm grant` runtime perms as a group (true only
+     *                       when ALL of DUMP + PACKAGE_USAGE_STATS + WRITE_SECURE_SETTINGS hold).
+     *   - [USAGE_ACCESS]  — Usage Access (foreground detection / per-app auto-switch).
+     *   - [OVERLAY]       — Display over other apps (the floating HUD).
+     *   - [BATTERY]       — Battery-unrestricted (service survival through Doze).
+     *   - [NOTIFICATIONS] — POST_NOTIFICATIONS (SDK 33+; auto-held on older releases).
+     */
+    enum class SetupItem { ROOT_PERMS, USAGE_ACCESS, OVERLAY, BATTERY, NOTIFICATIONS }
+
+    /**
+     * Result of [grantAllViaPServer] — the full one-trust setup.
+     *
+     *   - [NotAvailable]: PServer is not transactable on this device — NO commands
+     *     were issued. The caller must fall back to the script + manual-Settings path;
+     *     it must NOT present this as a success.
+     *   - [Completed]: the grants were issued and [held] is the HONEST per-[SetupItem]
+     *     re-read of what is actually granted now. [Completed.allGranted] is computed
+     *     OFF THE READBACK MAP only (never off what was sent) and is true only when
+     *     every item is held.
+     */
+    sealed interface FullSetupResult {
+        object NotAvailable : FullSetupResult
+        data class Completed(
+            val held: Map<SetupItem, Boolean>,
+            val issued: List<String>,
+        ) : FullSetupResult {
+            /** True only when EVERY setup item is held per the live readback. */
+            val allGranted: Boolean
+                get() = held.values.all { it }
+        }
+    }
+
+    private companion object {
+        /**
+         * The three advanced perms we self-grant — IDENTICAL to
+         * [io.github.mayusi.calibratesoc.data.tunables.writer.PServerCommandGuard]'s
+         * GRANTABLE_PERMS allow-list. Kept as plain strings (matching the manifest
+         * permission names) so the issued `pm grant` command is exactly the guarded
+         * shape. Order: DUMP, PACKAGE_USAGE_STATS, WRITE_SECURE_SETTINGS.
+         */
+        val GRANTABLE_PERMS = listOf(
+            "android.permission.DUMP",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "android.permission.WRITE_SECURE_SETTINGS",
+        )
+
+        /**
+         * The notifications runtime perm — pm-granted on SDK 33+ ONLY (added to the
+         * guard's GRANTABLE_PERMS allow-list). On older releases notifications are on
+         * by default, so [grantAllViaExecutor] skips issuing it.
+         */
+        const val POST_NOTIFICATIONS_PERM = "android.permission.POST_NOTIFICATIONS"
+
+        /**
+         * The two AppOps special-access ops we flip to `allow` via PServer-root —
+         * Usage Access + Display-over-other-apps. IDENTICAL to the guard's
+         * APPOPS_OPS allow-list (kept in sync; the guard only permits these two op
+         * names, mode allow/default, our package). The `appops set` command shape is
+         * `appops set <pkg> <op> allow`.
+         */
+        val SPECIAL_ACCESS_OPS = listOf(
+            "android:get_usage_stats",
+            "android:system_alert_window",
+        )
     }
 
     data class Deployed(val path: String, val visibleToOdinPicker: Boolean)

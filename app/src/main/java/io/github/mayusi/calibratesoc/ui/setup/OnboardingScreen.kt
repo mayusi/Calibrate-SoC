@@ -95,15 +95,20 @@ import kotlinx.coroutines.delay
  * escape.
  *   None              → still in the universal steps / all-done decision
  *   Ask               → "do you want advanced unlock?" explainer
- *   ScriptGuide       → the MAIN advanced step: generate + run the unlock
- *                       script (pm grants + PServer whitelist). Works on
- *                       Enforcing SELinux — no Permissive needed.
+ *   AutoSetup         → the ONE-TRUST path on PServer-live devices: a single
+ *                       trust prompt that self-grants DUMP / usage-stats /
+ *                       secure-settings via the device's root bridge — no
+ *                       script, no file picker. Honest fallback to ScriptGuide
+ *                       if PServer turns out not to be transactable.
+ *   ScriptGuide       → the MAIN advanced step (FALLBACK for non-PServer /
+ *                       Enforcing devices): generate + run the unlock script
+ *                       (pm grants). Works on Enforcing SELinux — no Permissive.
  *   SelinuxLastResort → OPTIONAL tail, only reached when the script ran but
  *                       NO no-Permissive live path exists. Big warning,
  *                       easy/recommended skip. Not shown otherwise.
  *   Done              → celebrate; live grants checklist; enter app
  */
-private enum class AdvPhase { None, Ask, ScriptGuide, SelinuxLastResort, Done }
+private enum class AdvPhase { None, Ask, AutoSetup, ScriptGuide, SelinuxLastResort, Done }
 
 @Composable
 fun OnboardingScreen(
@@ -122,6 +127,11 @@ fun OnboardingScreen(
     var advancedPhase by remember { mutableStateOf(AdvPhase.None) }
     val grants by advancedUnlockVm.grants.collectAsState()
     val capability by advancedUnlockVm.capability.collectAsState()
+    // FULL one-click setup state (setupEverything → grant the 3 pm-perms PLUS the
+    // four special-access toggles in one shot). Drives the live checklist on the
+    // PServer-live happy path. Honest by construction — only ever reflects the
+    // engine's post-grant per-item readback.
+    val fullSetupState by advancedUnlockVm.fullSetupState.collectAsState()
 
     // Whether to offer the Force SELinux (SELinux Permissive) LAST-RESORT
     // step at all. Only when there is genuinely NO no-Permissive live path:
@@ -347,14 +357,45 @@ fun OnboardingScreen(
                         ),
                     pserverSysfsLive = cap?.pserverSysfsLive == true,
                     selinuxEnforcing = cap?.selinuxEnforcing,
-                    // Script-first: opting into advanced unlock goes straight to
-                    // the unlock SCRIPT (pm grants for HUD/FPS/vendor keys). Force
-                    // SELinux is never on the default path.
-                    onYes = { advancedPhase = AdvPhase.ScriptGuide },
+                    // ONE-TRUST: on a PServer-live device the app can grant itself
+                    // everything via the root bridge — route to the single trust
+                    // prompt (AutoSetup), no script. On non-PServer / Enforcing
+                    // devices fall back to the unlock SCRIPT. Force SELinux is never
+                    // on the default path.
+                    onYes = {
+                        advancedPhase = if (cap?.pserverSysfsLive == true) {
+                            AdvPhase.AutoSetup
+                        } else {
+                            AdvPhase.ScriptGuide
+                        }
+                    },
+                    // ONE-TRUST primary on a PServer-live device: self-grant the
+                    // optional HUD/FPS/per-app perms via the root bridge in one tap.
+                    onAutoSetup = { advancedPhase = AdvPhase.AutoSetup },
                     // "Already live → nothing to do" goes straight to the celebrate/enter
                     // screen (no scary-skip dialog — there is nothing being skipped).
                     onAlreadyLiveContinue = { advancedPhase = AdvPhase.Done },
                     onNo = requestSkip,
+                )
+                AdvPhase.AutoSetup -> AdvancedFullSetupStep(
+                    fullSetupState = fullSetupState,
+                    // Honest "already done on re-open" signal off the live readbacks
+                    // (NOT what we sent): every SetupItem currently held now.
+                    liveTuningActive = liveAlreadyActive,
+                    // Set up everything → one PServer-root shot that grants the 3
+                    // pm-perms + Usage Access + Overlay + Battery + Notifications.
+                    // The engine reports the HONEST per-item readback we render.
+                    onSetUp = { advancedUnlockVm.setupEverything() },
+                    // Retry → re-fire the same one-click setup (e.g. after a partial).
+                    onRetry = { advancedUnlockVm.setupEverything() },
+                    // Enter app → straight into the app. The one-click screen IS the
+                    // terminal celebration on this path, so we don't bounce through the
+                    // old "advanced unlock complete" Done screen. Any ungranted extras
+                    // stay re-runnable later from Tune → HUD & FPS permissions.
+                    onEnterApp = enterApp,
+                    // Honest fallback: if PServer wasn't transactable, offer the script
+                    // ladder for whatever's still missing.
+                    onUseScript = { advancedPhase = AdvPhase.ScriptGuide },
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
                     vendorName = vendorName,
@@ -410,6 +451,17 @@ fun OnboardingScreen(
                 advancedApplicable = advancedApplicable,
                 liveAlreadyActive = liveAlreadyActive,
                 pserverSysfsLive = cap?.pserverSysfsLive == true,
+                // Honest "everything already granted" off the live readbacks — when
+                // true (e.g. a re-open after a prior one-click setup) the full-setup
+                // hero collapses to a quiet "all set" with no button to re-run.
+                fullSetupAllHeld = grants.dump && grants.usageStats &&
+                    grants.writeSecureSettings,
+                // PServer-live HERO: one tap that grants EVERYTHING (the full
+                // setupEverything path) via the live checklist screen — collapses the
+                // old separate overlay/usage/battery/script steps into one click.
+                onSetupEverything = { advancedPhase = AdvPhase.AutoSetup },
+                // Non-PServer / Enforcing fallback still routes through the Ask
+                // explainer → script ladder (unchanged).
                 onSetupAdvanced = { advancedPhase = AdvPhase.Ask },
                 onEnterApp = enterApp,
                 onBack = { stepIdx-- },
@@ -692,6 +744,8 @@ private fun AllDoneStep(
     advancedApplicable: Boolean,
     liveAlreadyActive: Boolean,
     pserverSysfsLive: Boolean,
+    fullSetupAllHeld: Boolean,
+    onSetupEverything: () -> Unit,
     onSetupAdvanced: () -> Unit,
     onEnterApp: () -> Unit,
     onBack: () -> Unit,
@@ -749,33 +803,81 @@ private fun AllDoneStep(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(
-                    onClick = onEnterApp,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Enter app") }
 
-                // OPTIONAL enhancement — clearly framed as a nice-to-have, never required.
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            "Optional: in-game FPS + per-app auto-profiles",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            "Want a real in-game FPS counter and per-app auto-switching? Grant 3 extra " +
-                                "permissions with a one-tap script. Totally optional — tuning already " +
-                                "works without it.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        OutlinedButton(
-                            onClick = onSetupAdvanced,
+                if (pserverSysfsLive && !fullSetupAllHeld) {
+                    // ── PServer-live HERO: ONE TAP grants EVERYTHING ──────────────
+                    // Calibrate uses the device's built-in root bridge to grant
+                    // itself everything it needs — the in-game FPS / DUMP perms, the
+                    // overlay HUD, foreground detection for per-app profiles, reliable
+                    // background running, and notifications — in a single tap. No
+                    // Settings trips, no script. This collapses the old separate
+                    // overlay / usage / battery / script steps into one click.
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "Finish in one tap",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Calibrate can grant itself everything else it needs — in-game FPS, the " +
+                                    "overlay HUD, per-app profiles, reliable background running, and " +
+                                    "notifications — through your device's root bridge. No Settings trips, " +
+                                    "no script.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = onSetupEverything,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Set up everything") }
+                    OutlinedButton(
+                        onClick = onEnterApp,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Skip — enter app") }
+                } else {
+                    // Either everything is already granted (re-open after a prior
+                    // one-click setup), or this is a non-PServer live path (root /
+                    // AYANEO binder) where the one-tap self-grant mechanism doesn't
+                    // apply. Enter the app; the (optional) extras stay reachable from
+                    // Tune → HUD & FPS permissions.
+                    Button(
+                        onClick = onEnterApp,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Enter app") }
+
+                    if (!fullSetupAllHeld) {
+                        // Non-PServer live path: keep the optional script as the add-on
+                        // route to the FPS / per-app extras (honest — those aren't
+                        // self-grantable here without a script).
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Grant HUD & FPS permissions (optional)") }
+                        ) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    "Optional: in-game FPS + per-app auto-profiles",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    "Want a real in-game FPS counter and per-app auto-switching? Grant 3 extra " +
+                                        "permissions with a one-tap script. Totally optional — tuning already " +
+                                        "works without it.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                OutlinedButton(
+                                    onClick = onSetupAdvanced,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Grant HUD & FPS permissions (optional)") }
+                            }
+                        }
                     }
                 }
                 OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back") }
@@ -1022,6 +1124,7 @@ private fun AdvancedAskStep(
     pserverSysfsLive: Boolean,
     selinuxEnforcing: Boolean?,
     onYes: () -> Unit,
+    onAutoSetup: () -> Unit,
     onAlreadyLiveContinue: () -> Unit,
     onNo: () -> Unit,
 ) {
@@ -1066,17 +1169,30 @@ private fun AdvancedAskStep(
                 }
                 Text(
                     "AutoTDP, live ± clock tuning, and the HUD controls all work right now — no " +
-                        "script, no SELinux change, no root needed. You can still run the unlock " +
-                        "script if you want the real-FPS overlay and vendor-key writes, but it's " +
-                        "optional.",
+                        "script, no SELinux change, no root needed. In one tap Calibrate can grant " +
+                        "itself everything else — in-game FPS, the overlay HUD, per-app profiles, " +
+                        "reliable background running, and notifications — or you can skip it.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(onClick = onAlreadyLiveContinue, modifier = Modifier.fillMaxWidth()) {
-                    Text("Great — continue")
-                }
-                OutlinedButton(onClick = onYes, modifier = Modifier.fillMaxWidth()) {
-                    Text("Run the script anyway (optional extras)")
+                if (pserverSysfsLive) {
+                    // ONE-CLICK: PServer root is live, so the app can grant itself
+                    // EVERYTHING in a single tap — no script, no file picker.
+                    Button(onClick = onAutoSetup, modifier = Modifier.fillMaxWidth()) {
+                        Text("Set up everything")
+                    }
+                    OutlinedButton(onClick = onAlreadyLiveContinue, modifier = Modifier.fillMaxWidth()) {
+                        Text("Skip — I'm good")
+                    }
+                } else {
+                    // Non-PServer live path (root / AYANEO binder): the one-tap self-grant
+                    // route isn't the mechanism here, so keep the script as the optional add-on.
+                    Button(onClick = onAlreadyLiveContinue, modifier = Modifier.fillMaxWidth()) {
+                        Text("Great — continue")
+                    }
+                    OutlinedButton(onClick = onYes, modifier = Modifier.fillMaxWidth()) {
+                        Text("Run the script anyway (optional extras)")
+                    }
                 }
                 return@Column
             }
@@ -1271,6 +1387,217 @@ private fun AdvancedSelinuxLastResortStep(
                 Text(if (selinuxDone) "Continue" else "I enabled it anyway — continue")
             }
         }
+    }
+}
+
+/**
+ * The user-facing label for each [AdvancedPermissionsScript.SetupItem] row in the
+ * one-click checklist. STABLE ordered list — the order mirrors the engine's
+ * [AdvancedPermissionsScript.fullSetupReadback] linkedMap and the brief's copy.
+ * Lives next to the UI (not the engine) so wording changes never touch the
+ * contract.
+ */
+private val SetupItemLabels: List<Pair<AdvancedPermissionsScript.SetupItem, String>> = listOf(
+    AdvancedPermissionsScript.SetupItem.ROOT_PERMS to "In-game FPS & diagnostics (DUMP)",
+    AdvancedPermissionsScript.SetupItem.USAGE_ACCESS to "Foreground detection — per-app profiles (Usage access)",
+    AdvancedPermissionsScript.SetupItem.OVERLAY to "Overlay HUD (Display over other apps)",
+    AdvancedPermissionsScript.SetupItem.BATTERY to "Reliable background running (Battery unrestricted)",
+    AdvancedPermissionsScript.SetupItem.NOTIFICATIONS to "Notifications",
+)
+
+/**
+ * ONE-CLICK FULL setup step (PServer-live devices). A single screen, a single
+ * tap: [AdvancedUnlockViewModel.setupEverything] grants the app EVERYTHING it
+ * needs through the device's built-in root bridge (PServer) — the 3 pm-perms
+ * (DUMP / usage-stats / secure-settings) PLUS Usage Access, the overlay HUD,
+ * battery-unrestricted, and notifications — in one shot. No Settings trips, no
+ * script, no file picker.
+ *
+ * HONESTY is enforced end-to-end. The checklist NEVER shows ✓ for something the
+ * engine's post-grant readback says is false — every row reads the real
+ * [AdvancedUnlockViewModel.FullSetupState.FullCompleted.held] map:
+ *   - Idle               → "Set up everything" hero + the trust line + a preview
+ *                           of the items that will be granted (all unchecked).
+ *   - Running            → live checklist with a progress bar ("Setting everything up…").
+ *   - FullCompleted (all)→ "You're all set 🎉 — Calibrate is fully configured" + Enter app.
+ *   - FullCompleted (some)→ honest partial: ✓ for what landed, ✗ for what didn't,
+ *                           + a Retry and a "Grant the rest via the script" fallback.
+ *   - NotAvailable       → honest "couldn't set up automatically" + the script ladder
+ *                           ([AdvancedScriptStep]) which stays the FALLBACK for
+ *                           non-PServer / Enforcing devices.
+ *   - already all held   → if [liveTuningActive] AND nothing left to grant, this
+ *                           screen isn't shown (the caller skips straight to "all
+ *                           set"); but if reached, the FullCompleted-all branch
+ *                           renders the all-set state.
+ */
+@Composable
+private fun AdvancedFullSetupStep(
+    fullSetupState: AdvancedUnlockViewModel.FullSetupState,
+    liveTuningActive: Boolean,
+    onSetUp: () -> Unit,
+    onRetry: () -> Unit,
+    onEnterApp: () -> Unit,
+    onUseScript: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            when (val s = fullSetupState) {
+                // ── ALL SET (every item landed per the live readback) ──────────
+                is AdvancedUnlockViewModel.FullSetupState.FullCompleted -> if (s.allGranted) {
+                    AdvCardHeader(Icons.Outlined.CheckCircle, "You're all set 🎉")
+                    Text(
+                        "Calibrate is fully configured — tuning, in-game FPS, the overlay HUD, per-app " +
+                            "profiles, and reliable background running are all enabled.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SetupChecklist(held = s.held)
+                    Button(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                        Text("Enter app")
+                    }
+                } else {
+                    // ── HONEST PARTIAL — some item didn't take ─────────────────
+                    AdvCardHeader(Icons.Outlined.Warning, "Almost there")
+                    Text(
+                        "Calibrate enabled what it could through the root bridge, but not everything " +
+                            "came through. Here's exactly what's on and what's still missing — you can " +
+                            "retry, or grant the rest with the one-time script.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SetupChecklist(held = s.held)
+                    Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+                        Text("Retry setup")
+                    }
+                    OutlinedButton(onClick = onUseScript, modifier = Modifier.fillMaxWidth()) {
+                        Text("Grant the rest via the script")
+                    }
+                    OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                        Text("Continue anyway")
+                    }
+                }
+
+                // ── SETTING EVERYTHING UP… (live checklist, none ticked yet) ───
+                is AdvancedUnlockViewModel.FullSetupState.Running -> {
+                    AdvCardHeader(Icons.Outlined.Bolt, "Setting everything up…")
+                    Text(
+                        "Granting Calibrate everything it needs through your device's root bridge.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(CircleShape),
+                    )
+                    // No held map yet — show the items pending so the user sees what's
+                    // being set up. Honest: every row is unchecked until the readback lands.
+                    SetupChecklist(held = emptyMap())
+                }
+
+                // ── PServer NOT TRANSACTABLE (honest fallback to the script) ───
+                is AdvancedUnlockViewModel.FullSetupState.NotAvailable -> {
+                    AdvCardHeader(Icons.Outlined.Info, "Couldn't set up automatically")
+                    Text(
+                        "We couldn't reach your device's root bridge to grant the permissions " +
+                            "automatically. No changes were made. You can still enable everything by " +
+                            "running the one-time unlock script.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = onUseScript, modifier = Modifier.fillMaxWidth()) {
+                        Text("Set up with the script instead")
+                    }
+                    OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                        Text("Not now — enter app")
+                    }
+                }
+
+                // ── IDLE — the one clean "set up everything" screen ────────────
+                is AdvancedUnlockViewModel.FullSetupState.Idle -> {
+                    AdvCardHeader(Icons.Outlined.Bolt, "Set up Calibrate — one tap")
+                    Text(
+                        "Calibrate uses your device's built-in root bridge to grant itself everything it " +
+                            "needs — tuning, in-game FPS, the overlay HUD, per-app profiles, and reliable " +
+                            "background running. No Settings trips, no script.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // Preview of what one tap grants — honest, all unchecked until the user taps.
+                    SetupChecklist(held = emptyMap(), liveTuningActive = liveTuningActive)
+                    AdvNoteCard(
+                        "Safe by design: the app only grants its OWN known permissions. Every root " +
+                            "command passes the built-in safety gate, which permits nothing else.",
+                    )
+                    Button(onClick = onSetUp, modifier = Modifier.fillMaxWidth()) {
+                        Text("Set up everything")
+                    }
+                    OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                        Text("Not now")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The honest live checklist for one-click setup. Each row reflects the REAL
+ * per-[AdvancedPermissionsScript.SetupItem] [held] map produced by the engine's
+ * post-grant readback — a row is ✓ only when [held] says true for it, otherwise
+ * it shows a pending ○. Never fabricates a ✓.
+ *
+ * The leading "Live tuning (already active on this device)" row is shown only on
+ * a PServer-live device ([liveTuningActive]); it reflects the genuinely-active
+ * live-tuning path, not a setup item, so it's ✓ from the start there.
+ */
+@Composable
+private fun SetupChecklist(
+    held: Map<AdvancedPermissionsScript.SetupItem, Boolean>,
+    liveTuningActive: Boolean = false,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (liveTuningActive) {
+                SetupChecklistRow(done = true, label = "Live tuning (already active on this device)")
+            }
+            for ((item, label) in SetupItemLabels) {
+                // HONEST: ✓ only when the readback says this item is held. Absent key
+                // (Idle preview / Running before readback) → pending, never ✓.
+                SetupChecklistRow(done = held[item] == true, label = label)
+            }
+        }
+    }
+}
+
+/** One honest checklist row — ✓ (held) or ○ (pending). Mirrors the real held map. */
+@Composable
+private fun SetupChecklistRow(done: Boolean, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            if (done) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+            contentDescription = if (done) "Granted" else "Pending",
+            tint = if (done) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (done) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

@@ -95,12 +95,45 @@ object PServerCommandGuard {
         "io.github.mayusi.calibratesoc.debug",
     )
 
-    /** The only permissions we ever `pm grant` (see AdvancedPermissionsScript). */
+    /**
+     * The only permissions we ever `pm grant` (see AdvancedPermissionsScript).
+     * POST_NOTIFICATIONS is the one-trust full-setup addition — pm-granted on
+     * SDK 33+ so the HUD/monitor notifications work without a Settings trip. Still
+     * our-package-only: the [allowPm] target check is unchanged.
+     */
     private val GRANTABLE_PERMS = setOf(
         "android.permission.DUMP",
         "android.permission.PACKAGE_USAGE_STATS",
         "android.permission.WRITE_SECURE_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS",
     )
+
+    /**
+     * The ONLY AppOps op names `appops set/get` may target — the two special-access
+     * toggles one-trust full setup flips for OUR package: Usage Access and
+     * Display-over-other-apps. Mirrors [io.github.mayusi.calibratesoc.data.script
+     * .AdvancedPermissionsScript.SPECIAL_ACCESS_OPS]. Any other op (e.g.
+     * `android:write_settings`, `android:camera`) is denied.
+     */
+    private val APPOPS_OPS = setOf(
+        "android:get_usage_stats",
+        "android:system_alert_window",
+    )
+
+    /**
+     * The ONLY `appops set` modes permitted — grant (`allow`) and reset to platform
+     * default (`default`). We NEVER allow `deny`/`ignore`/`foreground`/anything else
+     * through this guard: a one-trust setup grants or resets, it does not silently
+     * deny ops on our own package via the root channel.
+     */
+    private val APPOPS_SET_MODES = setOf("allow", "default")
+
+    /**
+     * The ONLY `dumpsys deviceidle` sub-command permitted — `whitelist` (battery
+     * unrestricted). `dumpsys deviceidle` is otherwise NOT a free-for-all: every
+     * other sub-command (`force-idle`, `step`, `disable`, `enable`, …) is denied.
+     */
+    private const val DEVICEIDLE_SUBCOMMAND = "whitelist"
 
     /**
      * The only services `stop`/`start` may target — the perf daemons declared in
@@ -230,6 +263,7 @@ object PServerCommandGuard {
             "settings" -> allowSettings(tokens, segment)
             "pm" -> allowPm(tokens, segment)
             "am" -> allowAm(tokens, segment)
+            "appops" -> allowAppops(tokens, segment)
             "dumpsys" -> allowDumpsys(tokens, segment)
             "getprop" -> allowGetprop(tokens, segment)
             "getenforce" -> if (tokens.size == 1) Verdict.Allow
@@ -339,6 +373,50 @@ object PServerCommandGuard {
     }
 
     /**
+     * `appops set <ourpkg> <known-op> <allow|default>` — grant/reset a special-access
+     * op, and `appops get <ourpkg> <known-op>` — read it back. ALL of:
+     *   - target pkg MUST be one of OUR package variants ([GRANTABLE_PKGS]),
+     *   - op MUST be on [APPOPS_OPS] (get_usage_stats / system_alert_window only),
+     *   - for `set`, mode MUST be on [APPOPS_SET_MODES] (allow/default ONLY — never
+     *     deny/ignore/anything else).
+     * Anything else (other pkg, other op, other mode, other sub-command) is denied.
+     * This is the ONLY way the one-trust full-setup Usage-Access / Overlay grants
+     * reach root, and it stays default-deny / our-package-only by construction.
+     */
+    private fun allowAppops(tokens: List<String>, segment: String): Verdict {
+        if (hasRedirect(segment)) return Verdict.Deny("appops must not redirect: '$segment'")
+        if (tokens.size < 2) return Verdict.Deny("appops command too short: '$segment'")
+        return when (tokens[1]) {
+            "set" -> {
+                // appops set <pkg> <op> <mode>
+                if (tokens.size != 5) return Verdict.Deny("appops set takes <pkg> <op> <mode>: '$segment'")
+                if (tokens[2] !in GRANTABLE_PKGS) {
+                    return Verdict.Deny("appops set target must be our own package: '$segment'")
+                }
+                if (tokens[3] !in APPOPS_OPS) {
+                    return Verdict.Deny("appops op not on allow-list: '$segment'")
+                }
+                if (tokens[4] !in APPOPS_SET_MODES) {
+                    return Verdict.Deny("appops set mode must be allow/default: '$segment'")
+                }
+                Verdict.Allow
+            }
+            "get" -> {
+                // appops get <pkg> <op> — read-only.
+                if (tokens.size != 4) return Verdict.Deny("appops get takes <pkg> <op>: '$segment'")
+                if (tokens[2] !in GRANTABLE_PKGS) {
+                    return Verdict.Deny("appops get target must be our own package: '$segment'")
+                }
+                if (tokens[3] !in APPOPS_OPS) {
+                    return Verdict.Deny("appops op not on allow-list: '$segment'")
+                }
+                Verdict.Allow
+            }
+            else -> Verdict.Deny("only 'appops set/get <ourpkg> <op> …' is permitted: '$segment'")
+        }
+    }
+
+    /**
      * `am force-stop <pkg>` / `am set-inactive <pkg> true|false` (AppReaper).
      * Explicitly NOT `am start` / `am broadcast` / anything else.
      */
@@ -423,7 +501,44 @@ object PServerCommandGuard {
                 }
                 Verdict.Allow
             }
+            "deviceidle" -> allowDumpsysDeviceidle(tokens, segment)
             else -> Verdict.Deny("dumpsys service not on allow-list: '$segment'")
+        }
+    }
+
+    /**
+     * `dumpsys deviceidle whitelist` (read) and `dumpsys deviceidle whitelist
+     * +<ourpkg>` / `-<ourpkg>` (battery-unrestricted add/remove). `deviceidle` is
+     * tightly scoped:
+     *   - ONLY the `whitelist` sub-command is permitted (never `force-idle`, `step`,
+     *     `disable`, `enable`, …).
+     *   - the `+`/`-` target MUST strip to one of OUR package variants — any other
+     *     target (`+com.evil`) is denied so we can never whitelist a foreign app.
+     *   - bare `dumpsys deviceidle whitelist` is a read (the current whitelist) used
+     *     to confirm the add landed.
+     * No redirect permitted.
+     */
+    private fun allowDumpsysDeviceidle(tokens: List<String>, segment: String): Verdict {
+        // tokens here are [dumpsys, deviceidle, <sub>, <arg?>]
+        if (tokens.size < 3) return Verdict.Deny("dumpsys deviceidle needs a sub-command: '$segment'")
+        if (tokens[2] != DEVICEIDLE_SUBCOMMAND) {
+            return Verdict.Deny("only 'dumpsys deviceidle whitelist' is permitted: '$segment'")
+        }
+        return when (tokens.size) {
+            3 -> Verdict.Allow // bare `... whitelist` — read the current list.
+            4 -> {
+                val arg = tokens[3]
+                val sign = arg.firstOrNull()
+                if (sign != '+' && sign != '-') {
+                    return Verdict.Deny("deviceidle whitelist target must start with +/-: '$segment'")
+                }
+                val pkg = arg.substring(1)
+                if (pkg !in GRANTABLE_PKGS) {
+                    return Verdict.Deny("deviceidle whitelist target must be our own package: '$segment'")
+                }
+                Verdict.Allow
+            }
+            else -> Verdict.Deny("dumpsys deviceidle whitelist takes at most one +/-pkg: '$segment'")
         }
     }
 

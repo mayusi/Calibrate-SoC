@@ -1604,6 +1604,9 @@ private fun AdvancedUnlockCard(
     val grants by viewModel.grants.collectAsStateWithLifecycle()
     val pserverLive by viewModel.pserverSysfsLive.collectAsStateWithLifecycle()
     val selinuxEnforcing by viewModel.selinuxEnforcing.collectAsStateWithLifecycle()
+    // FULL one-click setup state — the re-runnable equivalent of onboarding's
+    // "Set up everything". Reflects the engine's honest per-item readback.
+    val fullSetupState by viewModel.fullSetupState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var lastPath by remember { mutableStateOf<String?>(null) }
     val vs = remember {
@@ -1617,10 +1620,21 @@ private fun AdvancedUnlockCard(
             StatusPill(text = "LIVE TUNING ACTIVE — NOTHING TO DO", accent = AccentBar.Emerald)
             Text(
                 "PServer root is live, so AutoTDP and ± clock tuning already work with zero setup — " +
-                    "no script, no SELinux change, no root. The script below is OPTIONAL: it only adds " +
-                    "the real-FPS overlay and vendor-key writes.",
+                    "no script, no SELinux change, no root. The optional extras below (real-FPS " +
+                    "overlay, per-app auto-profiles, vendor-key writes) can be granted automatically " +
+                    "in one tap.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF999999),
+            )
+            // ── ONE-CLICK re-runnable FULL setup (PServer-live only) ──────────────
+            // The app grants ITSELF everything via the root bridge — the 3 pm-perms
+            // PLUS Usage Access, the overlay HUD, battery-unrestricted, and
+            // notifications — in one tap. Re-runnable here if onboarding was skipped
+            // or a perm got revoked. Mirrors onboarding's "Set up everything" and is
+            // HONEST: the checklist reflects the engine's real per-item readback.
+            FullSetupUnlockSection(
+                fullSetupState = fullSetupState,
+                onSetUp = { viewModel.setupEverything() },
             )
         } else {
             Text(
@@ -1696,6 +1710,97 @@ private fun GrantIndicator(label: String, on: Boolean, hint: String) {
             style = MaterialTheme.typography.labelSmall,
             color = Color(0xFF777777),
         )
+    }
+}
+
+/**
+ * Ordered ([AdvancedPermissionsScript.SetupItem], short-label) list for the
+ * Tune-screen one-click checklist. Short, uppercase-friendly labels for the
+ * Arsenal [StatusPill] idiom; mirrors the engine's readback order.
+ */
+private val FullSetupItemLabels:
+    List<Pair<io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem, String>> = listOf(
+    io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem.ROOT_PERMS to "FPS & diagnostics (DUMP)",
+    io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem.USAGE_ACCESS to "Per-app profiles (Usage)",
+    io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem.OVERLAY to "Overlay HUD",
+    io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem.BATTERY to "Background running (Battery)",
+    io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem.NOTIFICATIONS to "Notifications",
+)
+
+/**
+ * Re-runnable ONE-CLICK full setup section (PServer-live). Calls
+ * [AdvancedUnlockViewModel.setupEverything] and renders an HONEST checklist off
+ * [AdvancedUnlockViewModel.FullSetupState] — a row is ✓ only when the engine's
+ * real per-item readback says so; partial stays an honest partial; NotAvailable
+ * falls through to the unlock script below (rendered by the caller).
+ */
+@Composable
+private fun FullSetupUnlockSection(
+    fullSetupState: io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.FullSetupState,
+    onSetUp: () -> Unit,
+) {
+    when (val s = fullSetupState) {
+        is io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.FullSetupState.FullCompleted -> {
+            if (s.allGranted) {
+                StatusPill(text = "ONE-CLICK SETUP COMPLETE — ALL SET", accent = AccentBar.Emerald)
+            } else {
+                StatusPill(text = "PARTIAL — SOME ITEMS DIDN'T TAKE", accent = AccentBar.Amber)
+            }
+            FullSetupChecklistRows(held = s.held)
+            if (!s.allGranted) {
+                Text(
+                    "Calibrate granted what it could through the root bridge. Retry, or grant the " +
+                        "rest with the unlock script below.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE0A030),
+                )
+                ArsenalButton(
+                    label = "Retry one-click setup",
+                    onClick = onSetUp,
+                    style = ArsenalButtonStyle.Primary,
+                    accent = AccentBar.Emerald,
+                )
+            }
+        }
+        is io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.FullSetupState.Running -> {
+            StatusPill(text = "SETTING EVERYTHING UP…", accent = AccentBar.Amber)
+            // Honest: nothing ticked until the readback lands.
+            FullSetupChecklistRows(held = emptyMap())
+        }
+        is io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.FullSetupState.NotAvailable -> {
+            StatusPill(text = "COULDN'T REACH ROOT BRIDGE — NO CHANGES", accent = AccentBar.Red)
+            Text(
+                "We couldn't reach the root bridge to grant permissions automatically — no changes " +
+                    "were made. Use the unlock script below instead.",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFE57373),
+            )
+        }
+        is io.github.mayusi.calibratesoc.ui.tune.AdvancedUnlockViewModel.FullSetupState.Idle -> {
+            ArsenalButton(
+                label = "Set up everything (one tap)",
+                onClick = onSetUp,
+                style = ArsenalButtonStyle.Primary,
+                accent = AccentBar.Emerald,
+            )
+        }
+    }
+}
+
+/** Honest per-[SetupItem] checklist rows in the Arsenal pill idiom — ✓ only
+ *  when [held] says true; absent/false → pending. Never fabricates a ✓. */
+@Composable
+private fun FullSetupChecklistRows(
+    held: Map<io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript.SetupItem, Boolean>,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+        for ((item, label) in FullSetupItemLabels) {
+            val on = held[item] == true
+            StatusPill(
+                text = if (on) "✓ $label" else "— $label",
+                accent = if (on) AccentBar.Emerald else AccentBar.Neutral,
+            )
+        }
     }
 }
 
