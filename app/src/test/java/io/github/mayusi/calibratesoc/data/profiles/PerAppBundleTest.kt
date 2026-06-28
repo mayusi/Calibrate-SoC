@@ -281,4 +281,77 @@ class PerAppBundleTest {
             assertThat(decoded.autoTdpGoal).isEqualTo(goal)
         }
     }
+
+    // ── 6. autoCreated provenance flag: round-trip + backward-compat ───────────
+
+    @Test
+    fun `autoCreated flag survives JSON round-trip when true`() {
+        val bundle = PerAppBundle(
+            autoTdpGoal = GoalProfile.BALANCED_SMART,
+            autoCreated = true,
+        )
+        val decoded = json.decodeFromString<PerAppBundle>(json.encodeToString(bundle))
+        assertThat(decoded.autoCreated).isTrue()
+        assertThat(decoded.autoTdpGoal).isEqualTo(GoalProfile.BALANCED_SMART)
+    }
+
+    @Test
+    fun `autoCreated defaults to false (user-set) for a freshly constructed bundle`() {
+        // The per-app sheet constructs PerAppBundle(...) without setting
+        // autoCreated, so a user-edited/saved bundle is user-owned by default.
+        val bundle = PerAppBundle(profileId = "profile_1")
+        assertThat(bundle.autoCreated).isFalse()
+    }
+
+    @Test
+    fun `old bundle JSON without autoCreated deserializes to false (back-compat)`() {
+        // Simulate a persisted bundle from BEFORE the provenance field existed.
+        val oldJson = """
+            {
+              "profileId": "profile_1",
+              "autoTdpGoal": "BALANCED_SMART",
+              "gameBoostOnLaunch": false
+            }
+        """.trimIndent()
+
+        val decoded = json.decodeFromString<PerAppBundle>(oldJson)
+
+        // Correct interpretation: anything that already existed was user-set.
+        assertThat(decoded.autoCreated).isFalse()
+        assertThat(decoded.profileId).isEqualTo("profile_1")
+        assertThat(decoded.autoTdpGoal).isEqualTo(GoalProfile.BALANCED_SMART)
+    }
+
+    @Test
+    fun `old ProfileStore JSON with a bundle but no autoCreated field loads cleanly`() {
+        val oldStoreJson = """
+            {
+              "version": 1,
+              "profiles": [],
+              "perAppOverrides": {},
+              "perAppBundles": {
+                "com.example.game": { "autoTdpGoal": "COOL_QUIET" }
+              }
+            }
+        """.trimIndent()
+
+        val decoded = json.decodeFromString<ProfileStore>(oldStoreJson)
+        val bundle = decoded.perAppBundles["com.example.game"]
+        assertThat(bundle).isNotNull()
+        assertThat(bundle!!.autoCreated).isFalse()
+        assertThat(bundle.autoTdpGoal).isEqualTo(GoalProfile.COOL_QUIET)
+    }
+
+    @Test
+    fun `autoCreated provenance survives a full ProfileStore round-trip`() {
+        val store = ProfileStore(
+            perAppBundles = mapOf(
+                "com.auto.game" to PerAppBundle(autoTdpGoal = GoalProfile.COOL_QUIET, autoCreated = true),
+                "com.user.game" to PerAppBundle(profileId = "profile_1", autoCreated = false),
+            ),
+        )
+        val decoded = json.decodeFromString<ProfileStore>(json.encodeToString(store))
+        assertThat(decoded.perAppBundles["com.auto.game"]!!.autoCreated).isTrue()
+        assertThat(decoded.perAppBundles["com.user.game"]!!.autoCreated).isFalse()
+    }
 }

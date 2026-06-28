@@ -251,6 +251,18 @@
         </receiver>
 
         <!--
+          Auto-configure known games: the "Undo / don't auto-tune this app"
+          action on the auto-config notification fires this receiver. It removes
+          the auto-created bundle (only if still auto-created) and records the
+          package in the opt-out set so it is never re-created. Internal only —
+          never exported (the PendingIntent is created in-process).
+        -->
+        <receiver
+            android:name=".data.profiles.AutoConfigUndoReceiver"
+            android:exported="false"
+            android:enabled="true" />
+
+        <!--
           DE-RISK PROBE (debug-only, removable). Answers one question: can a
           normal (non-system) app bind SettingsController → FanProvider on the
           Retroid Pocket 6 and drive the fan? Used ONLY to de-risk the RP6 fan-

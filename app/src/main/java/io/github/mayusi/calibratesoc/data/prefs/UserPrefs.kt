@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
@@ -172,6 +173,40 @@ class UserPrefs @Inject constructor(
         prefs[TEMP_ALERT_AUTO_PROFILE_ID_KEY]
     }
 
+    // ── Auto-configure known games (the "app just handles everything" headline) ─
+
+    /**
+     * Master switch for auto-configuring KNOWN games on first launch. Default
+     * **TRUE** — this is the headline zero-tap feature — but power users can turn
+     * it off so the app never auto-creates a per-app tune for them.
+     *
+     * When ON and a recognised game ([io.github.mayusi.calibratesoc.data.gameaware.KnownGames])
+     * comes to the foreground with NO existing bundle and NOT in
+     * [autoConfigOptOut], [ForegroundAppWatcher] auto-creates a conservative
+     * starting bundle and posts a dismissible, undoable notification.
+     *
+     * When OFF, the auto-create path is skipped entirely — existing user bundles
+     * and previously auto-created bundles still apply as normal; only NEW
+     * auto-creation stops.
+     */
+    val autoConfigKnownGamesEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[AUTO_CONFIG_ENABLED_KEY] ?: true
+    }
+
+    /**
+     * The set of package names the user has explicitly opted OUT of auto-config
+     * (via the notification's "Don't auto-tune this app" action). The
+     * auto-create path never re-creates a bundle for a package in this set, so a
+     * single Undo permanently stops the nag for that game.
+     *
+     * Empty by default. Persisted as a string-set; survives app restarts and
+     * reboots. Independent of the global [autoConfigKnownGamesEnabled] toggle —
+     * a package can be opted out while the feature stays on for everything else.
+     */
+    val autoConfigOptOut: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[AUTO_CONFIG_OPT_OUT_KEY] ?: emptySet()
+    }
+
     // ── Setters ──────────────────────────────────────────────────────────────
 
     suspend fun setOcAcknowledged(value: Boolean) {
@@ -247,6 +282,36 @@ class UserPrefs @Inject constructor(
         }
     }
 
+    // ── Auto-configure known games ─────────────────────────────────────────────
+
+    suspend fun setAutoConfigKnownGamesEnabled(value: Boolean) {
+        context.dataStore.edit { it[AUTO_CONFIG_ENABLED_KEY] = value }
+    }
+
+    /**
+     * Add [packageName] to the auto-config opt-out set (idempotent). Called when
+     * the user taps "Don't auto-tune this app" on the auto-config notification.
+     * Reads the current set and writes back the union so a concurrent edit is not
+     * clobbered (DataStore's [edit] runs the transform under its own lock).
+     */
+    suspend fun addAutoConfigOptOut(packageName: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[AUTO_CONFIG_OPT_OUT_KEY] ?: emptySet()
+            prefs[AUTO_CONFIG_OPT_OUT_KEY] = current + packageName
+        }
+    }
+
+    /**
+     * Remove [packageName] from the opt-out set — used if the UI ever offers a
+     * "re-enable auto-config for this app" affordance. Safe no-op when absent.
+     */
+    suspend fun removeAutoConfigOptOut(packageName: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[AUTO_CONFIG_OPT_OUT_KEY] ?: return@edit
+            prefs[AUTO_CONFIG_OPT_OUT_KEY] = current - packageName
+        }
+    }
+
     /**
      * Persist whether the user confirmed the scary "Skip — read-only" path on
      * an applicable (AYN/vendor-runner) device. Pass true when the user
@@ -284,6 +349,9 @@ class UserPrefs @Inject constructor(
         val IDLE_CHARGE_TRIGGER_ENABLED_KEY    = booleanPreferencesKey("autotdp_idle_charge_trigger_enabled")
         // ── Advanced setup gate ────────────────────────────────────────────────
         val ADVANCED_SETUP_SKIPPED_KEY         = booleanPreferencesKey("advanced_setup_skipped")
+        // ── Auto-configure known games ─────────────────────────────────────────
+        val AUTO_CONFIG_ENABLED_KEY            = booleanPreferencesKey("auto_config_known_games_enabled")
+        val AUTO_CONFIG_OPT_OUT_KEY            = stringSetPreferencesKey("auto_config_opt_out_packages")
 
         const val DEFAULT_ALERT_THRESHOLD_C = 80
     }

@@ -412,6 +412,14 @@ fun SettingsScreen(
             }
         }
 
+        // ── Auto-configure known games ─────────────────────────────────────
+        item {
+            AutoConfigKnownGamesCard(
+                enabled = viewModel.autoConfigKnownGamesEnabled.collectAsStateWithLifecycle().value,
+                onToggle = viewModel::setAutoConfigKnownGamesEnabled,
+            )
+        }
+
         // ── Factory restore ────────────────────────────────────────────────
         item {
             ArsenalPanel(accent = AccentBar.Amber, title = "RESTORE TO FACTORY STATE") {
@@ -1220,6 +1228,45 @@ private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
             dismissButton = {
                 TextButton(onClick = { pendingConfirm = false }) { Text("Cancel") }
             },
+        )
+    }
+}
+
+/**
+ * Master toggle for the zero-tap "auto-configure known games" feature.
+ *
+ * Default ON (the headline feature). Honest copy: explains exactly what the app
+ * does on its own, that it's a starting default (not optimal), and that every
+ * auto-config is announced with an Undo. Turning it off is a plain switch — no
+ * typed-confirm, because OFF is the SAFE direction (it just stops the app acting
+ * on its own).
+ */
+@Composable
+private fun AutoConfigKnownGamesCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    ArsenalPanel(
+        accent = if (enabled) AccentBar.Emerald else AccentBar.Neutral,
+        title = "AUTO-CONFIGURE KNOWN GAMES",
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (enabled) "ON — sets up new games for you" else "OFF — never auto-tunes",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (enabled) AccentBar.Emerald else Color(0xFF999999),
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+        Spacer(Modifier.height(Spacing.dense))
+        Text(
+            "When a game Calibrate recognises launches for the first time and you " +
+                "haven't set it up yourself, the app picks a sensible starting tune " +
+                "for it automatically and tells you with a notification you can undo. " +
+                "It's a starting point based on the game's type, not a guaranteed-best " +
+                "setup, and it never overrides tunes you set yourself. Turn this off to " +
+                "stop the app auto-configuring any game.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
         )
     }
 }

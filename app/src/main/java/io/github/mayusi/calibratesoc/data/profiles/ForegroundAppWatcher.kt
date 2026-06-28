@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -78,6 +79,8 @@ class ForegroundAppWatcher : AccessibilityService() {
     @Inject lateinit var gameBoostLauncher: GameBoostLauncher
     @Inject lateinit var appReaper: AppReaper
     @Inject lateinit var perAppEfficiencyMap: PerAppEfficiencyMap
+    @Inject lateinit var userPrefs: io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+    @Inject lateinit var autoConfigNotifier: AutoConfigNotifier
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastForegroundPackage: String? = null
@@ -124,13 +127,24 @@ class ForegroundAppWatcher : AccessibilityService() {
             val store = profileRepository.snapshot()
 
             // ── Resolve bundle for incoming package (back-compat fallback) ─────────
-            val bundle: PerAppBundle? = store.perAppBundles[pkg]
+            var bundle: PerAppBundle? = store.perAppBundles[pkg]
                 ?: store.perAppOverrides[pkg]?.let { profileId ->
                     // Wrap the legacy single-profile mapping into a minimal bundle so
                     // the rest of the logic is uniform. Behavior is IDENTICAL to the
                     // old single-profile path.
                     PerAppBundle(profileId = profileId)
                 }
+
+            // ── AUTO-CONFIGURE KNOWN GAMES (the "app just handles everything" path) ─
+            // ONLY when there is NO existing bundle for this package. We never
+            // override a user-set OR already-auto-created bundle here — auto-create
+            // fills the empty case exclusively. maybeAutoCreateBundle applies every
+            // other guardrail (global toggle, KnownGames-hit-only, opt-out set) and
+            // persists + notifies on success, returning the freshly-created bundle so
+            // it applies on THIS launch too.
+            if (bundle == null) {
+                bundle = maybeAutoCreateBundle(pkg)
+            }
 
             // ── Revert the previous bundle (if we have one and the package changed) ─
             val prevBundle = activeBundle
@@ -239,6 +253,62 @@ class ForegroundAppWatcher : AccessibilityService() {
             applyPerAppEfficiencyProfile(pkg, bundleDroveAutoTdp = bundle.autoTdpGoal != null)
         }
     }
+
+    /**
+     * The "app just handles everything" core: when a KNOWN game launches with no
+     * existing bundle, auto-create a CONSERVATIVE starting bundle from its
+     * [KnownGames] hint, persist it (so it applies now AND next time), and post a
+     * dismissible/undoable notification. Returns the freshly-created bundle so the
+     * caller applies it on this launch, or null when auto-create does not fire.
+     *
+     * GUARDRAILS (all must pass, in cheap-first order):
+     *  1. Global toggle [UserPrefs.autoConfigKnownGamesEnabled] is ON (the consent).
+     *  2. Package is NOT in the opt-out set (user previously undid it).
+     *  3. Package is a [KnownGames] hit — we NEVER auto-create for unknown apps in
+     *     this wave (that path is deferred/risky). Launchers / system UI / our own
+     *     app won't match KnownGames anyway, and the watcher already filters our
+     *     package + systemui at the event source.
+     *  4. The hint maps to an actionable bundle (defensive null-guard).
+     *
+     * Caller contract: only invoked when there is NO existing bundle, so this can
+     * never override a user-set or already-auto-created bundle.
+     */
+    private suspend fun maybeAutoCreateBundle(pkg: String): PerAppBundle? {
+        // 1. Global consent toggle (default ON; power users can disable).
+        if (!userPrefs.autoConfigKnownGamesEnabled.first()) {
+            return null
+        }
+        // 2. Respect a prior opt-out — never re-create for a package the user undid.
+        if (pkg in userPrefs.autoConfigOptOut.first()) {
+            Log.d(TAG, "maybeAutoCreateBundle($pkg): opted out — skipping")
+            return null
+        }
+        // 3. KNOWN games only this wave.
+        val hint = io.github.mayusi.calibratesoc.data.gameaware.KnownGames.defaultHintFor(pkg)
+            ?: return null
+        // 4. Build a conservative bundle from the hint (defensive null-guard).
+        val bundle = AutoConfigBundleMapper.bundleFor(hint) ?: return null
+
+        // Persist so it (a) applies now via the normal path and (b) survives for
+        // next launch. setBundle is the same persistence the manual sheet uses.
+        profileRepository.setBundle(pkg, bundle)
+        Log.i(TAG, "maybeAutoCreateBundle($pkg): auto-created ${bundle.autoTdpGoal} (autoCreated=true)")
+
+        // Honest, dismissible, undoable disclosure that the app acted on its own.
+        autoConfigNotifier.notifyAutoConfigured(pkg, resolveAppLabel(pkg))
+
+        return bundle
+    }
+
+    /**
+     * Best-effort human-readable label for [pkg] for the notification. Falls back
+     * to the package name if the label can't be resolved (uninstalled mid-switch,
+     * restricted visibility) — never throws.
+     */
+    private fun resolveAppLabel(pkg: String): String = runCatching {
+        val pm = applicationContext.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+    }.getOrDefault(pkg)
 
     /**
      * Consult the [PerAppEfficiencyMap] for [pkg] and, if a profile is bound,

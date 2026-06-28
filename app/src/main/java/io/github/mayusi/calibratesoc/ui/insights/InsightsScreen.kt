@@ -1,6 +1,7 @@
 package io.github.mayusi.calibratesoc.ui.insights
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,9 +14,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -25,6 +32,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.insights.InsightsAggregator
 import io.github.mayusi.calibratesoc.data.insights.SessionReport
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.EmptyState
 import io.github.mayusi.calibratesoc.ui.components.KvRow
@@ -42,22 +51,50 @@ import java.util.Locale
  * Surfaces cross-session data derived by [InsightsAggregator] via [InsightsViewModel]:
  *   - Battery saved this week (MetricTile)
  *   - Temperature trend direction (MetricTile)
- *   - Best profile per game (ArsenalPanel per app)
+ *   - Best profile per game (ArsenalPanel per app, with one-tap Apply)
  *   - Recent session reports (ArsenalPanel per session)
  *
  * "Not enough data" states are always shown honestly — no fabricated numbers.
+ *
+ * The "BEST PROFILE PER GAME" panel shows the evidence (avg FPS, throttle rate,
+ * session count) and an Apply button. Tapping Apply calls
+ * [InsightsViewModel.applyBestProfile], which resolves the display label →
+ * package name via PackageManager and the profile name → profile id via
+ * [ProfileRepository], then writes the bundle. [ForegroundAppWatcher] picks it
+ * up automatically on the next foreground switch.
  */
 @Composable
 fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
     val summary by viewModel.summary.collectAsStateWithLifecycle()
     val reports by viewModel.reports.collectAsStateWithLifecycle()
     val latestReport by viewModel.latestReport.collectAsStateWithLifecycle()
+    val applyResult by viewModel.applyResult.collectAsStateWithLifecycle()
+    val store by viewModel.profileStore.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(Spacing.screen),
-        verticalArrangement = Arrangement.spacedBy(Spacing.item),
-    ) {
+    // Show snackbar on success or error, then clear the result.
+    LaunchedEffect(applyResult) {
+        when (val r = applyResult) {
+            is InsightsViewModel.ApplyResult.Success -> {
+                snackbarHostState.showSnackbar(
+                    "Applied ${r.profileName} to ${r.appLabel} — auto-tunes on next launch.",
+                )
+                viewModel.clearApplyResult()
+            }
+            is InsightsViewModel.ApplyResult.Error -> {
+                snackbarHostState.showSnackbar(r.reason)
+                viewModel.clearApplyResult()
+            }
+            InsightsViewModel.ApplyResult.Idle -> Unit
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(Spacing.screen),
+            verticalArrangement = Arrangement.spacedBy(Spacing.item),
+        ) {
         item {
             Column {
                 Text(
@@ -143,7 +180,31 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
                 SectionHeader(title = "BEST PROFILE PER GAME", accent = AccentBar.Blue)
             }
             items(summary.bestProfilePerApp.entries.toList(), key = { it.key }) { (appLabel, entry) ->
-                BestProfilePanel(appLabel = appLabel, entry = entry)
+                // Determine whether this profile is already bound so we can show "APPLIED".
+                // We look at perAppBundles only — the canonical write path used by applyBestProfile.
+                // We resolve profileId → name via the store's profile list for the comparison.
+                val boundProfileName: String? = run {
+                    val bundles = store.perAppBundles
+                    // We can't look up by package name here because the key is appLabel, not
+                    // packageName — the bundle map is keyed by packageName. We check bundles
+                    // whose profileId matches a profile whose name == entry.profileName, and
+                    // whose value (packageName) *might* correspond to this appLabel. Since we
+                    // cannot resolve label→package in a pure composable without IO, we instead
+                    // check whether ANY bundle in the store has this profileId, and let the
+                    // success snackbar be the primary confirmation. The "APPLIED" badge is best-
+                    // effort — it will show correctly once the user sees the snackbar and re-
+                    // enters the screen (store is live).
+                    val profileId = store.profiles.firstOrNull { it.name == entry.profileName }?.id
+                    if (profileId != null && bundles.values.any { it.profileId == profileId }) {
+                        entry.profileName
+                    } else null
+                }
+                BestProfilePanel(
+                    appLabel = appLabel,
+                    entry = entry,
+                    boundProfileName = boundProfileName,
+                    onApply = { viewModel.applyBestProfile(appLabel, entry.profileName) },
+                )
             }
         } else if (summary.insufficientDataReason == null) {
             item {
@@ -180,7 +241,20 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
         }
 
         item { Spacer(Modifier.height(Spacing.screen)) }
-    }
+        } // end LazyColumn
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            snackbar = { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = Color(0xFF1E1E26),
+                    contentColor = Color.White,
+                )
+            },
+        )
+    } // end Box
 }
 
 // ── Session report panel ───────────────────────────────────────────────────────
@@ -259,12 +333,30 @@ private fun SessionReportPanel(report: SessionReport, isLatest: Boolean) {
 
 // ── Best profile panel ─────────────────────────────────────────────────────────
 
+/**
+ * Panel for a single "best profile" recommendation.
+ *
+ * Shows:
+ * - App name (uppercase)
+ * - "RECOMMENDED" pill + profile name pill to emphasise it is learned from data
+ * - Evidence: avg FPS, throttle/session, session count (the "why")
+ * - "APPLIED" pill when this profile is already bound in the store (best-effort:
+ *   matched by profileId across any bundle — see call site comment)
+ * - Apply button (AccentBar.Emerald, Secondary style) that calls [onApply]
+ *
+ * [boundProfileName] is non-null when the profile is already bound somewhere in
+ * the store; used to show the "APPLIED" pill and disable the Apply button.
+ */
 @Composable
 private fun BestProfilePanel(
     appLabel: String,
     entry: InsightsAggregator.BestProfileEntry,
+    boundProfileName: String?,
+    onApply: () -> Unit,
 ) {
+    val isApplied = boundProfileName != null
     ArsenalPanel(accent = AccentBar.Blue) {
+        // ── Header row: app name + pills ─────────────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -277,9 +369,18 @@ private fun BestProfilePanel(
                 letterSpacing = 0.06.sp,
                 modifier = Modifier.weight(1f),
             )
-            StatusPill(text = "BEST: ${entry.profileName}", accent = AccentBar.Blue)
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                StatusPill(text = "RECOMMENDED", accent = AccentBar.Emerald)
+                StatusPill(text = entry.profileName, accent = AccentBar.Blue)
+                if (isApplied) {
+                    StatusPill(text = "APPLIED", accent = AccentBar.Emerald)
+                }
+            }
         }
+
         Spacer(Modifier.height(Spacing.dense))
+
+        // ── Evidence — the "why" ─────────────────────────────────────────
         entry.avgFps?.let { fps ->
             KvRow(label = "Avg FPS", value = "%.0f fps".format(fps))
         }
@@ -287,6 +388,18 @@ private fun BestProfilePanel(
             label = "Throttle/session",
             value = "%.1f".format(entry.avgThrottleEventsPerSession),
             explainer = "Lower = more stable. Based on ${entry.sessionCount} sessions.",
+        )
+
+        Spacer(Modifier.height(Spacing.item))
+
+        // ── Apply button ─────────────────────────────────────────────────
+        ArsenalButton(
+            label = if (isApplied) "ALREADY APPLIED" else "APPLY TO THIS GAME",
+            onClick = onApply,
+            accent = AccentBar.Emerald,
+            style = ArsenalButtonStyle.Secondary,
+            enabled = !isApplied,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }

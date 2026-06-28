@@ -14,6 +14,9 @@ import io.github.mayusi.calibratesoc.data.autotdp.CurvePoint
 import io.github.mayusi.calibratesoc.data.autotdp.CurveResult
 import io.github.mayusi.calibratesoc.data.autotdp.EfficiencyCurveSweep
 import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
+import io.github.mayusi.calibratesoc.data.autotdp.ChargingBundle
+import io.github.mayusi.calibratesoc.data.autotdp.ChargingBundlePrefs
+import io.github.mayusi.calibratesoc.data.autotdp.ChargingTuneTrigger
 import io.github.mayusi.calibratesoc.data.autotdp.IdleChargeTrigger
 import io.github.mayusi.calibratesoc.data.autotdp.PerAppEfficiencyMap
 import io.github.mayusi.calibratesoc.data.autotdp.SweepProgress
@@ -89,6 +92,8 @@ class AutoTdpViewModel @Inject constructor(
     private val scriptDeployer: AynScriptDeployer,
     private val advancedPermissionsScript: AdvancedPermissionsScript,
     private val idleChargeTrigger: IdleChargeTrigger,
+    private val chargingTuneTrigger: ChargingTuneTrigger,
+    private val chargingBundlePrefs: ChargingBundlePrefs,
     private val perAppEfficiencyMap: PerAppEfficiencyMap,
     private val batteryChargeReader: BatteryChargeReader,
     private val userPrefs: UserPrefs,
@@ -208,6 +213,16 @@ class AutoTdpViewModel @Inject constructor(
     val idleChargeTriggerEnabled: StateFlow<Boolean> = userPrefs.idleChargeTriggerEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    // ── Charging auto-profile ─────────────────────────────────────────────────
+
+    /** Master opt-in for the charging auto-profile (Component: ChargingTuneTrigger). */
+    val chargingProfileEnabled: StateFlow<Boolean> = chargingBundlePrefs.chargingProfileEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** The currently-configured charging bundle (goal + fan + refresh rate). */
+    val chargingBundle: StateFlow<ChargingBundle> = chargingBundlePrefs.bundle
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ChargingBundle.DEFAULT)
+
     // ── Per-app map ───────────────────────────────────────────────────────────
 
     val perAppMap: StateFlow<Map<String, AutoTdpProfile>> = perAppEfficiencyMap.observeAll()
@@ -273,6 +288,9 @@ class AutoTdpViewModel @Inject constructor(
     init {
         // Start the idle/charge trigger listener so it emits screen-off/charge events.
         idleChargeTrigger.start()
+
+        // Start the charging auto-profile trigger (fan + refresh + goal on plug-in).
+        chargingTuneTrigger.start()
 
         // Subscribe to trigger signals and apply them when manual is OFF.
         idleChargeTrigger.requestedProfile
@@ -358,6 +376,8 @@ class AutoTdpViewModel @Inject constructor(
         super.onCleared()
         // Stop listening for screen events when UI is gone.
         idleChargeTrigger.stop()
+        // Stop the charging auto-profile trigger (reverts bundle under NonCancellable).
+        chargingTuneTrigger.stop()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -615,6 +635,34 @@ class AutoTdpViewModel @Inject constructor(
     fun setIdleChargeTriggerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             userPrefs.setIdleChargeTriggerEnabled(enabled)
+        }
+    }
+
+    // ── Charging auto-profile setters ─────────────────────────────────────────
+
+    fun setChargingProfileEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            chargingBundlePrefs.setChargingProfileEnabled(enabled)
+        }
+    }
+
+    fun setChargingAutoTdpGoal(goal: GoalProfile) {
+        viewModelScope.launch {
+            chargingBundlePrefs.setAutoTdpGoal(goal)
+        }
+    }
+
+    /** Pass null to disable fan control while charging. */
+    fun setChargingFanMode(mode: Int?) {
+        viewModelScope.launch {
+            chargingBundlePrefs.setFanMode(mode)
+        }
+    }
+
+    /** Pass null to leave display refresh rate untouched while charging. */
+    fun setChargingRefreshRateHz(hz: Float?) {
+        viewModelScope.launch {
+            chargingBundlePrefs.setRefreshRateHz(hz)
         }
     }
 

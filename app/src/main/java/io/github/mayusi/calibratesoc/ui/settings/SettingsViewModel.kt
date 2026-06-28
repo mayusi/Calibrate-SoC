@@ -159,6 +159,18 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { userPrefs.setTempAlertAutoProfileId(profileId) }
     }
 
+    // ── Auto-configure known games toggle ─────────────────────────────────────
+
+    /** Master switch for the zero-tap "auto-configure known games" feature.
+     *  Default TRUE — it's the headline feature — but power users can turn it
+     *  off so the app never auto-creates a per-app tune on game launch. */
+    val autoConfigKnownGamesEnabled: StateFlow<Boolean> = userPrefs.autoConfigKnownGamesEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    fun setAutoConfigKnownGamesEnabled(value: Boolean) {
+        viewModelScope.launch { userPrefs.setAutoConfigKnownGamesEnabled(value) }
+    }
+
     // ── Auto-update check toggle ──────────────────────────────────────────────
 
     val autoUpdateCheckEnabled: StateFlow<Boolean> = userPrefs.autoUpdateCheckEnabled

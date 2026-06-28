@@ -92,6 +92,31 @@ data class PerAppBundle(
      * file, bound to [GameBoostLauncherImpl] (→ Wave 3a's GameBoostService).
      */
     val gameBoostOnLaunch: Boolean = false,
+
+    /**
+     * PROVENANCE (Wave: auto-configure known games).
+     *
+     * True when this bundle was AUTO-CREATED by the app from a [KnownGames]
+     * hint — i.e. the user never tapped anything; Calibrate filled in a sensible
+     * starting tune the first time a recognised game launched. False (the default)
+     * means the user built this bundle themselves on the Per-App sheet.
+     *
+     * ## Why this field matters
+     *  - HONESTY: the UI shows "Auto-configured" vs "You set this" so the user is
+     *    never misled about who chose the settings.
+     *  - SAFE UNDO: the auto-create undo path only removes a bundle when this flag
+     *    is true, so it can never silently delete a tune the user hand-built.
+     *  - NON-OVERRIDE: the auto-create path only fills the EMPTY case — it never
+     *    replaces an existing bundle (user-set or already auto-created), so a user
+     *    edit to an auto-created bundle is preserved on the next launch.
+     *
+     * ## Back-compat
+     * Appended last with a default of `false`. Older persisted [ProfileStore] JSON
+     * that predates this field deserializes with [autoCreated] == false (the
+     * correct interpretation: anything that already existed was user-set). New
+     * writes encode it; round-trips are lossless. No migration needed.
+     */
+    val autoCreated: Boolean = false,
 )
 
 /**

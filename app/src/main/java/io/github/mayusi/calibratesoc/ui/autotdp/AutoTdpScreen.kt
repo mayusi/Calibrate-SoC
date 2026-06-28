@@ -59,6 +59,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpEffect
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
+import io.github.mayusi.calibratesoc.data.autotdp.ChargingBundle
 import io.github.mayusi.calibratesoc.data.autotdp.GoalProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpRunState
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpSavings
@@ -122,6 +123,8 @@ fun AutoTdpScreen(
     val sweepProgress by viewModel.sweepProgress.collectAsStateWithLifecycle()
     val kneeKhz by viewModel.kneeKhz.collectAsStateWithLifecycle()
     val idleChargeTriggerEnabled by viewModel.idleChargeTriggerEnabled.collectAsStateWithLifecycle()
+    val chargingProfileEnabled by viewModel.chargingProfileEnabled.collectAsStateWithLifecycle()
+    val chargingBundle by viewModel.chargingBundle.collectAsStateWithLifecycle()
     val manuallyOn by viewModel.manuallyOn.collectAsStateWithLifecycle()
     val startingUp by viewModel.startingUp.collectAsStateWithLifecycle()
     val startError by viewModel.startError.collectAsStateWithLifecycle()
@@ -323,6 +326,12 @@ fun AutoTdpScreen(
                 perAppMapCount = perAppMap.size,
                 onIdleChargeToggle = { viewModel.setIdleChargeTriggerEnabled(it) },
                 onOpenPerApp = { showPerAppDialog = true },
+                chargingProfileEnabled = chargingProfileEnabled,
+                chargingBundle = chargingBundle,
+                onChargingProfileToggle = { viewModel.setChargingProfileEnabled(it) },
+                onChargingGoalSelected = { viewModel.setChargingAutoTdpGoal(it) },
+                onChargingFanModeSelected = { viewModel.setChargingFanMode(it) },
+                onChargingRefreshRateSelected = { viewModel.setChargingRefreshRateHz(it) },
             )
         }
 
@@ -1781,9 +1790,16 @@ private fun CompanionTogglesArsenalPanel(
     perAppMapCount: Int,
     onIdleChargeToggle: (Boolean) -> Unit,
     onOpenPerApp: () -> Unit,
+    // ── Charging auto-profile ─────────────────────────────────────────────────
+    chargingProfileEnabled: Boolean,
+    chargingBundle: ChargingBundle,
+    onChargingProfileToggle: (Boolean) -> Unit,
+    onChargingGoalSelected: (GoalProfile) -> Unit,
+    onChargingFanModeSelected: (Int?) -> Unit,
+    onChargingRefreshRateSelected: (Float?) -> Unit,
 ) {
     ArsenalPanel(accent = AccentBar.Blue, title = "Companion features") {
-        // Idle/charge toggle
+        // ── Idle/charge downclock toggle (existing) ───────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -1822,7 +1838,196 @@ private fun CompanionTogglesArsenalPanel(
         HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
         Spacer(Modifier.height(Spacing.group))
 
-        // Per-app map
+        // ── Charging auto-profile ─────────────────────────────────────────────
+        // Master toggle
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "CHARGING PROFILE",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    letterSpacing = 0.06.sp,
+                )
+                Text(
+                    "When plugged in and not gaming: applies the cool/quiet bundle below " +
+                        "(fan + refresh rate + AutoTDP goal). Reverts all axes on unplug.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+            Spacer(Modifier.width(Spacing.group))
+            Box(
+                modifier = Modifier
+                    .background(
+                        if (chargingProfileEnabled) AccentBar.Emerald.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .border(
+                        1.dp,
+                        if (chargingProfileEnabled) AccentBar.Emerald else Color.White.copy(alpha = 0.15f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .clickable { onChargingProfileToggle(!chargingProfileEnabled) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (chargingProfileEnabled) "ON" else "OFF",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (chargingProfileEnabled) AccentBar.Emerald else Color(0xFF888888),
+                    letterSpacing = 0.06.sp,
+                )
+            }
+        }
+
+        // Bundle config — shown collapsed when toggle is OFF so the screen stays clean
+        if (chargingProfileEnabled) {
+            Spacer(Modifier.height(Spacing.group))
+
+            // AutoTDP goal picker (COOL_QUIET / EFFICIENCY / BALANCED_SMART)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "AUTOTDP GOAL",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF777777),
+                    letterSpacing = 0.05.sp,
+                )
+                val chargingGoals = listOf<Pair<GoalProfile, String>>(
+                    GoalProfile.COOL_QUIET to "Cool/Quiet",
+                    GoalProfile.BATTERY_SAVER to "Battery Saver",
+                    GoalProfile.BALANCED_SMART to "Balanced",
+                    GoalProfile.MAX_FPS to "Max FPS",
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    chargingGoals.forEach { entry ->
+                        val goal = entry.first
+                        val label = entry.second
+                        val selected = chargingBundle.autoTdpGoal == goal
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (selected) AccentBar.Blue.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) AccentBar.Blue else Color.White.copy(alpha = 0.12f),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .clickable { onChargingGoalSelected(goal) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selected) AccentBar.Blue else Color(0xFF888888),
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(Spacing.group))
+
+            // Fan mode picker
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "FAN MODE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF777777),
+                    letterSpacing = 0.05.sp,
+                )
+                val fanOptions = listOf<Pair<Int?, String>>(
+                    GoalProfile.FanPresets.QUIET to "Quiet",
+                    GoalProfile.FanPresets.SMART to "Smart",
+                    GoalProfile.FanPresets.SPORT to "Sport",
+                    null to "Off (don't touch)",
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    fanOptions.forEach { entry ->
+                        val mode = entry.first
+                        val label = entry.second
+                        val selected = chargingBundle.fanMode == mode
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (selected) AccentBar.Blue.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) AccentBar.Blue else Color.White.copy(alpha = 0.12f),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .clickable { onChargingFanModeSelected(mode) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selected) AccentBar.Blue else Color(0xFF888888),
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(Spacing.group))
+
+            // Refresh rate picker
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "DISPLAY REFRESH RATE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF777777),
+                    letterSpacing = 0.05.sp,
+                )
+                val rateOptions = listOf<Pair<Float?, String>>(
+                    60f to "60 Hz",
+                    90f to "90 Hz",
+                    120f to "120 Hz",
+                    null to "Off (don't touch)",
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    rateOptions.forEach { entry ->
+                        val hz = entry.first
+                        val label = entry.second
+                        val selected = chargingBundle.refreshRateHz == hz
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (selected) AccentBar.Blue.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) AccentBar.Blue else Color.White.copy(alpha = 0.12f),
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .clickable { onChargingRefreshRateSelected(hz) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selected) AccentBar.Blue else Color(0xFF888888),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Per-app map (existing) ────────────────────────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
