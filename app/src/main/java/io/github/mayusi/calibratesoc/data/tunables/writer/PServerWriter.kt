@@ -212,26 +212,56 @@ class PServerWriter @Inject constructor(
                 transact(binder, "cat $qpath").second.trim().ifBlank { null }
             }.getOrNull()
 
-            if (readback == null) {
-                // Cannot confirm — treat as success-with-warning rather than blocking
-                // AutoTDP; log loudly so the issue is obvious in logcat.
-                Log.w(TAG, "writeSysfs(): readback failed for ${id.target} — cannot confirm write landed")
-                return@withContext WriteResult.Success(id, previousValue = previous, newValue = value)
-            }
+            classifyReadback(
+                id = id,
+                intended = value.trim(),
+                readback = readback,
+                previous = previous,
+                status = status,
+            )
+        }
+    }
 
-            val intended = value.trim()
-            if (readbackAccepted(intended, readback)) {
-                if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): readback confirmed: path=${id.target} readback='$readback'")
-                WriteResult.Success(id, previousValue = previous, newValue = readback)
-            } else {
-                Log.w(TAG, "writeSysfs(): readback MISMATCH: path=${id.target} intended='$intended' actual='$readback'")
-                WriteResult.Rejected(
-                    id = id,
-                    errno = status,
-                    message = "Write appeared to succeed (status $status) but readback returned " +
-                        "'$readback' instead of '$intended'. Kernel may have rejected the value.",
-                )
-            }
+    /**
+     * Pure classification of a sysfs write's readback into a [WriteResult]. Shared by the
+     * live [writeSysfs] path and unit tests so the BUG 10 honesty invariant is verifiable
+     * without a real binder.
+     *
+     * - [readback] == null  → could NOT confirm. Returns Success(verified=FALSE): we never
+     *   claim the node moved, and the unverified flag keeps the boot-revert backstop armed
+     *   for critical nodes (see [TunableWriter.revertAll]). This is the core BUG 10 fix —
+     *   the old path returned the default verified=true here, journaling an unconfirmed
+     *   write as confirmed (the 384 MHz-collapse class).
+     * - readback accepted (exact or OPP-snapped) → Success(verified=true), newValue=readback.
+     * - readback mismatch → Rejected with the actual value; we NEVER claim success.
+     */
+    internal fun classifyReadback(
+        id: TunableId,
+        intended: String,
+        readback: String?,
+        previous: String?,
+        status: Int,
+    ): WriteResult {
+        if (readback == null) {
+            Log.w(TAG, "writeSysfs(): readback failed for ${id.target} — cannot confirm write landed (verified=false)")
+            return WriteResult.Success(
+                id = id,
+                previousValue = previous,
+                newValue = intended,
+                verified = false,
+            )
+        }
+        return if (readbackAccepted(intended, readback)) {
+            if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): readback confirmed: path=${id.target} readback='$readback'")
+            WriteResult.Success(id, previousValue = previous, newValue = readback)
+        } else {
+            Log.w(TAG, "writeSysfs(): readback MISMATCH: path=${id.target} intended='$intended' actual='$readback'")
+            WriteResult.Rejected(
+                id = id,
+                errno = status,
+                message = "Write appeared to succeed (status $status) but readback returned " +
+                    "'$readback' instead of '$intended'. Kernel may have rejected the value.",
+            )
         }
     }
 
@@ -595,6 +625,13 @@ class PServerWriter @Inject constructor(
         }
         if (path.contains('\n') || path.contains('\r') || path.contains(' ')) {
             return "path contains disallowed control characters"
+        }
+        // CRITICAL-2: reject the FULL shell-metacharacter set, via the single-source
+        // [TunableMetadata.containsShellMetachar] (same set the door + the guard use —
+        // no second copy). The writer runs the result as ROOT, so it must not be weaker
+        // than the door: a metachar path ($(), backtick, ;, |, …) is denied here too.
+        if (io.github.mayusi.calibratesoc.data.tunables.TunableMetadata.containsShellMetachar(path)) {
+            return "path contains a disallowed shell metacharacter (got '$path')"
         }
         // Narrow cgroup-boost carve-out: uclamp (/dev/cpuctl) and schedtune (/dev/stune)
         // are legitimate perf levers PServer-LIVE now writes. Permit ONLY the exact

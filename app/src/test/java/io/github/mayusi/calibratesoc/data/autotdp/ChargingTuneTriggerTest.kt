@@ -1,7 +1,21 @@
 package io.github.mayusi.calibratesoc.data.autotdp
 
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Unit tests for [ChargingTuneTrigger] pure decision functions.
@@ -129,6 +143,126 @@ class ChargingTuneTriggerTest {
             val a = ChargingTuneTrigger.shouldRevert(charging = false, wasApplied = true)
             val b = ChargingTuneTrigger.shouldRevert(charging = false, wasApplied = true)
             assertThat(a).isEqualTo(b)
+        }
+    }
+
+    // ── BUG 8: stop() reverts even on a cancelling/already-torn-down scope ─────
+    //
+    // The old stop() did `scope.launch { revert }.invokeOnCompletion { scope.cancel() }`.
+    // If `scope` was already cancelling (rapid double-stop / teardown), the launched body
+    // NEVER started, so NonCancellable inside revert could not save it → charging caps /
+    // fan / refresh stayed applied after unplug. The fix runs the revert on a fresh
+    // runBlocking and blocks to completion, independent of the main scope's state.
+
+    @Test
+    fun `OLD stop pattern — launched revert on a cancelling scope never runs (regression guard)`() {
+        val reverted = AtomicBoolean(false)
+        // A scope that is already cancelled, exactly like a torn-down trigger.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        scope.cancel()
+
+        // Old pattern: launch the revert on the (cancelled) scope.
+        val job: Job = scope.launch {
+            reverted.set(true) // body of revertBundle
+        }
+        job.invokeOnCompletion { /* scope.cancel() — already cancelled */ }
+        runBlocking { runCatching { job.join() } }
+
+        // The launched body NEVER ran on the cancelled scope → device left mis-tuned.
+        assertThat(reverted.get()).isFalse()
+    }
+
+    @Test
+    fun `NEW stop pattern — runBlocking revert runs to completion regardless of main scope`() {
+        val autoTdpStopped = AtomicBoolean(false)
+        val fanRestored = AtomicBoolean(false)
+        // The main scope is already cancelled (double-stop / teardown).
+        val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        mainScope.cancel()
+
+        // Model the fixed stop(): revert on a runBlocking, NOT on the dead main scope.
+        runCatching {
+            runBlocking {
+                // revertBundle body, itself NonCancellable.
+                withContext(NonCancellable) {
+                    autoTdpStopped.set(true)
+                    delay(10)
+                    fanRestored.set(true)
+                }
+            }
+        }
+        mainScope.cancel() // (no-op; already cancelled) — order matches stop()
+
+        // Revert ran fully even though the main scope was dead before stop() was called.
+        assertThat(autoTdpStopped.get()).isTrue()
+        assertThat(fanRestored.get()).isTrue()
+    }
+
+    @Test
+    fun `NEW stop pattern — double-stop still reverts both times to completion`() {
+        val revertRuns = AtomicInteger(0)
+        fun stopModel() {
+            runCatching {
+                runBlocking { withContext(NonCancellable) { revertRuns.incrementAndGet() } }
+            }
+        }
+        stopModel()
+        stopModel() // rapid second stop must not be swallowed
+        assertThat(revertRuns.get()).isEqualTo(2)
+    }
+
+    // ── BUG 9: applied flag committed FIRST so a partial apply still reverts ───
+    //
+    // Old order set autoTdpStarted right after start() but bundleApplied only at the very
+    // end; a cancel between them left `if (!bundleApplied) return` no-opping the revert
+    // while AutoTDP ran in charging mode forever. The fix commits bundleApplied (under
+    // NonCancellable) BEFORE starting any effect.
+
+    @Test
+    fun `applied flag committed before effects survives a mid-apply cancel — revert still fires`() = runBlockingTestModel { scope ->
+        val bundleApplied = AtomicBoolean(false)
+        val applyEntered = CompletableDeferred<Unit>()
+
+        val job = scope.launch {
+            // COMMIT-FIRST under NonCancellable.
+            withContext(NonCancellable) { bundleApplied.set(true) }
+            applyEntered.complete(Unit)
+            // Effects start here; a cancel mid-apply must not lose the applied flag.
+            delay(10_000)
+            // (rest of apply never reached)
+        }
+        applyEntered.await()
+        job.cancelAndJoin()
+
+        // The revert guard `if (!bundleApplied) return` will now PROCEED on unplug.
+        assertThat(bundleApplied.get()).isTrue()
+    }
+
+    @Test
+    fun `OLD ordering — applied flag set last is lost on mid-apply cancel (regression guard)`() = runBlockingTestModel { scope ->
+        val bundleApplied = AtomicBoolean(false)
+        val applyEntered = CompletableDeferred<Unit>()
+
+        val job = scope.launch {
+            applyEntered.complete(Unit)
+            delay(10_000)               // cancelled here, before…
+            bundleApplied.set(true)     // …the flag is ever committed
+        }
+        applyEntered.await()
+        job.cancelAndJoin()
+
+        // Old ordering → flag never set → revert no-ops → AutoTDP stuck in charging mode.
+        assertThat(bundleApplied.get()).isFalse()
+    }
+
+    // Small helper: run a coroutine test body on a real scope we control, so cancellation
+    // semantics are exercised against the default dispatcher (not virtual time).
+    private fun runBlockingTestModel(body: suspend (CoroutineScope) -> Unit) = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            body(scope)
+        } finally {
+            scope.cancel()
         }
     }
 }

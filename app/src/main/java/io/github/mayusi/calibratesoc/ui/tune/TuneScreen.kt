@@ -1603,7 +1603,6 @@ private fun AdvancedUnlockCard(
 ) {
     val grants by viewModel.grants.collectAsStateWithLifecycle()
     val pserverLive by viewModel.pserverSysfsLive.collectAsStateWithLifecycle()
-    val selinuxEnforcing by viewModel.selinuxEnforcing.collectAsStateWithLifecycle()
     // FULL one-click setup state — the re-runnable equivalent of onboarding's
     // "Set up everything". Reflects the engine's honest per-item readback.
     val fullSetupState by viewModel.fullSetupState.collectAsStateWithLifecycle()
@@ -1644,19 +1643,8 @@ private fun AdvancedUnlockCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF999999),
             )
-            // Honest gate copy: live tuning is unlocked by SELinux mode + PServer/vendor
-            // binder — NOT by toggling app_whiteList, and NOT by the script's chmod loops.
-            val selinuxLine = when (selinuxEnforcing) {
-                true -> "SELinux is Enforcing and we can't transact the vendor root service, so " +
-                    "live ± tuning may need $vs → \"Force SELinux\" (a LAST RESORT — it can break " +
-                    "emulators; most users should leave it off)."
-                false -> "SELinux is Permissive on this device, so the chmod-direct ± path can stick."
-                null -> "Live ± tuning is gated by your SELinux mode + the vendor root path, not by " +
-                    "this script."
-            }
             Text(
-                "Run the unlock script (below) once to grant the HUD / FPS / vendor-key permissions.\n\n" +
-                    selinuxLine,
+                "Run the unlock script (below) once to grant the HUD / FPS / vendor-key permissions.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF999999),
             )

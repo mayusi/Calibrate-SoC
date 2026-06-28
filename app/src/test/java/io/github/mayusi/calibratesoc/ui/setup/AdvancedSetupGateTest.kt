@@ -76,12 +76,11 @@ class AdvancedSetupGateTest {
         assertThat(isBlocked(applicable = false, isDone = true, skippedConfirmed = false)).isFalse()
     }
 
-    // ── 2. isApplicable delegation rule ──────────────────────────────────────
+    // ── 2. isApplicable vendor-package check ─────────────────────────────────
     //
-    // UnlockScriptSetupItem.isApplicable() must delegate to
-    // ForceSelinuxSetupItem.isApplicable() so the SAME vendor-package check
-    // gates both steps. We test the contract via the shared logic function
-    // extracted below (mirrors what both items use at runtime).
+    // UnlockScriptSetupItem.isApplicable() uses the vendor-package check.
+    // We test the contract via the shared logic function extracted below
+    // (mirrors what the item uses at runtime).
 
     private fun isApplicableViaVendorPkgs(installedPkgs: Set<String>): Boolean {
         val vendorSettingsPkgs = listOf(

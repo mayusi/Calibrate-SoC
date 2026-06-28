@@ -336,12 +336,92 @@ class TunableMetadataTest {
     }
 
     @Test
-    fun `component match does not false-block panic_on_oops`() {
-        // Only the exact component "panic" is blocked; "panic_on_oops" is a different
-        // component and is allowed (errs toward NOT blocking innocent neighbours).
+    fun `component match does not false-block a truly-innocent panic neighbour`() {
+        // Component precision still holds for innocent neighbours of "panic": a node
+        // like "panic_print" (not a crash primitive) is a distinct component and is
+        // NOT on the blocklist, so it must remain allowed. (panic_on_oops/panic_on_warn
+        // ARE now blocked explicitly — see the HIGH-3 closure tests below.)
         assertThat(
-            TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic_on_oops"),
+            TunableMetadata.validateCustomSysfsPath("/proc/sys/kernel/panic_print"),
         ).isNull()
+    }
+
+    // =========================================================================
+    // SECURITY HOLES — CRITICAL-1 (SELinux node/subtree) + HIGH-3 (new kernel nodes)
+    // Proven at the door (validateCustomSysfsPath) AND at isDangerousPath directly.
+    // =========================================================================
+
+    // ── CRITICAL-1: SELinux pseudo-fs ──────────────────────────────────────────
+    @Test
+    fun `blocklist blocks selinux enforce node (setenforce-equivalent)`() {
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/fs/selinux/enforce")).isNotNull()
+        assertThat(TunableMetadata.isDangerousPath("/sys/fs/selinux/enforce")).isTrue()
+    }
+
+    @Test
+    fun `blocklist blocks whole selinux subtree`() {
+        // policy reload, booleans, checkreqprot — none is a legit app tunable.
+        assertThat(TunableMetadata.isDangerousPath("/sys/fs/selinux/load")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/sys/fs/selinux/checkreqprot")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/sys/fs/selinux/booleans/x")).isTrue()
+    }
+
+    // ── HIGH-3: power-control suspend/hibernate DoS levers (scoped to /sys/power/) ─
+    @Test
+    fun `blocklist blocks sys power state disk wakeup_count`() {
+        assertThat(TunableMetadata.isDangerousPath("/sys/power/state")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/sys/power/disk")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/sys/power/wakeup_count")).isTrue()
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/power/state")).isNotNull()
+    }
+
+    @Test
+    fun `power node names only blocked under sys power root`() {
+        // "state"/"disk" are generic words — a same-named component OUTSIDE /sys/power/
+        // must NOT be false-blocked (scoping precision).
+        assertThat(TunableMetadata.isDangerousPath("/sys/devices/platform/x/state")).isFalse()
+        assertThat(TunableMetadata.isDangerousPath("/sys/class/block/sda/disk")).isFalse()
+    }
+
+    // ── HIGH-3: driver bind/unbind (live-driver detach → crash) ────────────────
+    @Test
+    fun `blocklist blocks driver bind and unbind components`() {
+        assertThat(TunableMetadata.isDangerousPath("/sys/bus/usb/drivers/usb/unbind")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/sys/bus/platform/drivers/foo/bind")).isTrue()
+        assertThat(TunableMetadata.validateCustomSysfsPath("/sys/bus/usb/drivers/usb/unbind")).isNotNull()
+    }
+
+    @Test
+    fun `bind component match does not false-block bindings-like neighbour`() {
+        // Whole-component: "bind"/"unbind" must not match "binding" or "unbinder".
+        assertThat(TunableMetadata.isDangerousPath("/sys/devices/x/bindings")).isFalse()
+        assertThat(TunableMetadata.isDangerousPath("/sys/devices/x/rebind_node")).isFalse()
+    }
+
+    // ── HIGH-3: sysrq + panic_on_* crash primitives ────────────────────────────
+    @Test
+    fun `blocklist blocks sysrq and panic_on_oops and panic_on_warn`() {
+        assertThat(TunableMetadata.isDangerousPath("/proc/sys/kernel/sysrq")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/proc/sys/kernel/panic_on_oops")).isTrue()
+        assertThat(TunableMetadata.isDangerousPath("/proc/sys/kernel/panic_on_warn")).isTrue()
+    }
+
+    // ── Regression: the LEGIT writes the app makes must STILL pass the door ─────
+    @Test
+    fun `legit sysfs writes still pass the door after hardening`() {
+        val legit = listOf(
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq",
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor",
+            "/sys/devices/system/cpu/cpufreq/policy0/walt/up_rate_limit_us",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq",
+            "/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+            "/sys/class/kgsl/kgsl-3d0/max_pwrlevel",
+            "/sys/block/sda/queue/read_ahead_kb",
+        )
+        // null canonicalResolver result → string-only validation (build-host safe).
+        val failures = legit.filter { TunableMetadata.validateCustomSysfsPath(it) { null } != null }
+        assertThat(failures).isEmpty()
     }
 
     // =========================================================================

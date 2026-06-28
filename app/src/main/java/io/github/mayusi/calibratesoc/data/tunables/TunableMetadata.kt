@@ -132,8 +132,22 @@ object TunableMetadata {
      *
      * This regex is intentionally conservative: a legitimate sysfs path only ever
      * contains [A-Za-z0-9._/-], so no valid path should ever match.
+     *
+     * SINGLE SOURCE OF TRUTH: this is the ONE shell-metacharacter set the whole
+     * app uses. The door ([validateCustomSysfsPath]) and the unbypassable chokepoint
+     * ([io.github.mayusi.calibratesoc.data.tunables.writer.PServerCommandGuard]) both
+     * reference THIS regex via [containsShellMetachar] — there is no second copy to drift.
      */
-    private val SHELL_META_PATH: Regex = Regex("""['"`${'$'};&|<>(){}\[\]*?!~\\]|\p{Cntrl}""")
+    internal val SHELL_META_PATH: Regex = Regex("""['"`${'$'};&|<>(){}\[\]*?!~\\]|\p{Cntrl}""")
+
+    /**
+     * True iff [s] contains any disallowed shell metacharacter (the [SHELL_META_PATH]
+     * set). Exposed so the root-command guard can reject the IDENTICAL set the door
+     * rejects, without forking a second pattern. A malicious metachar (`$()`, backtick,
+     * `;`, `|`, …) reaching a path/key/value must DENY at the guard even if a caller
+     * forgot to single-quote it — the guard is self-sufficient by construction.
+     */
+    internal fun containsShellMetachar(s: String): Boolean = SHELL_META_PATH.containsMatchIn(s)
 
     // =========================================================================
     // Risk + ValueKind enums
@@ -667,7 +681,46 @@ object TunableMetadata {
         "perf_event_paranoid",
         "dmesg_restrict",
         "modules_disabled",
+        // ── HIGH-3: crash / suspend / driver-detach primitives ────────────────
+        // These are distinct components from "panic"/"sysrq-trigger" above and so
+        // slipped through whole-component matching. No legit tunable uses any of them.
+        // sysrq: re-enables the SysRq crash/secure-attention keys (DoS + hardening
+        // regression). Distinct from the already-blocked "sysrq-trigger".
+        "sysrq",
+        // panic_on_oops / panic_on_warn: a write of 1 turns any kernel oops/warning
+        // into a full panic → instant device kill on command (crash primitive).
+        "panic_on_oops",
+        "panic_on_warn",
+        // Driver bind/unbind: writing a device id to `unbind` detaches a LIVE kernel
+        // driver (and `bind` re-attaches/forces one) → crash / instability. No legit
+        // tunable ever has a `bind` or `unbind` path component (the app's own writes
+        // target scaling_*/max_freq/governor/pwrlevel-style leaves, never bind/unbind).
+        "bind",
+        "unbind",
     )
+
+    /**
+     * HIGH-3: system power-control nodes. Writing `mem`/`disk`/`freeze` to
+     * `/sys/power/state` (or `disk`) suspends/hibernates the device on command, and
+     * `wakeup_count` gates the suspend race — all DoS levers. These node NAMES
+     * (`state`, `disk`, `wakeup_count`) are generic English words, so they are
+     * scoped to the `/sys/power/` root (whole-component) rather than blocked
+     * globally — a `state` component elsewhere (e.g. a hypothetical driver node) is
+     * not a power lever and must not be false-blocked.
+     */
+    private const val POWER_ROOT = "/sys/power/"
+    private val DANGEROUS_POWER_NODES = setOf("state", "disk", "wakeup_count")
+
+    /**
+     * CRITICAL-1: the SELinux pseudo-filesystem. Writing `0` to
+     * `/sys/fs/selinux/enforce` drops SELinux to permissive GLOBALLY — the exact
+     * effect the guard HARD-DENIES for the `setenforce` command. Blocking the
+     * command but leaving the node writable is a wide-open bypass reachable via an
+     * imported custom-rule / share-code / OTA preset path. We block the `enforce`
+     * node specifically AND the entire `/sys/fs/selinux/` subtree (no node under it
+     * — policy reload, booleans, checkreqprot, … — is ever a legit app tunable).
+     */
+    private const val SELINUX_ROOT = "/sys/fs/selinux/"
 
     /**
      * Power-supply node-name fragments whose write could DAMAGE the battery: forcing a
@@ -713,6 +766,17 @@ object TunableMetadata {
         val components = p.split('/')
         if (DANGEROUS_PROC_PATHS.any { entry -> components.any { it == entry } }) {
             return true
+        }
+        // CRITICAL-1: the whole SELinux pseudo-fs is off-limits. Block the exact
+        // `enforce` node and EVERYTHING under /sys/fs/selinux/ (policy, booleans, …).
+        if (p == SELINUX_ROOT + "enforce" || p.startsWith(SELINUX_ROOT)) {
+            return true
+        }
+        // HIGH-3: suspend/hibernate DoS levers, scoped to /sys/power/.
+        if (p.startsWith(POWER_ROOT)) {
+            if (components.any { it in DANGEROUS_POWER_NODES }) {
+                return true
+            }
         }
         if (p.startsWith(POWER_SUPPLY_ROOT)) {
             if (components.any { comp ->

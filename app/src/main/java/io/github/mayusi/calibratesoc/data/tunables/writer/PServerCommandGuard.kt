@@ -164,6 +164,61 @@ object PServerCommandGuard {
     /** Settings.System key shape (matches PServerWriter.writeSettingsSystem). */
     private val SETTINGS_KEY = Regex("""[A-Za-z0-9_.]+""")
 
+    /**
+     * MEDIUM: the EXACT chmod modes the generic chmod-sandwich emits. 666 unlocks the
+     * read-only node, 644 is the GPU-devfreq variant, 444 re-seals. NOTHING else —
+     * never 000 (DoS), never setuid/setgid/sticky (4755/2755/1777). Kept tight to what
+     * [PServerWriter.writeSysfs] actually produces.
+     */
+    private val ALLOWED_CHMOD_MODES = setOf("444", "644", "666")
+
+    /**
+     * MEDIUM: packages the guard will NEVER `am force-stop`, even if a caller (a
+     * bypassed/imported AppReaper target) asks. Force-stopping any of these soft- or
+     * hard-bricks the running session:
+     *   - `android` — the system package / framework.
+     *   - `com.android.systemui` — the system UI (status bar, nav bar, recents).
+     *   - `system_server` — the core system process container.
+     *   - `com.android.launcher*` (prefix) — the AOSP launcher family (home screen).
+     * Plus the running device's actual launcher — but since that varies per OEM, the
+     * exclusions are matched by exact id + the `com.android.systemui`/launcher prefixes;
+     * the most common stock launchers are listed explicitly. AppReaper additionally
+     * never targets the foreground/home app, so this is defence-in-depth at the guard.
+     */
+    private val CRITICAL_SYSTEM_PACKAGES = setOf(
+        "android",
+        "system",
+        "system_server",
+        "com.android.systemui",
+        "com.android.settings",
+        "com.android.phone",
+        "com.android.launcher",
+        "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher",
+    )
+
+    /**
+     * Package-name prefixes that are categorically refused as force-stop targets:
+     * the SystemUI namespace and the AOSP launcher namespace. A prefix match (not a
+     * blanket `com.android.*`, which would over-block legit reapable system-adjacent
+     * apps) keeps the carve-out narrow but covers OEM launcher variants like
+     * `com.android.launcher3.uioverrides`.
+     */
+    private val CRITICAL_PACKAGE_PREFIXES = listOf(
+        "com.android.systemui",
+        "com.android.launcher",
+        // The AOSP launcher family is shipped as launcher3 with OEM overlay sub-packages
+        // (e.g. com.android.launcher3.uioverrides). The bare "com.android.launcher"
+        // prefix does NOT cover "launcher3" (the digit breaks the dot boundary), so the
+        // numbered family is listed explicitly.
+        "com.android.launcher3",
+    )
+
+    /** True iff [pkg] is a critical system package the guard refuses to force-stop. */
+    internal fun isCriticalSystemPackage(pkg: String): Boolean =
+        pkg in CRITICAL_SYSTEM_PACKAGES ||
+            CRITICAL_PACKAGE_PREFIXES.any { pkg == it || pkg.startsWith("$it.") }
+
     /** getprop/setprop-style property key shape (read only — getprop). */
     private val PROP_KEY = Regex("""[A-Za-z0-9_.\-]+""")
 
@@ -298,6 +353,15 @@ object PServerCommandGuard {
      * EXCEPT this single, exact, sanctioned shape.
      */
     private fun allowEcho(tokens: List<String>, segment: String): Verdict {
+        // MEDIUM: command-substitution hardening. Even for a redirect-free `echo`,
+        // an unquoted `$(reboot)` or backtick arg would be expanded by the shell
+        // BEFORE echo ever runs, so the verb-level check alone is not enough. Reject
+        // any echo segment that carries a backtick or a `$(` anywhere — no legitimate
+        // echo the app emits contains either. (The path-level metachar check in
+        // validatePath closes the redirect-target vector; this closes the arg vector.)
+        if (segment.contains('`') || segment.contains("$(")) {
+            return Verdict.Deny("echo argument contains command substitution (\$()/backtick): '$segment'")
+        }
         if (!hasRedirect(segment)) {
             // Plain echo of literal text — no filesystem effect. Allow.
             return Verdict.Allow
@@ -329,8 +393,13 @@ object PServerCommandGuard {
         if (hasRedirect(segment)) return Verdict.Deny("chmod must not redirect: '$segment'")
         if (tokens.size != 3) return Verdict.Deny("chmod takes <mode> <path>: '$segment'")
         val mode = tokens[1]
-        if (!mode.matches(Regex("[0-7]{3,4}"))) {
-            return Verdict.Deny("chmod mode must be octal 3-4 digits: '$segment'")
+        // MEDIUM: restrict the mode to the EXACT safe set the chmod-sandwich emits
+        // (666 to unlock the node, 644 for the GPU devfreq variant, 444 to re-seal).
+        // The old `[0-7]{3,4}` regex also accepted 000 (DoS: makes a node unreadable
+        // for everyone) and the setuid/setgid/sticky modes (4755/2755/1777) — none of
+        // which the app ever emits, all of which are dangerous via an imported path.
+        if (mode !in ALLOWED_CHMOD_MODES) {
+            return Verdict.Deny("chmod mode not on the safe allow-list (444/644/666 only): '$segment'")
         }
         return requireWritableSysfsPath(tokens[2], segment)
     }
@@ -348,11 +417,21 @@ object PServerCommandGuard {
         if (op == "get") {
             if (tokens.size != 4) return Verdict.Deny("settings get takes only a key: '$segment'")
         } else {
-            // put: key + exactly one value token (value is shell-quoted at the
-            // call-site; the tokenizer returns it as one token). The value is data —
-            // it ran through `settings put` which never interprets it as a command —
-            // so any value content is fine as long as it's a single token.
+            // put: key + exactly one value token. The value is data — `settings put`
+            // never interprets it as a command — and the call-site single-quotes it,
+            // so the tokenizer returns it as one token.
             if (tokens.size != 5) return Verdict.Deny("settings put takes key + one value: '$segment'")
+            // CRITICAL-2: self-sufficiency. If a caller forgot to quote and the value
+            // carries a command-substitution (`$(...)` / backtick), the SHELL would
+            // expand it before `settings` ran. A correctly single-quoted value never
+            // reaches here with a raw backtick or `$(` (the quotes are stripped by the
+            // tokenizer, leaving the literal text — which the door's metachar check on
+            // the source value already vetted). So rejecting `$(`/backtick in the value
+            // token is safe for every legit emit and closes the unquoted-injection vector.
+            val value = tokens[4]
+            if (value.contains('`') || value.contains("$(")) {
+                return Verdict.Deny("settings value contains command substitution (\$()/backtick): '$segment'")
+            }
         }
         return Verdict.Allow
     }
@@ -427,6 +506,14 @@ object PServerCommandGuard {
             "force-stop" -> {
                 if (tokens.size != 3) return Verdict.Deny("am force-stop takes one pkg: '$segment'")
                 if (!PACKAGE_NAME.matches(tokens[2])) return Verdict.Deny("am force-stop pkg invalid: '$segment'")
+                // MEDIUM: even a well-formed package is refused if it is a critical
+                // system package. AppReaper has its own exclusion list, but the guard
+                // is the unbypassable chokepoint and must refuse to force-stop the
+                // platform / SystemUI / system_server / the active launcher even if
+                // AppReaper's exclusions are bypassed via an imported reap target.
+                if (isCriticalSystemPackage(tokens[2])) {
+                    return Verdict.Deny("am force-stop of a critical system package is refused: '$segment'")
+                }
                 Verdict.Allow
             }
             "set-inactive" -> {
@@ -768,6 +855,15 @@ object PServerCommandGuard {
         if (path.contains("..")) return "path contains traversal '..' (got '$path')"
         if (path.any { it.code == 0 }) return "path contains a NUL byte"
         if (path.contains('\n') || path.contains('\r')) return "path contains control characters (got '$path')"
+        // CRITICAL-2: reject the FULL shell-metacharacter set — the SAME one the door
+        // ([TunableMetadata.validateCustomSysfsPath]) rejects, referenced here via the
+        // single-source [TunableMetadata.containsShellMetachar] (no second copy to drift).
+        // The guard is the unbypassable chokepoint and MUST be self-sufficient: a
+        // metachar path ($(), backtick, ;, |, <, >, *, ?, {}, …) must DENY here even if
+        // a caller forgot to single-quote it. (A legit sysfs path is only [A-Za-z0-9._/-].)
+        if (TunableMetadata.containsShellMetachar(path)) {
+            return "path contains a disallowed shell metacharacter (got '$path')"
+        }
         // Narrow cgroup-boost carve-out: the uclamp/schedtune perf nodes live under
         // /dev/cpuctl and /dev/stune, NOT /sys or /proc. They are legitimate perf
         // levers (sched boost) that PServer-LIVE now writes. We permit ONLY the exact

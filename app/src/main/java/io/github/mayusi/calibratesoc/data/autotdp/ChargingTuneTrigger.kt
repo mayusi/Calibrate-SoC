@@ -139,20 +139,31 @@ class ChargingTuneTrigger @Inject constructor(
 
     /**
      * Stop listening and unregister the receiver.
-     * Reverts the bundle under [NonCancellable] before cancelling the scope
-     * so the device is never left in charging-mode after service death.
+     * Reverts the bundle before cancelling the scope so the device is never left in
+     * charging-mode after service death.
+     *
+     * BUG 8 fix: the previous implementation did `scope.launch { revert }.invokeOnCompletion
+     * { scope.cancel() }`. If the scope job was ALREADY cancelling (rapid double-stop /
+     * teardown), the launched body NEVER started — and a NonCancellable block INSIDE revert
+     * cannot save a coroutine body that never began. The charging cap / fan / refresh would
+     * then stay applied after unplug. We now run the revert on a private always-alive scope
+     * and BLOCK until it completes, so the revert is guaranteed to run to completion on every
+     * stop path regardless of the main scope's cancellation state, THEN cancel the main scope.
      */
     fun stop() {
         receiver?.let {
             runCatching { context.unregisterReceiver(it) }
             receiver = null
         }
-        // Revert synchronously (NonCancellable) before cancelling the scope.
-        scope.launch {
-            revertBundle(reason = "trigger stopped")
-        }.invokeOnCompletion {
-            scope.cancel()
-        }
+        // Run the revert on a scope that is NOT being torn down, and block until it
+        // finishes. revertBundle is itself NonCancellable; running it here guarantees the
+        // body actually starts even if `scope` is mid-cancellation.
+        runCatching {
+            kotlinx.coroutines.runBlocking {
+                revertBundle(reason = "trigger stopped")
+            }
+        }.onFailure { Log.w(TAG, "stop: revert failed", it) }
+        scope.cancel()
     }
 
     // ── Apply ─────────────────────────────────────────────────────────────────
@@ -187,10 +198,26 @@ class ChargingTuneTrigger @Inject constructor(
 
         Log.i(TAG, "applyBundle: applying bundle=$bundle")
 
+        // BUG 9 fix: COMMIT the "applied" flag FIRST, under NonCancellable, BEFORE starting
+        // any effect. The failure class this kills: if the coroutine is cancelled between
+        // start(AutoTDP) and `bundleApplied = true`, the revert guard `if (!bundleApplied)
+        // return` no-ops on unplug while AutoTDP keeps running in charging mode forever.
+        // With the flag committed first, even a partial apply is fully reverted on unplug.
+        // (Same commit-applied-first discipline as ForegroundAppWatcher's tracker.)
+        withContext(NonCancellable) {
+            bundleApplied = true
+        }
+
         // 1. AutoTDP goal — start daemon with the configured goal.
-        autoTdpController.start(bundle.autoTdpGoal)
-        autoTdpStarted = true
-        Log.i(TAG, "applyBundle: started AutoTDP goal=${bundle.autoTdpGoal.name}")
+        // runCatching: a throw here must not propagate and cancel the apply mid-flight while
+        // leaving bundleApplied=true with no revert state — we record autoTdpStarted only on
+        // a clean start, and the flag is already committed so unplug still reverts what landed.
+        runCatching { autoTdpController.start(bundle.autoTdpGoal) }
+            .onSuccess {
+                autoTdpStarted = true
+                Log.i(TAG, "applyBundle: started AutoTDP goal=${bundle.autoTdpGoal.name}")
+            }
+            .onFailure { Log.w(TAG, "applyBundle: AutoTDP start failed", it) }
 
         // 2. Fan mode — capture prior value, then write.
         bundle.fanMode?.let { mode ->
@@ -223,7 +250,8 @@ class ChargingTuneTrigger @Inject constructor(
             Log.i(TAG, "applyBundle: refresh rate pinned to $hz Hz")
         }
 
-        bundleApplied = true
+        // bundleApplied was committed FIRST (BUG 9) so revert is always armed; this is the
+        // success log only — re-asserting the flag is a harmless no-op.
         Log.i(TAG, "applyBundle: bundle applied successfully")
     }
 

@@ -101,29 +101,20 @@ class AdvancedUnlockViewModel @Inject constructor(
     /**
      * The latest capability snapshot, so the onboarding wizard can decide
      * whether a no-Permissive live-tuning path (PServer / AYANEO binder /
-     * root) already exists — and therefore whether the Force SELinux
-     * last-resort step should be offered at all. Null until the first
-     * [CapabilityProbe.refresh] lands.
+     * root) already exists. Null until the first [CapabilityProbe.refresh] lands.
      */
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
 
     /**
-     * Convenience signals for the "already unlocked" UX copy. Derived straight
+     * Convenience signal for the "already unlocked" UX copy. Derived straight
      * off [capability] so the advanced-unlock flow can render the honest state
      * without each call-site re-reading the report:
      *
      *   - [pserverSysfsLive]: PServer-root live tuning is active (nothing to do).
-     *   - [selinuxEnforcing]: SELinux mode (true=Enforcing, false=Permissive,
-     *     null=unknown) — the REAL gate, used to distinguish "needs Force-SELinux"
-     *     (Enforcing + binder present, no live path) from the normal ladder.
      */
     val pserverSysfsLive: StateFlow<Boolean> = capabilityProbe.report
         .map { it?.pserverSysfsLive == true }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
-
-    val selinuxEnforcing: StateFlow<Boolean?> = capabilityProbe.report
-        .map { it?.selinuxEnforcing }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun deployScript(): AdvancedPermissionsScript.Deployed = script.deploy()
 

@@ -523,4 +523,162 @@ class PServerCommandGuardTest {
     fun allow_pipeCatGrep() {
         allow("cat /proc/stat | grep cpu")
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SECURITY HOLE CLOSURES — each test proves one audit-confirmed hole is shut
+    //  at the GUARD (the unbypassable chokepoint), not merely at the door.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // ── CRITICAL-1: SELinux node + subtree (sysfs route around setenforce deny) ──
+
+    @Test fun deny_selinuxEnforceWrite() =
+        deny("chmod 666 '/sys/fs/selinux/enforce' && printf %s '0' > '/sys/fs/selinux/enforce'; chmod 444 '/sys/fs/selinux/enforce'")
+
+    @Test fun deny_selinuxEnforcePrintf() =
+        deny("printf %s '0' > '/sys/fs/selinux/enforce'")
+
+    @Test fun deny_selinuxEnforceRead() =
+        deny("cat '/sys/fs/selinux/enforce'")
+
+    @Test fun deny_selinuxSubtreePolicy() =
+        deny("printf %s 'x' > '/sys/fs/selinux/load'")
+
+    @Test fun deny_selinuxSubtreeBoolean() =
+        deny("printf %s '1' > '/sys/fs/selinux/booleans/some_bool'")
+
+    // ── CRITICAL-2: shell-substitution metachars rejected AT THE GUARD ──────────
+    // The door rejects these too, but these assertions prove the guard is
+    // self-sufficient — a metachar path denies here even though no caller quoted it.
+
+    @Test fun deny_commandSubstitutionInSysfsPath() =
+        deny("cat /sys/devices/x\$(reboot)/cur_freq")
+
+    @Test fun deny_backtickInSysfsPath() =
+        deny("cat /sys/devices/x`reboot`/cur_freq")
+
+    @Test fun deny_commandSubstitutionInWriteTarget() =
+        deny("printf %s '1' > /sys/devices/x\$(rm -rf /)/y")
+
+    @Test fun deny_semicolonMetacharInPath() =
+        deny("cat /sys/foo;reboot")
+
+    @Test fun deny_pipeMetacharInChmodPath() =
+        deny("chmod 666 /sys/foo|reboot")
+
+    // Echo arg-level command substitution (no redirect needed — shell expands first).
+    @Test fun deny_echoCommandSubstitution() =
+        deny("echo \$(reboot)")
+
+    @Test fun deny_echoBacktick() =
+        deny("echo `reboot`")
+
+    @Test fun deny_settingsValueCommandSubstitution() =
+        deny("settings put system fan_mode \$(reboot)")
+
+    @Test fun deny_settingsValueBacktick() =
+        deny("settings put system fan_mode `reboot`")
+
+    // ── HIGH-3: suspend / driver-detach / sysrq / panic-on-* crash primitives ───
+
+    @Test fun deny_powerStateSuspend() =
+        deny("printf %s 'mem' > /sys/power/state")
+
+    @Test fun deny_powerDiskHibernate() =
+        deny("printf %s 'disk' > /sys/power/disk")
+
+    @Test fun deny_powerWakeupCount() =
+        deny("printf %s '0' > /sys/power/wakeup_count")
+
+    @Test fun deny_driverUnbind() =
+        deny("printf %s '1-1' > '/sys/bus/usb/drivers/usb/unbind'")
+
+    @Test fun deny_driverBind() =
+        deny("printf %s '1-1' > '/sys/bus/platform/drivers/foo/bind'")
+
+    @Test fun deny_sysrqEnable() =
+        deny("printf %s '1' > /proc/sys/kernel/sysrq")
+
+    @Test fun deny_panicOnOops() =
+        deny("printf %s '1' > /proc/sys/kernel/panic_on_oops")
+
+    @Test fun deny_panicOnWarn() =
+        deny("printf %s '1' > /proc/sys/kernel/panic_on_warn")
+
+    // ── MEDIUM: chmod mode allow-list (000 / setuid / setgid blocked) ───────────
+
+    @Test fun deny_chmod000() =
+        deny("chmod 000 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+
+    @Test fun deny_chmodSetuid4755() =
+        deny("chmod 4755 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+
+    @Test fun deny_chmodSetgid2755() =
+        deny("chmod 2755 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+
+    @Test fun deny_chmod777() =
+        deny("chmod 777 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+
+    // The legit sandwich modes (666 / 644 / 444) must still pass.
+    @Test fun allow_chmod666_644_444_modes() {
+        allow("chmod 666 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+        allow("chmod 644 '/sys/class/kgsl/kgsl-3d0/devfreq/max_freq'")
+        allow("chmod 444 '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'")
+    }
+
+    // ── MEDIUM: am force-stop of a critical system package refused at the guard ──
+
+    @Test fun deny_forceStopSystemui() =
+        deny("am force-stop com.android.systemui")
+
+    @Test fun deny_forceStopSystemServer() =
+        deny("am force-stop system_server")
+
+    @Test fun deny_forceStopAndroid() =
+        deny("am force-stop android")
+
+    @Test fun deny_forceStopLauncher() =
+        deny("am force-stop com.android.launcher3")
+
+    @Test fun deny_forceStopLauncherVariant() =
+        deny("am force-stop com.android.launcher3.uioverrides")
+
+    @Test fun deny_forceStopNexusLauncher() =
+        deny("am force-stop com.google.android.apps.nexuslauncher")
+
+    // A normal game package is still reapable.
+    @Test fun allow_forceStopNormalGameStillWorks() =
+        allow("am force-stop com.foo.game")
+
+    // ── Regression guard: the full set of REAL legit writes still ALLOW ─────────
+    // A focused re-assertion that the new denials did NOT break any sanctioned shape.
+    @Test fun allow_legitWritesStillPassAfterHardening() {
+        val legit = listOf(
+            // cpufreq scaling_max_freq sandwich
+            sandwich("/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq", "2745600"),
+            // GPU pwrlevel / devfreq
+            sandwich("/sys/class/kgsl/kgsl-3d0/devfreq/max_freq", "1000000"),
+            sandwich("/sys/class/kgsl/kgsl-3d0/min_pwrlevel", "0"),
+            // WALT governor tunable (scheduler walt path)
+            sandwich("/sys/devices/system/cpu/cpufreq/policy0/walt/up_rate_limit_us", "1000"),
+            // governor write
+            sandwich("/sys/devices/system/cpu/cpufreq/policy0/scaling_governor", "performance"),
+            // the Odin fan-script carve-out
+            realFanScript(),
+            // settings put (numeric value)
+            "settings put system fan_mode 4",
+            "settings put system performance_mode '2'",
+            // pm grant our package
+            "pm grant io.github.mayusi.calibratesoc android.permission.DUMP",
+            // appops set our package
+            "appops set io.github.mayusi.calibratesoc android:get_usage_stats allow",
+            // deviceidle whitelist our package
+            "dumpsys deviceidle whitelist +io.github.mayusi.calibratesoc",
+            // drop_caches flush
+            "sync; echo 3 > /proc/sys/vm/drop_caches",
+        )
+        val failures = legit.filter {
+            PServerCommandGuard.inspect(it) !is PServerCommandGuard.Verdict.Allow
+        }
+        assertThat(failures).isEmpty()
+    }
 }

@@ -115,132 +115,6 @@ object BatteryOptSetupItem : SetupItem {
 }
 
 /**
- * Force SELinux (Odin firmware-specific) — without this our app's
- * UID can't write CPU sysfs, vendor key Binder calls hit denials,
- * and PServer / kernel-read fallbacks all fail. We can't toggle it
- * for the user (it's in Odin Settings, not our app's perms), but we
- * can DETECT whether it's on by running `getenforce` (always
- * executable to any UID) and checking the result.
- */
-object ForceSelinuxSetupItem : SetupItem {
-    override val id = "force_selinux"
-    override val title = "Force SELinux — last resort (not recommended)"
-    override val rationale =
-        "Last resort only. Puts the device in SELinux Permissive mode, which " +
-            "can BREAK many emulators and apps and weakens security — most " +
-            "users should leave it OFF. It's only ever needed for the " +
-            "chmod-direct write path (HUD ± buttons) on devices that have NO " +
-            "other live-tuning path — PServer (Odin/AYN), the AYANEO/Retroid " +
-            "binders, and root all work WITHOUT it. We can't flip it for you " +
-            "(the firmware owns the toggle). Skip it unless live tuning truly " +
-            "won't work any other way."
-    override fun isDone(context: Context): Boolean {
-        // We CANNOT reliably read SELinux mode from our app's UID:
-        //   - getenforce → "Permission denied" (Odin 3 + Thor)
-        //   - /sys/fs/selinux/enforce → "Permission denied"
-        //   - scaling_max_freq is 664/660 owned system:system, so the
-        //     write-probe fails even when permissive (we're not root
-        //     and not the owner — permissive removes the SELinux denial
-        //     but the POSIX mode bits still block us).
-        // The ONLY thing that flips when Force SELinux turns ON and
-        // actually MATTERS for us is whether PServer starts executing
-        // our commands. So that's the real signal. If it transacts,
-        // permissive is effectively on for our purposes.
-        val viaPServer = isPServerTransactable(context)
-        if (viaPServer) return true
-
-        // Best-effort sysfs write probe (works only if a prior unlock
-        // script chmod 666'd the files AND permissive is on).
-        val viaWriteProbe = runCatching {
-            val probe = java.io.File("/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq")
-            if (!probe.exists()) return@runCatching false
-            val original = probe.readText().trim()
-            if (original.isEmpty()) return@runCatching false
-            probe.bufferedWriter().use { it.write(original) }
-            true
-        }.getOrDefault(false)
-        if (viaWriteProbe) return true
-
-        // Last resort: the user manually told us they enabled it. We
-        // can't verify, but we trust their word so the wizard isn't a
-        // dead end on devices where every automated probe is blocked.
-        return manuallyConfirmed(context)
-    }
-
-    /**
-     * Delegates to [PServerWriter.transactableNow] — the ONLY correct
-     * probe for whether PServer actually executes our commands.
-     *
-     * [PServerWriter.transactableNow] reads the memoised result of the
-     * real [PServerWriter.isTransactable] probe that [CapabilityProbe.refresh]
-     * already ran. This avoids:
-     *   (a) duplicating the wire format (the old local copy used the
-     *       WRONG format: writeInterfaceToken + writeString + transact(1),
-     *       which always returns UNKNOWN_TRANSACTION on AYN firmware — a
-     *       permanent false negative); and
-     *   (b) issuing a second live transact, which would re-arm the
-     *       circuit breaker on slow devices.
-     *
-     * If the cache has not been warmed yet (cold path before first
-     * CapabilityProbe.refresh) this returns false — conservative, never
-     * a false positive.
-     */
-    private fun isPServerTransactable(context: Context): Boolean = runCatching {
-        dagger.hilt.android.EntryPointAccessors.fromApplication(
-            context.applicationContext,
-            PServerEntryPoint::class.java,
-        ).pServerWriter().transactableNow()
-    }.getOrDefault(false)
-
-    @dagger.hilt.EntryPoint
-    @dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
-    interface PServerEntryPoint {
-        fun pServerWriter(): io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
-    }
-
-    /** Read the user's manual "I enabled Force SELinux" confirmation
-     *  from SharedPreferences. Synchronous + cheap so isDone() stays
-     *  pollable. */
-    fun manuallyConfirmed(context: Context): Boolean =
-        context.getSharedPreferences("setup_overrides", Context.MODE_PRIVATE)
-            .getBoolean("force_selinux_confirmed", false)
-
-    /** Persist the user's manual confirmation. Called from the wizard
-     *  when they tap "I've enabled it". */
-    fun setManuallyConfirmed(context: Context, value: Boolean) {
-        context.getSharedPreferences("setup_overrides", Context.MODE_PRIVATE)
-            .edit().putBoolean("force_selinux_confirmed", value).apply()
-    }
-
-    override fun isApplicable(context: Context): Boolean {
-        // Force-SELinux is provided by the vendor settings app on AYN/Odin
-        // AND Retroid AND AYANEO handhelds — they share the com.ro.* firmware
-        // base, so the toggle is present under com.odin.settings,
-        // com.rp.settings, or com.ayaneo.settings. (Earlier this only checked
-        // com.odin.settings, which wrongly marked the Retroid Pocket 6 as
-        // "not available" — it IS available there.) Also applicable if PServer
-        // already transacts (root path present) or if the device is already
-        // permissive (some ship that way).
-        val pm = context.packageManager
-        val vendorSettingsPkgs = listOf(
-            "com.odin.settings",   // AYN Odin / Thor
-            "com.rp.settings",     // Retroid Pocket 6 (and family)
-            "com.ayaneo.settings", // AYANEO
-        )
-        val hasVendorToggle = vendorSettingsPkgs.any { pkg ->
-            runCatching { pm.getPackageInfo(pkg, 0); true }.getOrDefault(false)
-        }
-        return hasVendorToggle || isPServerTransactable(context)
-    }
-
-    override fun launch(context: Context) {
-        // Open Odin Settings so user can find the toggle themselves —
-        // there's no deep link to the specific switch.
-        io.github.mayusi.calibratesoc.data.vendor.OdinIntents.openOdinSettings(context)
-    }
-}
-
-/**
  * Unlock script — the one-time grant flow we built earlier. Done
  * state is "DUMP permission held" since DUMP is the most expensive
  * thing the unlock grants and the most reliable signal it ran.
@@ -268,17 +142,45 @@ object UnlockScriptSetupItem : SetupItem {
     @Volatile var lastDeployedPath: String? = null
 
     /**
-     * Mirrors [ForceSelinuxSetupItem.isApplicable]: the unlock script step
-     * is only forceable on devices that have a vendor runner to execute it —
-     * AYN (com.odin.settings), Retroid (com.rp.settings), AYANEO
-     * (com.ayaneo.settings), or any device whose PServer already transacts
+     * The unlock script step is only forceable on devices that have a vendor
+     * runner to execute it — AYN (com.odin.settings), Retroid (com.rp.settings),
+     * AYANEO (com.ayaneo.settings), or any device whose PServer already transacts
      * (the script whitelists us there).
      *
      * On a generic Android phone with none of these, the user has no "Run
      * script as Root" menu, so we must NOT force them through this step.
      */
-    override fun isApplicable(context: Context): Boolean =
-        ForceSelinuxSetupItem.isApplicable(context)
+    override fun isApplicable(context: Context): Boolean {
+        val pm = context.packageManager
+        val vendorSettingsPkgs = listOf(
+            "com.odin.settings",   // AYN Odin / Thor
+            "com.rp.settings",     // Retroid Pocket 6 (and family)
+            "com.ayaneo.settings", // AYANEO
+        )
+        val hasVendorRunner = vendorSettingsPkgs.any { pkg ->
+            runCatching { pm.getPackageInfo(pkg, 0); true }.getOrDefault(false)
+        }
+        if (hasVendorRunner) return true
+        // Also applicable if PServer already transacts — the script whitelists us.
+        return runCatching {
+            dagger.hilt.android.EntryPointAccessors.fromApplication(
+                context.applicationContext,
+                UnlockEntryPoint::class.java,
+            ).unlockScript().let {
+                // Re-use the memoised transactableNow check via PServerWriter.
+                dagger.hilt.android.EntryPointAccessors.fromApplication(
+                    context.applicationContext,
+                    PServerCheckEntryPoint::class.java,
+                ).pServerWriter().transactableNow()
+            }
+        }.getOrDefault(false)
+    }
+
+    @dagger.hilt.EntryPoint
+    @dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
+    interface PServerCheckEntryPoint {
+        fun pServerWriter(): io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
+    }
 
     override fun isDone(context: Context): Boolean {
         return context.packageManager.checkPermission(
@@ -320,10 +222,9 @@ object UnlockScriptSetupItem : SetupItem {
  * usage access (per-app auto-switch), battery optimization exemption
  * (keeps HUD + monitor alive mid-game).
  *
- * ForceSelinuxSetupItem and UnlockScriptSetupItem are still defined
- * above and used by the Settings checklist + TuneScreen's
- * AdvancedUnlockCard — they are intentionally NOT included here so
- * the wizard stays fast and device-agnostic.
+ * UnlockScriptSetupItem is still defined above and used by the Settings
+ * checklist + TuneScreen's AdvancedUnlockCard — it is intentionally NOT
+ * included here so the wizard stays fast and device-agnostic.
  */
 val AllSetupItems: List<SetupItem> = listOf(
     OverlaySetupItem,
@@ -340,7 +241,6 @@ val AllSetupItemsWithAdvanced: List<SetupItem> = listOf(
     OverlaySetupItem,
     UsageStatsSetupItem,
     BatteryOptSetupItem,
-    ForceSelinuxSetupItem,
     UnlockScriptSetupItem,
 )
 

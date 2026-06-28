@@ -335,25 +335,10 @@ fun SettingsScreen(
                 else ->
                     "Read-only monitoring + benchmark. On supported handhelds, grant WRITE_SECURE_SETTINGS via adb to enable vendor tuning. Magisk / KernelSU unlocks the ROOT tier (opt in below). Custom MHz caps work on ANY device via Generate script."
             }
-            // Honest SELinux readout — the real gate for app-UID live tuning.
-            val selinuxLine = when (capability?.selinuxEnforcing) {
-                true -> "SELinux: Enforcing"
-                false -> "SELinux: Permissive"
-                null -> null
-            }
             ArsenalPanel(accent = tierAccent, title = "PRIVILEGE TIER") {
                 StatusPill(text = tierChip, accent = tierAccent)
                 Spacer(Modifier.height(Spacing.dense))
                 Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = androidx.compose.ui.graphics.Color(0xFF999999))
-                if (selinuxLine != null) {
-                    Spacer(Modifier.height(Spacing.dense))
-                    Text(
-                        selinuxLine,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = androidx.compose.ui.graphics.Color(0xFF777777),
-                    )
-                }
             }
         }
 

@@ -1,3 +1,25 @@
+## [0.1.37-alpha] — 2026-06-28
+
+One-tap setup, smarter automation, real power-user controls, and a serious safety + security pass.
+
+### Added — the app sets itself up and tunes for you
+- **One-tap setup.** On supported handhelds, the wizard now grants the app everything it needs (FPS, overlay HUD, usage access, battery, notifications) in a single tap via your device's root bridge — no Settings trips, no script.
+- **Auto-configure known games.** Launch a known emulator and the app sets up sensible tuning for it automatically (undoable, off by a tap).
+- **One-tap "apply best profile"** — the app learns the best profile per game from your sessions and applies it for you.
+- **Charging auto-profile** — plug in (and not gaming) → cool/quiet mode, reverts on unplug.
+- **Manual GPU clock lock** (floor/ceiling in real MHz) and **per-cluster CPU governor tuning** for power users.
+
+### Changed
+- **Setup is simpler.** Removed the "Force SELinux" step entirely (it broke emulation and was never the right tool) — the app just auto-detects and works, or falls back honestly.
+- Premium one-tap onboarding with a live setup checklist.
+
+### Fixed — safety
+- Closed a class of bugs where a tune could be left applied with no revert after a fast app-switch, unplug, or shutdown (the device could stay mis-clocked). Reverts now always complete.
+- A kernel write that silently failed is no longer recorded as success.
+
+### Security
+- **Hardened the root command gate.** Closed holes where imported/shared content could have reached dangerous kernel nodes (SELinux mode, power/suspend, driver bind/unbind, sysrq/panic) or slipped shell metacharacters past the gate. The root channel now refuses these categorically, proven by tests.
+
 ## [0.1.36-alpha] — 2026-06-27
 
 The big one: full root tuning on Retroid too, tunes that survive reboot, and a setup that just works.
