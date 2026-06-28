@@ -1,5 +1,7 @@
 package io.github.mayusi.calibratesoc.data.monitor
 
+import io.github.mayusi.calibratesoc.data.util.mwFromUaUv
+
 /**
  * One sample of live device state. Emitted at the [MonitorService]'s
  * sample rate (1 Hz dashboard, 4 Hz stress mode). All values are
@@ -92,7 +94,7 @@ val Telemetry.batteryDrawMilliW: Long?
         // some OEMs and positive on others; we normalise to "positive =
         // discharging" by flipping sign when the value is negative.
         val absUa = if (ua < 0) -ua else ua
-        return (absUa * uv) / 1_000_000_000L
+        return absUa.mwFromUaUv(uv)
     }
 
 /** True when [perCoreLoadPct] values came from a real /proc/stat read

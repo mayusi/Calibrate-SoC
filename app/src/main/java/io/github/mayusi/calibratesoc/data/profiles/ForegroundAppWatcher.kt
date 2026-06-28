@@ -17,6 +17,8 @@ import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import io.github.mayusi.calibratesoc.data.vendor.readFanMode
+import io.github.mayusi.calibratesoc.data.vendor.writeFanMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -299,9 +301,9 @@ class ForegroundAppWatcher : AccessibilityService() {
             val key = resolveFanModeKey(report)
             if (key != null) {
                 // Snapshot current value before writing so we can revert on exit.
-                val before = readFanMode(key)
+                val before = readFanMode(contentResolver, key)
                 Log.i(TAG, "applyForPackage($pkg): setting fan_mode=$mode (was=$before)")
-                val result = writeFanMode(key, mode.toString(), report, reason = "per-app bundle: $pkg")
+                val result = writeFanMode(tunableWriter, key, mode.toString(), report, reason = "per-app bundle: $pkg")
                 // BUG 5 fix: only record the before-state AFTER a successful write. If the
                 // write failed, we never changed the fan, so a recorded before-state would
                 // make revert "restore" a value that was never overwritten — corrupting fan
@@ -454,7 +456,7 @@ class ForegroundAppWatcher : AccessibilityService() {
                 if (key != null && before != null) {
                     Log.i(TAG, "revertBundle($pkg): reverting fan_mode to '$before'")
                     val report = capabilityProbe.report.value ?: capabilityProbe.refresh()
-                    writeFanMode(key, before, report, reason = "per-app bundle revert: $pkg")
+                    writeFanMode(tunableWriter, key, before, report, reason = "per-app bundle revert: $pkg")
                 }
                 fanModeBeforeBundle = null
                 activeFanModeKey = null
@@ -475,36 +477,6 @@ class ForegroundAppWatcher : AccessibilityService() {
         ?.fanAdapter
         ?.takeIf { it.kind == FanAdapterKind.SETTINGS_KEY }
         ?.target
-
-    /**
-     * Read the current fan_mode Settings.System value via ContentResolver.
-     * Returns null on any error.
-     */
-    private fun readFanMode(key: String): String? = runCatching {
-        android.provider.Settings.System.getString(contentResolver, key)
-    }.getOrNull()
-
-    /**
-     * Write a fan_mode value through [TunableWriter]. SETTINGS_SYSTEM kind routes
-     * to PServerWriter which uses the PServer root shell — the same path the rest
-     * of the app uses for vendor Settings.System keys.
-     *
-     * Returns the [WriteResult] so callers can record revert state ONLY on success
-     * (BUG 5: a recorded before-state for a failed write would corrupt revert).
-     */
-    private suspend fun writeFanMode(
-        key: String,
-        value: String,
-        report: io.github.mayusi.calibratesoc.data.capability.CapabilityReport,
-        reason: String,
-    ): WriteResult {
-        val id = TunableId(kind = TunableKind.SETTINGS_SYSTEM, target = key)
-        val result = tunableWriter.write(id = id, value = value, report = report, reason = reason)
-        if (result !is WriteResult.Success) {
-            Log.w(TAG, "writeFanMode($key=$value): ${result::class.simpleName}")
-        }
-        return result
-    }
 
     override fun onInterrupt() {
         // Required override; nothing to interrupt — our work is fire-and-forget coroutines.

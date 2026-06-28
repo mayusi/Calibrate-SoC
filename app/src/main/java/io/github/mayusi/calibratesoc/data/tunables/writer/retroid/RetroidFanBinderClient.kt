@@ -31,7 +31,7 @@ private const val TAG = "CalibrateSoC-RetroidFan"
  * SettingsController binder acquired, FanProvider binder acquired, txn 7 accepted,
  * txn 2 read-back returned 25000 (the configured `fan_speed`).
  *
- * ## Wire protocol (EXACT — see also [io.github.mayusi.calibratesoc.debug.RetroidFanProbe])
+ * ## Wire protocol (EXACT)
  *
  * Unlike AYANEO (one bindService Intent), Retroid uses a TWO-HOP registered-service
  * chain reached via reflection on the hidden `android.os.ServiceManager` (the SAME

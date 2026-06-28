@@ -4,6 +4,8 @@ import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpController
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpProfile
 import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.monitor.CpuLoadReading
+import io.github.mayusi.calibratesoc.data.util.khzToMhz
+import io.github.mayusi.calibratesoc.data.util.mwFromUaUv
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.TempAlertMonitor
@@ -306,7 +308,7 @@ class HudStateAssembler @Inject constructor(
                 val uv = t.batteryVoltageUv ?: return@run null
                 val absUa = if (ua < 0) -ua else ua
                 if (absUa == 0L) return@run null
-                val mw = (absUa * uv) / 1_000_000_000L
+                val mw = absUa.mwFromUaUv(uv)
                 mw / 1000.0
             }
             val ramUsedPct = if (t.ramTotalKb > 0) {
@@ -316,7 +318,7 @@ class HudStateAssembler @Inject constructor(
             val batteryTempC = t.batteryTempDeciC?.let { it / 10f }
             val loadIsProxy = t.cpuLoadSource == CpuLoadReading.Source.FREQ_PROXY
             return TelemetryFields(
-                cpuMaxMhz = cpuMaxKhz / 1000,
+                cpuMaxMhz = cpuMaxKhz.khzToMhz(),
                 cpuLoadPct = cpuLoadPct,
                 perCoreMhz = t.perCoreCpuFreqKhz.map { it / 1000 },
                 gpuMhz = gpuMhz,

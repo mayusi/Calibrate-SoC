@@ -40,6 +40,7 @@ import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.DevfreqDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.ui.capability.tierAccent
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneProbe
 import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
@@ -266,12 +267,7 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
 
         // Tier + device chip row
         val tier = capability?.privilege ?: PrivilegeTier.NONE
-        val tierAccent = when (tier) {
-            PrivilegeTier.ROOT -> AccentBar.Emerald
-            PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
-            PrivilegeTier.SHIZUKU -> AccentBar.Blue
-            PrivilegeTier.NONE -> AccentBar.Neutral
-        }
+        val tierAccent = capability?.tierAccent() ?: AccentBar.Neutral
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             StatusPill(text = tier.name, accent = tierAccent)
             capability?.device?.knownHandheldKey?.let { key ->

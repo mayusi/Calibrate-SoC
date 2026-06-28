@@ -15,6 +15,8 @@ import io.github.mayusi.calibratesoc.data.tunables.TunableId
 import io.github.mayusi.calibratesoc.data.tunables.TunableKind
 import io.github.mayusi.calibratesoc.data.tunables.TunableWriter
 import io.github.mayusi.calibratesoc.data.tunables.WriteResult
+import io.github.mayusi.calibratesoc.data.vendor.readFanMode
+import io.github.mayusi.calibratesoc.data.vendor.writeFanMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -223,10 +225,11 @@ class ChargingTuneTrigger @Inject constructor(
         bundle.fanMode?.let { mode ->
             val fanKey = resolveFanKey(report)
             if (fanKey != null) {
-                val priorValue = readFanMode(fanKey)
+                val priorValue = readFanMode(context.contentResolver, fanKey)
                 appliedFanKey = fanKey
                 fanValueBeforeBundle = priorValue
                 val result = writeFanMode(
+                    tunableWriter,
                     key = fanKey,
                     value = mode.toString(),
                     report = report,
@@ -285,6 +288,7 @@ class ChargingTuneTrigger @Inject constructor(
                 val report = capabilityProbe.report.value
                 if (report != null) {
                     val result = writeFanMode(
+                        tunableWriter,
                         key = fanKey,
                         value = priorFan,
                         report = report,
@@ -333,28 +337,6 @@ class ChargingTuneTrigger @Inject constructor(
             FanSource.VENDOR_SETTINGS_KEY -> fanProbe.controlPath.takeIf { it.isNotBlank() }
             else -> null
         }
-    }
-
-    /**
-     * Read the current fan_mode Settings.System value.
-     * Returns null on any error (safe — revert will log the gap but won't crash).
-     */
-    private fun readFanMode(key: String): String? = runCatching {
-        android.provider.Settings.System.getString(context.contentResolver, key)
-    }.getOrNull()
-
-    /**
-     * Write a fan_mode value through [TunableWriter].
-     * Routes to the same PServer/SETTINGS_SYSTEM path used by ForegroundAppWatcher.
-     */
-    private suspend fun writeFanMode(
-        key: String,
-        value: String,
-        report: CapabilityReport,
-        reason: String,
-    ): WriteResult {
-        val id = TunableId(kind = TunableKind.SETTINGS_SYSTEM, target = key)
-        return tunableWriter.write(id = id, value = value, report = report, reason = reason)
     }
 
     // ── Battery helpers ───────────────────────────────────────────────────────

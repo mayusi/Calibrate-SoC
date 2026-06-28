@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
+import io.github.mayusi.calibratesoc.data.util.khzToMhz
+import io.github.mayusi.calibratesoc.data.util.mwFromUaUv
 import io.github.mayusi.calibratesoc.data.tunables.TuneHistoryStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -165,13 +167,13 @@ class SessionRecorder @Inject constructor(
                         val ua = t.batteryCurrentUa ?: return@run null
                         val uv = t.batteryVoltageUv ?: return@run null
                         val absUa = if (ua < 0) -ua else ua
-                        val mw = (absUa * uv) / 1_000_000_000L
+                        val mw = absUa.mwFromUaUv(uv)
                         mw / 1000.0
                     }
                     val sample = SessionSample(
                         elapsedMs = elapsed,
                         fps = null, // FPS is unavailable without the HUD
-                        cpuMaxMhz = cpuMaxKhz / 1000,
+                        cpuMaxMhz = cpuMaxKhz.khzToMhz(),
                         gpuMhz = gpuMhz,
                         cpuTempC = cpuTempC,
                         gpuTempC = gpuTempC,

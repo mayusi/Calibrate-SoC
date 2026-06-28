@@ -51,6 +51,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.ui.capability.chipLabel
+import io.github.mayusi.calibratesoc.ui.capability.explainerColor
+import io.github.mayusi.calibratesoc.ui.capability.explainerText
+import io.github.mayusi.calibratesoc.ui.capability.tierAccent
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 import io.github.mayusi.calibratesoc.data.presets.Preset
 import io.github.mayusi.calibratesoc.data.presets.VerificationTier
@@ -346,16 +350,8 @@ enum class PresetAction {
 @Composable
 private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {}) {
     val vb = io.github.mayusi.calibratesoc.data.vendor.VendorBranding.of(report)
-    val tierChip = when (report.privilege) {
-        PrivilegeTier.VENDOR_SETTINGS -> vb.tierLabel
-        else -> report.privilege.name
-    }
-    val tierAccent = when (report.privilege) {
-        PrivilegeTier.ROOT -> AccentBar.Emerald
-        PrivilegeTier.VENDOR_SETTINGS -> AccentBar.Emerald
-        PrivilegeTier.SHIZUKU -> AccentBar.Blue
-        PrivilegeTier.NONE -> AccentBar.Neutral
-    }
+    val tierChip = report.chipLabel(vb)
+    val tierAccent = report.tierAccent()
 
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.dense)) {
         Row(
@@ -384,34 +380,10 @@ private fun TuneHeader(report: CapabilityReport, onOpenHistory: () -> Unit = {})
                 StatusPill(text = key, accent = AccentBar.Neutral)
             }
         }
-        // PServer-LIVE is the strongest path and is NOT one of the PrivilegeTier
-        // values — it's a cross-vendor root runner (AYN Odin + Retroid RP6 confirmed)
-        // that becomes available whenever transact() round-trips. When it's live,
-        // custom MHz / GPU / governor writes Apply DIRECTLY — no script, no vendor
-        // round-trip — so it must take precedence over the tier-based copy below
-        // (otherwise a Retroid, which resolves to VENDOR_SETTINGS, wrongly shows the
-        // old "owned by firmware, generate a script" message even though PServer can
-        // write everything as root).
-        val explainer = when {
-            report.pserverSysfsLive ->
-                "PServer live — Apply works for everything directly (custom CPU/GPU MHz, governors, DDR), no script and no reboot needed."
-            report.privilege == PrivilegeTier.ROOT ->
-                "Magisk/KernelSU detected. Direct sysfs writes available — Apply works for everything."
-            report.privilege == PrivilegeTier.VENDOR_SETTINGS ->
-                "${vb.brand} tier active. Vendor tuning is owned by the firmware. For custom MHz caps, generate a script and run it via ${vb.settingsApp} → Run script as Root."
-            report.privilege == PrivilegeTier.SHIZUKU ->
-                "Shizuku bound. Custom MHz needs root or the script path. Vendor tuning pending UserService support."
-            else ->
-                "Read-only tier. Generate a script for custom MHz caps, or grant WRITE_SECURE_SETTINGS via adb to unlock vendor tunes:\nadb shell pm grant io.github.mayusi.calibratesoc android.permission.WRITE_SECURE_SETTINGS"
-        }
         Text(
-            explainer,
+            report.explainerText(vb),
             style = MaterialTheme.typography.bodySmall,
-            color = when {
-                report.pserverSysfsLive -> AccentBar.Emerald
-                report.privilege == PrivilegeTier.ROOT || report.privilege == PrivilegeTier.VENDOR_SETTINGS -> Color(0xFF999999)
-                else -> AccentBar.Blue
-            },
+            color = report.explainerColor(),
         )
     }
 }
