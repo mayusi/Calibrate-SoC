@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.mayusi.calibratesoc.data.boost.BoostArbiter
 import io.github.mayusi.calibratesoc.data.capability.AdrenoExtrasProbe
 import io.github.mayusi.calibratesoc.data.capability.BlockDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
@@ -119,6 +120,7 @@ fun AdvancedTuningScreen(
     val thermalGuardEnabled by viewModel.thermalGuardEnabled.collectAsStateWithLifecycle()
     val throttleForecast by viewModel.throttleForecast.collectAsStateWithLifecycle()
     val fanCurveModel by viewModel.fanCurveModel.collectAsStateWithLifecycle()
+    val clockOwner by viewModel.clockOwner.collectAsStateWithLifecycle()
 
     val r = report
     if (r == null) {
@@ -209,35 +211,19 @@ fun AdvancedTuningScreen(
             )
         }
 
-        // ── 4. CPU Governor Tunables ────────────────────────────────────────────
+        // ── 4. CPU Governor Tunables (WALT-aware) ──────────────────────────────
         if (r.cpuGovernorTunables.isNotEmpty()) {
             item {
-                ArsenalExpandableSection("CPU GOVERNOR TUNING", Icons.Outlined.Settings, AccentBar.Blue) {
-                    Text(
-                        "Per-policy governor tunables — values from last probe.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF999999),
-                    )
-                    r.cpuGovernorTunables.forEachIndexed { i, probe ->
-                        if (i > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.group))
-                        Text(
-                            "policy${probe.policyId} — ${probe.governor}",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = AccentBar.Blue,
-                            letterSpacing = 0.06.sp,
-                            modifier = Modifier.padding(top = Spacing.group),
-                        )
-                        probe.tunables.entries.sortedBy { it.key }.forEach { (name, currentValue) ->
-                            val id = KernelTunables.cpuGovernorTunable(probe.policyId, probe.governor, name)
-                            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
-                            TunableControl(id = id, currentValue = currentValue, report = r, onWrite = { tid, v, rsn ->
-                                if (viewModel.isScriptBuilderMode(tid, r)) viewModel.stageAdvancedKnob(tid, v)
-                                else viewModel.write(tid, v, rsn)
-                            }, pending = pendingAdvanced, scriptBuilderMode = globalScriptBuilderMode)
-                        }
-                    }
-                }
+                WaltGovernorSection(
+                    report = r,
+                    clockOwner = clockOwner,
+                    pending = pendingAdvanced,
+                    scriptBuilderMode = globalScriptBuilderMode,
+                    onWrite = { id: TunableId, value: String, reason: String ->
+                        if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                        else viewModel.write(id, value, reason)
+                    },
+                )
             }
         }
 
@@ -255,6 +241,22 @@ fun AdvancedTuningScreen(
                     },
                     scriptBuilderMode = globalScriptBuilderMode,
                 )
+            }
+
+            // ── 5b. Manual GPU Lock (power-user clock floor/ceiling pin) ─────────
+            r.adrenoExtras?.let { extras ->
+                item {
+                    GpuManualLockCard(
+                        report = r,
+                        gpu = gpu,
+                        adrenoExtras = extras,
+                        onWrite = { id, value, reason ->
+                            if (viewModel.isScriptBuilderMode(id, r)) viewModel.stageAdvancedKnob(id, value)
+                            else viewModel.write(id, value, reason)
+                        },
+                        scriptBuilderMode = globalScriptBuilderMode,
+                    )
+                }
             }
         }
 
@@ -653,6 +655,467 @@ private fun FanCurvePanel(fanCurveModel: FanCurveModel, onOpenFanCurve: () -> Un
 }
 
 // =============================================================================
+// WALT Governor tuning — per-cluster, power-user panel
+// =============================================================================
+
+/**
+ * Expandable section for WALT CPU governor tuning.
+ *
+ * For each policy whose active governor is "walt" a dedicated card is shown with:
+ *   - OPP picker for hispeed_freq (from the policy's available_frequencies).
+ *   - Sliders for hispeed_load (50–99 %), up_rate_limit_us (0–20 000 µs),
+ *     down_rate_limit_us (0–20 000 µs).
+ *   - Toggles for pl and boost when present on the cluster.
+ *   - Raw TunableControl for rtg_boost_freq and any other WALT tunable found.
+ *   - PERFORMANCE preset and RESET DEFAULTS (captured-on-load values).
+ *
+ * For non-WALT policies falls back to the generic TunableControl list.
+ * An advisory banner is shown when AutoTDP or GameBoost owns the clocks.
+ * All writes flow: onWrite to WriterRegistry to PServerCommandGuard.
+ * policyN/walt/tunable paths already pass the guard - no guard changes needed.
+ */
+@Composable
+private fun WaltGovernorSection(
+    report: CapabilityReport,
+    clockOwner: BoostArbiter.ClockOwner,
+    pending: Map<String, String>,
+    scriptBuilderMode: Boolean,
+    onWrite: (TunableId, String, String) -> String?,
+) {
+    val allPolicyMaxKhz = report.cpuPolicies.map { it.currentMaxKhz }.distinct().sorted()
+
+    ArsenalExpandableSection("CPU GOVERNOR TUNING (WALT)", Icons.Outlined.Speed, AccentBar.Emerald) {
+
+        // ── AutoTDP / GameBoost advisory ────────────────────────────────────
+        if (clockOwner != BoostArbiter.ClockOwner.NONE) {
+            val ownerLabel = when (clockOwner) {
+                BoostArbiter.ClockOwner.AUTO_TDP -> "AutoTDP"
+                BoostArbiter.ClockOwner.GAME_BOOST -> "Game Boost"
+                BoostArbiter.ClockOwner.NONE -> ""
+            }
+            AlertCard(
+                type = AlertType.INFO,
+                title = "$ownerLabel is active",
+                message = "$ownerLabel currently manages cpufreq caps. WALT governor params " +
+                    "still apply to scheduling decisions within those caps — " +
+                    "your changes take effect but $ownerLabel may override the " +
+                    "frequency ceiling while it is running.",
+            )
+            Spacer(Modifier.height(Spacing.group))
+        }
+
+        Text(
+            "WALT (Window-Assisted Load Tracker) governor scheduling parameters. " +
+                "Read live from the device. Writes go through PServer root path. " +
+                "Persistent across reboots via the profile/boot-reapply path.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF999999),
+        )
+        Spacer(Modifier.height(Spacing.group))
+
+        report.cpuGovernorTunables.forEachIndexed { idx, probe ->
+            if (idx > 0) {
+                HorizontalDivider(
+                    color = Color.White.copy(alpha = 0.06f),
+                    modifier = Modifier.padding(vertical = Spacing.group),
+                )
+            }
+
+            val policy = report.cpuPolicies.firstOrNull { it.policyId == probe.policyId }
+            val availableFreqs = policy?.availableFreqsKhz?.sorted() ?: emptyList()
+            val tierLabel = if (policy != null) {
+                clusterTierLabel(policy.currentMaxKhz, allPolicyMaxKhz).uppercase()
+            } else "CLUSTER ${probe.policyId}"
+
+            if (probe.governor == "walt") {
+                WaltClusterCard(
+                    probe = probe,
+                    tierLabel = tierLabel,
+                    availableFreqsKhz = availableFreqs,
+                    report = report,
+                    pending = pending,
+                    scriptBuilderMode = scriptBuilderMode,
+                    onWrite = onWrite,
+                )
+            } else {
+                // Non-WALT policy — generic fallback (preserves existing behaviour).
+                Text(
+                    "policy${probe.policyId} — ${probe.governor}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = AccentBar.Blue,
+                    letterSpacing = 0.06.sp,
+                    modifier = Modifier.padding(top = Spacing.group),
+                )
+                probe.tunables.entries.sortedBy { it.key }.forEach { (name, currentValue) ->
+                    val id = KernelTunables.cpuGovernorTunable(probe.policyId, probe.governor, name)
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.06f),
+                        modifier = Modifier.padding(vertical = Spacing.dense),
+                    )
+                    TunableControl(
+                        id = id,
+                        currentValue = currentValue,
+                        report = report,
+                        onWrite = onWrite,
+                        pending = pending,
+                        scriptBuilderMode = scriptBuilderMode,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Per-cluster WALT governor card.
+ *
+ * Controls rendered only for tunables present in [probe.tunables] (live-discovered).
+ * Unknown tunables fall through to generic TunableControl so future kernel additions
+ * are automatically visible.
+ *
+ * "Captured defaults" = the values in probe.tunables at first composition.
+ * RESET replays them through onWrite so the reset is snapshotted and boot-reapplied.
+ */
+@Composable
+private fun WaltClusterCard(
+    probe: io.github.mayusi.calibratesoc.data.capability.CpuGovernorTunablesProbe,
+    tierLabel: String,
+    availableFreqsKhz: List<Int>,
+    report: CapabilityReport,
+    pending: Map<String, String>,
+    scriptBuilderMode: Boolean,
+    onWrite: (TunableId, String, String) -> String?,
+) {
+    val capturedDefaults = remember(probe.policyId) { probe.tunables.toMap() }
+
+    val clusterAccent = when (tierLabel) {
+        "EFFICIENCY" -> AccentBar.Emerald
+        "BIG" -> AccentBar.Blue
+        "PRIME" -> AccentBar.Red
+        else -> AccentBar.Blue
+    }
+
+    var inlineError by remember { mutableStateOf<String?>(null) }
+
+    ArsenalPanel(accent = clusterAccent) {
+
+        // ── Cluster header ───────────────────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Spacing.group),
+        ) {
+            StatusPill(text = tierLabel, accent = clusterAccent)
+            Text(
+                "policy${probe.policyId}  •  walt",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF888888),
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── hispeed_freq OPP picker ──────────────────────────────────────
+        probe.tunables["hispeed_freq"]?.let { currentFreqStr ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "hispeed_freq")
+            val isStaged = id.target in pending
+            val denyReason = Tunables.whyWriteDenied(id, report)
+
+            Text("HISPEED FREQ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+            Text(
+                "Frequency the governor jumps to when load exceeds hispeed_load. Pick from this cluster's available OPPs.",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF666666),
+            )
+            Spacer(Modifier.height(Spacing.dense))
+
+            if (availableFreqsKhz.size > 1) {
+                val currentKhz = currentFreqStr.trim().toIntOrNull() ?: 0
+                var freqMenuExpanded by remember { mutableStateOf(false) }
+                val displayFreq = if (currentKhz > 0) "${"%.0f".format(currentKhz / 1000f)} MHz" else currentFreqStr.trim()
+
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF0C0C10), RoundedCornerShape(4.dp))
+                            .border(
+                                1.dp,
+                                if (isStaged) AccentBar.Emerald.copy(alpha = 0.5f) else clusterAccent.copy(alpha = 0.3f),
+                                RoundedCornerShape(4.dp),
+                            )
+                            .clickable(enabled = scriptBuilderMode || denyReason == null) { freqMenuExpanded = true }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            displayFreq,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (scriptBuilderMode || denyReason == null) Color.White else Color(0xFF555555),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense), verticalAlignment = Alignment.CenterVertically) {
+                            if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+                            Icon(Icons.Outlined.ExpandMore, contentDescription = null, tint = Color(0xFF888888), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    DropdownMenu(expanded = freqMenuExpanded, onDismissRequest = { freqMenuExpanded = false }) {
+                        availableFreqsKhz.sortedDescending().forEach { freqKhz ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "${"%.0f".format(freqKhz / 1000f)} MHz",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (freqKhz == currentKhz) clusterAccent else Color.White,
+                                    )
+                                },
+                                onClick = {
+                                    freqMenuExpanded = false
+                                    inlineError = onWrite(id, freqKhz.toString(), "WALT hispeed_freq policy${probe.policyId}")
+                                },
+                            )
+                        }
+                    }
+                }
+                if (!scriptBuilderMode && denyReason != null) {
+                    Text("Write blocked: $denyReason", style = MaterialTheme.typography.labelSmall, color = AccentBar.Red)
+                }
+            } else {
+                TunableControl(id = id, currentValue = currentFreqStr, report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+            }
+            Spacer(Modifier.height(Spacing.group))
+        }
+
+        // ── hispeed_load slider ──────────────────────────────────────────
+        probe.tunables["hispeed_load"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "hispeed_load")
+            val meta = TunableMetadata.forId(id)
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
+            val kind = meta.valueKind as? ValueKind.INT_RANGE
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("HISPEED LOAD", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+            }
+            Text("Load % that triggers jump to hispeed_freq. Lower = boosts sooner. (50–99 %)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF666666))
+            Spacer(Modifier.height(Spacing.dense))
+            IntRangeControl(
+                current = currentVal.trim().toIntOrNull() ?: 90,
+                min = kind?.min ?: 50,
+                max = kind?.max ?: 99,
+                step = kind?.step ?: 1,
+                unit = kind?.unit ?: "%",
+                enabled = scriptBuilderMode || denyReason == null,
+                onCommit = { v -> inlineError = onWrite(id, v.toString(), "WALT hispeed_load policy${probe.policyId}") },
+            )
+        }
+
+        // ── up_rate_limit_us slider ──────────────────────────────────────
+        probe.tunables["up_rate_limit_us"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "up_rate_limit_us")
+            val meta = TunableMetadata.forId(id)
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
+            val kind = meta.valueKind as? ValueKind.INT_RANGE
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("UP RATE LIMIT", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+            }
+            Text("Min µs between UP frequency steps. 0 = instant ramp-up. (0–20 000 µs)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF666666))
+            Spacer(Modifier.height(Spacing.dense))
+            IntRangeControl(
+                current = currentVal.trim().toIntOrNull() ?: 0,
+                min = kind?.min ?: 0,
+                max = kind?.max ?: 20_000,
+                step = kind?.step ?: 1,
+                unit = kind?.unit ?: "µs",
+                enabled = scriptBuilderMode || denyReason == null,
+                onCommit = { v -> inlineError = onWrite(id, v.toString(), "WALT up_rate_limit_us policy${probe.policyId}") },
+            )
+        }
+
+        // ── down_rate_limit_us slider ────────────────────────────────────
+        probe.tunables["down_rate_limit_us"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "down_rate_limit_us")
+            val meta = TunableMetadata.forId(id)
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
+            val kind = meta.valueKind as? ValueKind.INT_RANGE
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("DOWN RATE LIMIT", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+            }
+            Text("Min µs between DOWN frequency steps. 0 = instant ramp-down. (0–20 000 µs)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF666666))
+            Spacer(Modifier.height(Spacing.dense))
+            IntRangeControl(
+                current = currentVal.trim().toIntOrNull() ?: 0,
+                min = kind?.min ?: 0,
+                max = kind?.max ?: 20_000,
+                step = kind?.step ?: 1,
+                unit = kind?.unit ?: "µs",
+                enabled = scriptBuilderMode || denyReason == null,
+                onCommit = { v -> inlineError = onWrite(id, v.toString(), "WALT down_rate_limit_us policy${probe.policyId}") },
+            )
+        }
+
+        // ── pl toggle (power-limit override) ────────────────────────────
+        probe.tunables["pl"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "pl")
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
+            val enabled = scriptBuilderMode || denyReason == null
+            val on = currentVal.trim() == "1"
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                        Text("POWER LIMIT OVERRIDE (pl)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                        if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+                    }
+                    Text("Allow governor to exceed normal power limit for burst. Default: off.", style = MaterialTheme.typography.labelSmall, color = Color(0xFF666666))
+                }
+                Box(
+                    modifier = Modifier
+                        .background(if (on) clusterAccent.copy(alpha = 0.15f) else Color(0xFF0C0C10), RoundedCornerShape(4.dp))
+                        .border(1.dp, if (on) clusterAccent.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .let { m -> if (enabled) m.clickable { inlineError = onWrite(id, if (on) "0" else "1", "WALT pl policy${probe.policyId}") } else m }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text(if (on) "ON" else "OFF", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = if (on) clusterAccent else Color(0xFF888888), letterSpacing = 0.06.sp)
+                }
+            }
+        }
+
+        // ── boost toggle ─────────────────────────────────────────────────
+        probe.tunables["boost"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "boost")
+            val denyReason = Tunables.whyWriteDenied(id, report)
+            val isStaged = id.target in pending
+            val enabled = scriptBuilderMode || denyReason == null
+            val on = currentVal.trim() == "1"
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+                        Text("BOOST", style = MaterialTheme.typography.labelSmall, color = Color(0xFF888888), letterSpacing = 0.06.sp)
+                        if (isStaged) StatusPill(text = "staged", accent = AccentBar.Emerald)
+                    }
+                    Text("Force hispeed_freq immediately regardless of load. Resets automatically.", style = MaterialTheme.typography.labelSmall, color = Color(0xFF666666))
+                }
+                Box(
+                    modifier = Modifier
+                        .background(if (on) AccentBar.Amber.copy(alpha = 0.15f) else Color(0xFF0C0C10), RoundedCornerShape(4.dp))
+                        .border(1.dp, if (on) AccentBar.Amber.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .let { m -> if (enabled) m.clickable { inlineError = onWrite(id, if (on) "0" else "1", "WALT boost policy${probe.policyId}") } else m }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text(if (on) "ON" else "OFF", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = if (on) AccentBar.Amber else Color(0xFF888888), letterSpacing = 0.06.sp)
+                }
+            }
+        }
+
+        // ── rtg_boost_freq — raw control if present ──────────────────────
+        probe.tunables["rtg_boost_freq"]?.let { currentVal ->
+            val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "rtg_boost_freq")
+            HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+            TunableControl(id = id, currentValue = currentVal, report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+        }
+
+        // ── Any remaining WALT tunables not explicitly handled above ─────
+        val handledKeys = setOf("hispeed_freq", "hispeed_load", "up_rate_limit_us", "down_rate_limit_us", "pl", "boost", "rtg_boost_freq")
+        probe.tunables.entries
+            .filter { it.key !in handledKeys }
+            .sortedBy { it.key }
+            .forEach { (name, currentVal) ->
+                val id = KernelTunables.cpuGovernorTunable(probe.policyId, "walt", name)
+                HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = Spacing.dense))
+                TunableControl(id = id, currentValue = currentVal, report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
+            }
+
+        // ── Inline error ─────────────────────────────────────────────────
+        inlineError?.let {
+            Spacer(Modifier.height(Spacing.dense))
+            Text(it, style = MaterialTheme.typography.labelSmall, color = AccentBar.Red)
+        }
+
+        // ── Preset / Reset row ───────────────────────────────────────────
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        val perfHispeedFreqKhz: Int? = if (availableFreqsKhz.size >= 2) {
+            availableFreqsKhz.sortedDescending()[1]   // 2nd-highest OPP
+        } else {
+            availableFreqsKhz.maxOrNull()
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            ArsenalButton(
+                label = "PERFORMANCE",
+                onClick = {
+                    inlineError = null
+                    var lastErr: String? = null
+                    if (probe.tunables.containsKey("hispeed_load")) {
+                        lastErr = onWrite(KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "hispeed_load"), "70", "WALT preset: Performance hispeed_load policy${probe.policyId}")
+                    }
+                    if (probe.tunables.containsKey("hispeed_freq") && perfHispeedFreqKhz != null) {
+                        val e = onWrite(KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "hispeed_freq"), perfHispeedFreqKhz.toString(), "WALT preset: Performance hispeed_freq policy${probe.policyId}")
+                        if (lastErr == null) lastErr = e
+                    }
+                    if (probe.tunables.containsKey("up_rate_limit_us")) {
+                        val e = onWrite(KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "up_rate_limit_us"), "500", "WALT preset: Performance up_rate_limit_us policy${probe.policyId}")
+                        if (lastErr == null) lastErr = e
+                    }
+                    if (probe.tunables.containsKey("down_rate_limit_us")) {
+                        val e = onWrite(KernelTunables.cpuGovernorTunable(probe.policyId, "walt", "down_rate_limit_us"), "2000", "WALT preset: Performance down_rate_limit_us policy${probe.policyId}")
+                        if (lastErr == null) lastErr = e
+                    }
+                    inlineError = lastErr
+                },
+                accent = clusterAccent,
+                modifier = Modifier.weight(1f),
+            )
+            ArsenalButton(
+                label = "RESET DEFAULTS",
+                onClick = {
+                    inlineError = null
+                    var lastErr: String? = null
+                    capturedDefaults.forEach { (name, defaultVal) ->
+                        val e = onWrite(KernelTunables.cpuGovernorTunable(probe.policyId, "walt", name), defaultVal, "WALT reset: $name policy${probe.policyId}")
+                        if (lastErr == null) lastErr = e
+                    }
+                    inlineError = lastErr
+                },
+                accent = AccentBar.Neutral,
+                style = ArsenalButtonStyle.Secondary,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.dense))
+        Text(
+            "PERFORMANCE: hispeed_load=70 %, hispeed_freq=${perfHispeedFreqKhz?.let { "${"%.0f".format(it / 1000f)} MHz (2nd-highest OPP)" } ?: "n/a"}, up_rate_limit_us=500 µs, down_rate_limit_us=2000 µs. RESET DEFAULTS: restores values read from the device at last probe.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF666666),
+        )
+    }
+}
+
+// =============================================================================
 // Per-cluster CPU cards
 // =============================================================================
 
@@ -969,6 +1432,290 @@ private fun ArsenalGpuAdvancedSection(
                 val id = KernelTunables.gpuDevfreqGovernorTunable(gpu.rootPath, probe.governor, probe.name)
                 TunableControl(id = id, currentValue = probe.currentValue, report = report, onWrite = onWrite, pending = pending, scriptBuilderMode = scriptBuilderMode)
             }
+        }
+    }
+}
+
+// =============================================================================
+// GPU Manual Lock card
+// =============================================================================
+
+/**
+ * Power-user card to pin the GPU clock floor and ceiling via kgsl min/max_pwrlevel.
+ *
+ * Index convention: 0 = highest clock (max performance), (numLevels-1) = lowest clock.
+ * Therefore:
+ *   floorIdx  (min_pwrlevel) must be >= ceilingIdx (max_pwrlevel)
+ *   so that floor clock ≤ ceiling clock.
+ *
+ * Writes go through the same [onWrite] lambda as the rest of AdvancedTuningScreen,
+ * routing via WriterRegistry → PServer root (same path GameBoost uses).
+ *
+ * Persistence: writes land in TunableSnapshotStore journal and are reapplied on boot
+ * by the existing boot-reapply mechanism — no special wiring needed.
+ *
+ * Override honesty: GameBoost and AutoTDP also write these nodes; they will override
+ * a manual lock while active. This card warns the user.
+ */
+@Composable
+private fun GpuManualLockCard(
+    report: CapabilityReport,
+    gpu: GpuProbe,
+    adrenoExtras: AdrenoExtrasProbe,
+    onWrite: (TunableId, String, String) -> String?,
+    scriptBuilderMode: Boolean,
+) {
+    val numLevels = GpuLockLogic.effectiveNumLevels(
+        freqMapSize = adrenoExtras.pwrLevelFreqHz.size,
+        currentMinPwrLevel = adrenoExtras.currentMinPwrLevel,
+        currentMaxPwrLevel = adrenoExtras.currentMaxPwrLevel,
+        currentDefaultPwrLevel = adrenoExtras.currentDefaultPwrLevel,
+    )
+    if (numLevels <= 1) return  // nothing to lock on a single-level GPU
+
+    val minId = KernelTunables.adrenoMinPowerLevel(gpu.rootPath)
+    val maxId = KernelTunables.adrenoMaxPowerLevel(gpu.rootPath)
+    val writeEnabled = scriptBuilderMode
+        || (Tunables.whyWriteDenied(minId, report) == null && Tunables.whyWriteDenied(maxId, report) == null)
+
+    // Local slider state seeded from live device values, clamped to valid range.
+    var floorIdx by remember(adrenoExtras.currentMinPwrLevel, numLevels) {
+        mutableFloatStateOf(
+            (adrenoExtras.currentMinPwrLevel ?: GpuLockLogic.defaultFloorIdx(numLevels))
+                .coerceIn(0, numLevels - 1).toFloat()
+        )
+    }
+    var ceilingIdx by remember(adrenoExtras.currentMaxPwrLevel, numLevels) {
+        mutableFloatStateOf(
+            (adrenoExtras.currentMaxPwrLevel ?: GpuLockLogic.defaultCeilingIdx())
+                .coerceIn(0, numLevels - 1).toFloat()
+        )
+    }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    var lastWriteError by remember { mutableStateOf<String?>(null) }
+
+    fun floorLabel(idx: Float) = GpuLockLogic.levelLabel(idx.toInt(), adrenoExtras.pwrLevelFreqHz)
+    fun ceilingLabel(idx: Float) = GpuLockLogic.levelLabel(idx.toInt(), adrenoExtras.pwrLevelFreqHz)
+
+    fun commitFloor(newIdx: Float) {
+        val f = newIdx.toInt()
+        val c = ceilingIdx.toInt()
+        val err = GpuLockLogic.validatePair(f, c, numLevels)
+        validationError = err
+        if (err != null) return
+        lastWriteError = onWrite(minId, f.toString(), "Manual GPU floor lock")
+    }
+
+    fun commitCeiling(newIdx: Float) {
+        val f = floorIdx.toInt()
+        val c = newIdx.toInt()
+        val err = GpuLockLogic.validatePair(f, c, numLevels)
+        validationError = err
+        if (err != null) return
+        lastWriteError = onWrite(maxId, c.toString(), "Manual GPU ceiling lock")
+    }
+
+    fun resetToDefaults() {
+        val defaultFloor = GpuLockLogic.defaultFloorIdx(numLevels)
+        val defaultCeiling = GpuLockLogic.defaultCeilingIdx()
+        validationError = null
+        lastWriteError = onWrite(minId, defaultFloor.toString(), "GPU floor reset to stock")
+        if (lastWriteError == null) {
+            lastWriteError = onWrite(maxId, defaultCeiling.toString(), "GPU ceiling reset to stock")
+        }
+        // Update sliders optimistically so UI reflects intent before refresh.
+        floorIdx = defaultFloor.toFloat()
+        ceilingIdx = defaultCeiling.toFloat()
+    }
+
+    ArsenalExpandableSection("GPU MANUAL LOCK", Icons.Outlined.Speed, AccentBar.Emerald, initiallyExpanded = false) {
+
+        // ── Override honesty warning ──────────────────────────────────────────
+        AlertCard(
+            type = AlertType.WARNING,
+            title = "Override notice",
+            message = "GameBoost and AutoTDP also write GPU power levels. While either is active it will override this manual lock. Manual lock takes effect when both are idle.",
+        )
+
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Live status tiles ─────────────────────────────────────────────────
+        val curFreqLabel: String = run {
+            // cur_freq is on gpu.currentMinHz (the live devfreq reading from probeAdreno).
+            // Show in MHz when available.
+            val hz = gpu.currentMinHz
+            if (hz > 0L) "${hz / 1_000_000L} MHz" else "—"
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
+            MetricTile(
+                label = "CURRENT FREQ",
+                value = curFreqLabel,
+                unit = null,
+                accent = AccentBar.Emerald,
+                modifier = Modifier.weight(1f),
+            )
+            MetricTile(
+                label = "GOVERNOR",
+                value = gpu.currentGovernor.ifEmpty { "—" }.uppercase(),
+                unit = null,
+                accent = AccentBar.Neutral,
+                modifier = Modifier.weight(1f),
+            )
+            MetricTile(
+                label = "LEVELS",
+                value = numLevels.toString(),
+                unit = null,
+                accent = AccentBar.Neutral,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Floor control ─────────────────────────────────────────────────────
+        Text(
+            "GPU CLOCK FLOOR (min_pwrlevel)",
+            style = MaterialTheme.typography.labelSmall,
+            color = AccentBar.Emerald,
+            letterSpacing = 0.06.sp,
+        )
+        Text(
+            "Minimum GPU clock — GPU cannot run slower than this.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF888888),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                floorLabel(floorIdx),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = AccentBar.Emerald,
+            )
+            Text(
+                "idx ${floorIdx.toInt()} · range 0–${numLevels - 1}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF666666),
+            )
+        }
+        Slider(
+            value = floorIdx,
+            onValueChange = { newVal ->
+                // Clamp so floor never goes below ceiling (clock-wise: floorIdx >= ceilingIdx).
+                floorIdx = newVal.coerceAtLeast(ceilingIdx)
+                validationError = null
+            },
+            onValueChangeFinished = { commitFloor(floorIdx) },
+            valueRange = 0f..(numLevels - 1).toFloat(),
+            steps = numLevels - 2,
+            enabled = writeEnabled,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Ceiling control ───────────────────────────────────────────────────
+        Text(
+            "GPU CLOCK CEILING (max_pwrlevel)",
+            style = MaterialTheme.typography.labelSmall,
+            color = AccentBar.Emerald,
+            letterSpacing = 0.06.sp,
+        )
+        Text(
+            "Maximum GPU clock — GPU cannot run faster than this.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF888888),
+        )
+        Spacer(Modifier.height(Spacing.dense))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                ceilingLabel(ceilingIdx),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = AccentBar.Emerald,
+            )
+            Text(
+                "idx ${ceilingIdx.toInt()} · range 0–${numLevels - 1}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF666666),
+            )
+        }
+        Slider(
+            value = ceilingIdx,
+            onValueChange = { newVal ->
+                // Clamp so ceiling never exceeds floor (clock-wise: ceilingIdx <= floorIdx).
+                ceilingIdx = newVal.coerceAtMost(floorIdx)
+                validationError = null
+            },
+            onValueChangeFinished = { commitCeiling(ceilingIdx) },
+            valueRange = 0f..(numLevels - 1).toFloat(),
+            steps = numLevels - 2,
+            enabled = writeEnabled,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        // ── Validation / write error feedback ─────────────────────────────────
+        validationError?.let { err ->
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                err,
+                style = MaterialTheme.typography.bodySmall,
+                color = AccentBar.Red,
+            )
+        }
+        lastWriteError?.let { err ->
+            Spacer(Modifier.height(Spacing.dense))
+            Text(
+                "Write failed: $err",
+                style = MaterialTheme.typography.bodySmall,
+                color = AccentBar.Red,
+            )
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
+        // ── Reset to stock ────────────────────────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Reset to stock",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                )
+                Text(
+                    "Floor → ${GpuLockLogic.levelLabel(GpuLockLogic.defaultFloorIdx(numLevels), adrenoExtras.pwrLevelFreqHz)}  " +
+                        "· Ceiling → ${GpuLockLogic.levelLabel(GpuLockLogic.defaultCeilingIdx(), adrenoExtras.pwrLevelFreqHz)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF888888),
+                )
+            }
+            ArsenalButton(
+                label = "Reset",
+                style = ArsenalButtonStyle.Secondary,
+                onClick = { resetToDefaults() },
+                enabled = writeEnabled,
+            )
         }
     }
 }

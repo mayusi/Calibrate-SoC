@@ -3,6 +3,7 @@ package io.github.mayusi.calibratesoc.ui.tune.advanced
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.github.mayusi.calibratesoc.data.boost.BoostArbiter
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
@@ -66,9 +67,15 @@ class AdvancedTuningViewModel @Inject constructor(
     private val scriptDeployer: AynScriptDeployer,
     private val deviceAdapterRegistry: DeviceAdapterRegistry,
     private val monitorService: MonitorService,
+    private val boostArbiter: BoostArbiter,
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /** Current exclusive clock owner (AutoTDP / GameBoost / NONE).
+     *  Used by the WALT governor card to show an honest advisory when
+     *  AutoTDP or GameBoost is active and may be scaling cpufreq caps. */
+    val clockOwner: StateFlow<BoostArbiter.ClockOwner> = boostArbiter.owner
 
     // ── last write result (live-write mode only) ─────────────────────────────
 

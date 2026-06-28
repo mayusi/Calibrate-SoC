@@ -391,6 +391,23 @@ class PServerCommandGuardTest {
     @Test fun deny_traversal() = deny("cat /sys/../etc/passwd")
     @Test fun deny_dangerousThermalNode() =
         deny("echo x > /sys/class/thermal/thermal_zone0/trip_point_0_temp")
+    @Test fun deny_dangerousThermalTripHyst() =
+        deny("printf %s '95000' > /sys/class/thermal/thermal_zone3/trip_point_1_hyst")
+    // Defense-in-depth: trip points are categorically dangerous at the metadata layer,
+    // so even a future write path can't slip one past the guard.
+    @Test fun isDangerousPath_blocksThermalTripPoint() {
+        assertThat(
+            io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
+                .isDangerousPath("/sys/class/thermal/thermal_zone0/trip_point_0_temp")
+        ).isTrue()
+    }
+    @Test fun isDangerousPath_allowsNonTripThermalNode() {
+        // A plain temperature read node is NOT a trip point — must stay readable.
+        assertThat(
+            io.github.mayusi.calibratesoc.data.tunables.TunableMetadata
+                .isDangerousPath("/sys/class/thermal/thermal_zone0/temp")
+        ).isFalse()
+    }
     @Test fun deny_chmodData() = deny("chmod 666 /data/x")
     @Test fun deny_nulByte() = deny("cat /sys/devices/x\u0000rm -rf /")
     @Test fun deny_multiArgCat() = deny("cat /sys/a /sys/b")

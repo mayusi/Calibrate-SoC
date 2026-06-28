@@ -489,26 +489,66 @@ object TunableMetadata {
     // =========================================================================
 
     private fun cpuGovernorTunableMeta(name: String): TunableInfo = when (name) {
-        // schedutil
+        // ── WALT (Qualcomm Window-Assisted Load Tracker) ──────────────────────
+        // Safe ranges validated by device probe; none of these touch voltages.
+        "up_rate_limit_us" -> TunableInfo(
+            name = "WALT Up Rate Limit (µs)",
+            description = "Minimum µs between UP frequency steps. 0 = immediate ramp-up (snappiest, most power). " +
+                "Safe range 0–20000 µs. Lower = faster boost under burst load.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.INT_RANGE(min = 0, max = 20_000, unit = "µs"),
+        )
+        "down_rate_limit_us" -> TunableInfo(
+            name = "WALT Down Rate Limit (µs)",
+            description = "Minimum µs between DOWN frequency steps. 0 = immediate ramp-down (saves power fastest). " +
+                "Safe range 0–20000 µs. Higher = holds frequency longer after load drops.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.INT_RANGE(min = 0, max = 20_000, unit = "µs"),
+        )
+        "hispeed_load" -> TunableInfo(
+            name = "WALT Hi-Speed Load (%)",
+            description = "CPU load % that triggers an immediate jump to hispeed_freq. " +
+                "Lower values boost sooner (more responsive, more power). Safe range 50–99 %.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.INT_RANGE(min = 50, max = 99, unit = "%"),
+        )
+        "hispeed_freq" -> TunableInfo(
+            name = "WALT Hi-Speed Frequency",
+            description = "The frequency (kHz) the governor jumps to when hispeed_load is exceeded. " +
+                "Pick from the cluster's available OPP table. Higher = snappier burst but more power.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.RAW_STRING,
+        )
+        "rtg_boost_freq" -> TunableInfo(
+            name = "WALT RTG Boost Frequency",
+            description = "Minimum frequency (kHz) pinned when a Related Task Group (RTG) is active (foreground app threads). " +
+                "0 disables the pin. Match to hispeed_freq for consistent foreground boost.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.RAW_STRING,
+        )
+        "pl" -> TunableInfo(
+            name = "WALT Power Limit Override",
+            description = "When 1, allows the WALT governor to exceed the normal power limit for burst performance. " +
+                "When 0 (default), power limit is enforced. Toggle — safe scheduling knob.",
+            risk = Risk.LOW,
+            valueKind = ValueKind.BOOL,
+        )
+        "boost" -> TunableInfo(
+            name = "WALT Boost",
+            description = "When 1, forces the cluster to hispeed_freq immediately regardless of load. " +
+                "Resets to 0 automatically after the boost duration. " +
+                "Use for sustained high-throughput burst (interactive governor: same semantics).",
+            risk = Risk.LOW,
+            valueKind = ValueKind.BOOL,
+        )
+        // ── schedutil ─────────────────────────────────────────────────────────
         "rate_limit_us" -> TunableInfo(
             name = "schedutil Rate Limit (µs)",
             description = "Minimum time between governor frequency decisions in microseconds.",
             risk = Risk.LOW,
             valueKind = ValueKind.INT_RANGE(min = 0, max = 1_000_000, unit = "µs"),
         )
-        "hispeed_load" -> TunableInfo(
-            name = "schedutil Hi-Speed Load (%)",
-            description = "CPU load threshold that triggers jump to hispeed_freq.",
-            risk = Risk.LOW,
-            valueKind = ValueKind.INT_RANGE(min = 1, max = 100, unit = "%"),
-        )
-        "hispeed_freq" -> TunableInfo(
-            name = "schedutil Hi-Speed Frequency",
-            description = "Frequency to jump to when hispeed_load is exceeded (kHz).",
-            risk = Risk.LOW,
-            valueKind = ValueKind.RAW_STRING,
-        )
-        // interactive
+        // ── interactive ───────────────────────────────────────────────────────
         "timer_rate" -> TunableInfo(
             name = "Interactive Timer Rate (µs)",
             description = "Sampling interval of the interactive governor.",
@@ -538,12 +578,6 @@ object TunableMetadata {
             description = "Delay before scaling up from hispeed_freq.",
             risk = Risk.LOW,
             valueKind = ValueKind.RAW_STRING,
-        )
-        "boost" -> TunableInfo(
-            name = "Interactive Boost",
-            description = "Force hispeed_freq instantly when 1.",
-            risk = Risk.LOW,
-            valueKind = ValueKind.BOOL,
         )
         else -> TunableInfo(
             name = "CPU Governor Tunable: $name",
@@ -652,6 +686,18 @@ object TunableMetadata {
     )
 
     /**
+     * Thermal-zone trip-point node prefix. Writing a trip point raises/lowers the temperature
+     * at which the kernel throttles — raising one can MASK an over-temperature condition and let
+     * the SoC run hot enough to damage it. The app never legitimately writes these (the matching
+     * [TunableInfo] is tagged DANGEROUS and is not exposed in the UI), so they are categorically
+     * blocked at the guard as defense-in-depth: even if a future code path tried to write one, the
+     * root channel refuses it. Matched as a component PREFIX (covers trip_point_0_temp,
+     * trip_point_1_hyst, …) but ONLY under `/sys/class/thermal/`.
+     */
+    private const val THERMAL_ROOT = "/sys/class/thermal/"
+    private const val THERMAL_TRIP_PREFIX = "trip_point_"
+
+    /**
      * Returns true when [p] refers to a known-dangerous kernel node.
      *
      * Matching is WHOLE-COMPONENT only (split on '/'): an entry blocks a path iff some path
@@ -673,6 +719,11 @@ object TunableMetadata {
                     DANGEROUS_POWER_SUPPLY_PREFIXES.any { prefix -> comp.startsWith(prefix) }
                 }
             ) {
+                return true
+            }
+        }
+        if (p.startsWith(THERMAL_ROOT)) {
+            if (components.any { comp -> comp.startsWith(THERMAL_TRIP_PREFIX) }) {
                 return true
             }
         }
