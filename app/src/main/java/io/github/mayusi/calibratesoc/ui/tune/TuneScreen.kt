@@ -1584,11 +1584,15 @@ private fun AdvancedUnlockCard(
         OdinIntents.vendorSettingsName(context)
     }
 
+    // PServer-live + all optional grants already held → card is pure clutter; suppress it.
+    if (pserverLive && grants.allHeld) return
+
     ArsenalPanel(accent = AccentBar.Neutral, title = "HUD & FPS PERMISSIONS") {
         if (pserverLive) {
-            // PServer-root live tuning is ALREADY active — nothing to set up. Be
-            // honest: the script only adds OPTIONAL extras (FPS overlay, vendor keys).
-            StatusPill(text = "LIVE TUNING ACTIVE — NOTHING TO DO", accent = AccentBar.Emerald)
+            // PServer-root live tuning is ALREADY active — nothing to set up for core
+            // tuning. The optional extras (real-FPS overlay, per-app auto-profiles,
+            // vendor-key writes) can be granted automatically in one tap.
+            StatusPill(text = "LIVE TUNING ACTIVE", accent = AccentBar.Emerald)
             Text(
                 "PServer root is live, so AutoTDP and ± clock tuning already work with zero setup — " +
                     "no script, no SELinux change, no root. The optional extras below (real-FPS " +
@@ -1630,31 +1634,44 @@ private fun AdvancedUnlockCard(
         if (grants.allHeld) {
             StatusPill(text = "ALL GRANTED — HUD LIVE", accent = AccentBar.Emerald)
         }
-        Spacer(Modifier.height(Spacing.dense))
-        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            ArsenalButton(
-                label = if (grants.anyHeld) "Re-run Unlock" else "Generate + Open $vs",
-                onClick = {
-                    val deployed = viewModel.deployScript()
-                    lastPath = deployed.path
-                    OdinIntents.openOdinSettings(context)
-                },
-                style = ArsenalButtonStyle.Primary,
-                accent = AccentBar.Red,
-            )
+        // Script-deploy button: only relevant for non-PServer devices that need the
+        // one-time chmod script. On PServer-live devices the one-tap grant above is
+        // the correct action; the script is never needed there.
+        if (!pserverLive) {
+            Spacer(Modifier.height(Spacing.dense))
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
+                ArsenalButton(
+                    label = "Generate + Open $vs",
+                    onClick = {
+                        val deployed = viewModel.deployScript()
+                        lastPath = deployed.path
+                        OdinIntents.openOdinSettings(context)
+                    },
+                    style = ArsenalButtonStyle.Primary,
+                    accent = AccentBar.Red,
+                )
+                ArsenalButton(
+                    label = "Refresh Status",
+                    onClick = { viewModel.refresh() },
+                    style = ArsenalButtonStyle.Secondary,
+                    accent = AccentBar.Neutral,
+                )
+            }
+            lastPath?.let {
+                Text(
+                    "Wrote $it",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AccentBar.Emerald,
+                )
+            }
+        } else {
+            Spacer(Modifier.height(Spacing.dense))
             ArsenalButton(
                 label = "Refresh Status",
                 onClick = { viewModel.refresh() },
                 style = ArsenalButtonStyle.Secondary,
                 accent = AccentBar.Neutral,
-            )
-        }
-        lastPath?.let {
-            Text(
-                "Wrote $it",
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.labelSmall,
-                color = AccentBar.Emerald,
             )
         }
     }

@@ -42,11 +42,25 @@ sealed interface WriteResult {
     ) : WriteResult
 
     /** Privilege layer accepted the call but the kernel/system rejected
-     *  it — SELinux denial, EBUSY (governor protecting an OPP), etc. */
+     *  it — SELinux denial, EBUSY (governor protecting an OPP), etc.
+     *
+     *  VERIFICATION-MISMATCH variant: when the write physically LANDED (shell status 0)
+     *  but the node read back a value outside the OPP-snap tolerance, this is still a
+     *  Rejected — we NEVER claim a write succeeded when readback disagrees. For that case
+     *  [readbackValue] carries the parsed numeric value the node ACTUALLY holds now and
+     *  [previousValue] the parsed value it held BEFORE the write (both null when the node
+     *  is non-numeric or could not be parsed). The AutoTDP apply loop uses these to tell a
+     *  "kernel snapped to a different VALID operating point" (readback moved away from
+     *  previous → CONVERGE the controller to readback so it stops re-fighting the same
+     *  write) apart from a "write had ZERO effect" (readback == previous → an HONEST
+     *  failure, never converged-to and never claimed as success). Both default to null so
+     *  every existing Rejected call site (EBUSY, SELinux, settings-key) is unchanged. */
     data class Rejected(
         override val id: TunableId,
         val errno: Int?,
         val message: String,
+        val readbackValue: Long? = null,
+        val previousValue: Long? = null,
     ) : WriteResult
 
     /** Unexpected failure (IO, binder death, etc.). */

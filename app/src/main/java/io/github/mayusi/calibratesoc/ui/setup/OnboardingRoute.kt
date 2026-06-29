@@ -88,3 +88,60 @@ fun decideOnboardingRoute(
     pserverSysfsLive -> OnboardingRoute.AutoSetupHero
     else -> OnboardingRoute.ManualLadder
 }
+
+/**
+ * Pure gate deciding whether the user is allowed to FINISH onboarding (i.e.
+ * `markComplete()` may flip the `onboardingComplete` flag and let them into the
+ * app).
+ *
+ * Why this exists / the policy
+ * ----------------------------
+ * On a PServer-CAPABLE device (there IS a privilege path — PServer-live, root,
+ * AYANEO binder, or a vendor device where the one-tap self-grant is meaningful)
+ * the one-tap setup is MANDATORY: the user cannot skip into the app without
+ * holding the grant. This collapses every "Skip setup / Not now" escape on those
+ * devices — the only way forward is the (single, frictionless) grant.
+ *
+ * HONESTY is preserved by three carve-outs so we never permanently trap a user:
+ *   1. NON-capable device (no privilege path at all — a plain Android phone that
+ *      physically can't grant): the door stays OPEN. Hard-locking a device that
+ *      genuinely can't grant would strand the user, so the mandatory rule only
+ *      applies where there is something to grant THROUGH.
+ *   2. PROBING (capability not resolved yet): we neither complete nor lock —
+ *      the caller shows the "Checking your device…" transient. A slow or wrong
+ *      first-frame probe must never permanently trap a user.
+ *   3. BRIDGE GENUINELY UNAVAILABLE (the device LOOKED capable but the one-tap
+ *      PServer bridge turned out not transactable — `FullSetupState.NotAvailable`):
+ *      we open the door. The app honestly couldn't grant, so it must not lock the
+ *      user out of a device it can't actually serve.
+ *
+ * @param capResolved  whether the capability probe has produced a report yet.
+ *                     False on the first frame (probe in flight).
+ * @param deviceCapable  true when a privilege path exists (`advancedApplicable`
+ *                     OR live-already-active). Only meaningful when [capResolved].
+ * @param grantHeld  true when the mandatory grant is actually HELD: live tuning
+ *                     is already active (PServer-live / root / AYANEO-binder /
+ *                     sysfs-writable) OR the one-tap `setupEverything` produced a
+ *                     post-grant readback (`FullSetupState.FullCompleted`).
+ * @param bridgeUnavailable  true when the one-tap bridge was tried and reported
+ *                     `NotAvailable` (not transactable here) — the honesty escape.
+ *
+ * Rules (in order):
+ *   1. !capResolved        → false  (probing: never complete, never trap)
+ *   2. !deviceCapable      → true   (non-capable: door always open)
+ *   3. grantHeld           → true   (capable + grant held: enter)
+ *   4. bridgeUnavailable   → true   (capable but bridge can't grant: honesty)
+ *   5. else                → false  (capable, grant not held, bridge live: MUST grant)
+ */
+fun canCompleteOnboarding(
+    capResolved: Boolean,
+    deviceCapable: Boolean,
+    grantHeld: Boolean,
+    bridgeUnavailable: Boolean,
+): Boolean = when {
+    !capResolved -> false
+    !deviceCapable -> true
+    grantHeld -> true
+    bridgeUnavailable -> true
+    else -> false
+}

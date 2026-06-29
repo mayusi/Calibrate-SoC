@@ -322,7 +322,7 @@ class AutoTdpViewModel @Inject constructor(
                         _startError.value =
                             "AutoTDP stopped: live kernel writes weren't available" +
                             (state.liveUnavailableReason?.let { " — $it" } ?: "") +
-                            ". Re-run Advanced unlock or try again."
+                            ". Set up permissions from Tune → HUD & FPS permissions, or try again."
                     }
                     AutoTdpStatus.KILLED_BY_SAFETY -> {
                         _manuallyOn.value = false

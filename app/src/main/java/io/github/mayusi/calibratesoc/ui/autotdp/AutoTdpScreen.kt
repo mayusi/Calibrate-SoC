@@ -604,7 +604,7 @@ private fun ArsenalRungBanner(rung: AutoTdpRung, runState: AutoTdpRunState) {
         AutoTdpRung.ADVISORY -> Triple(
             AccentBar.Neutral,
             "RUNG: ADVISORY",
-            "No write access. AutoTDP can read live telemetry and show efficiency advice, but cannot apply any changes. Run the unlock script or use root to reach SCRIPT or LIVE.",
+            "No write access. AutoTDP can read live telemetry and show efficiency advice, but cannot apply any changes. On supported devices, grant live tuning from Tune → HUD & FPS permissions. Otherwise, use root to reach SCRIPT or LIVE.",
         )
     }
 

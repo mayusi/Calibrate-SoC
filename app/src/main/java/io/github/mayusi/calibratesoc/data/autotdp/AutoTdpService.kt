@@ -601,6 +601,15 @@ class AutoTdpService : Service() {
         // ── Step 4: collect telemetry + control loop ───────────────────────────
         val window = ArrayDeque<Telemetry>(WINDOW_SIZE + 1)
         var currentState = TdpState.STOCK
+        // FINDING 1 (stuck-spin) FIX — per-node mismatch-Rejected tracking. Keyed by the
+        // op's sysfs target path. Counts CONSECUTIVE ticks a node was Rejected for a
+        // verification mismatch with its readback NOT progressing toward intended (a write
+        // that has zero effect). Reset the instant a node converges, succeeds, or is absent
+        // from a tick's ops. When a node crosses STUCK_REJECT_TICKS we mark it un-writable,
+        // stop re-emitting its identical failing write, and surface an honest status — the
+        // rest of the tune keeps running. Lives OUTSIDE collect{} so it persists across ticks.
+        val rejectStuckTicks = HashMap<String, Int>()
+        val stuckNodes = HashSet<String>()
         val decisions = ArrayDeque<DecisionRecord>(MAX_DECISION_HISTORY + 1)
         val thermalKill = ThermalKillEvaluator()   // stateful: tracks consecutive over-threshold samples
         val stockCeilingKhz = caps.bigClusterOppStepsKhz.lastOrNull() // top OPP = stock big ceiling
@@ -798,6 +807,21 @@ class AutoTdpService : Service() {
                 // succeeded. Declared outside the `if` block so displayReason can use it.
                 var allOpsSucceeded = true
 
+                // FINDING 1 (stuck-spin) FIX — per-tick convergence accumulator. It starts at
+                // the CURRENT applied truth (NOT the intent) and only advances a node's tracked
+                // frequency field when that node actually LANDED (Success / within-tolerance
+                // snap) or the kernel SNAPPED it to a different valid OPP (converge-to-readback).
+                // A node that failed / was denied / is stuck simply stays at its prior value —
+                // honest by construction, never claimed as applied. When EVERY op lands we adopt
+                // the full intent below (byte-identical to the old all-or-nothing behaviour); only
+                // when something did NOT land do we fall back to this per-node converged truth, so
+                // next tick's delta is computed from reality and the engine stops re-emitting the
+                // identical failing write (the infinite silent spin).
+                var convergedState = currentState
+                // Honesty surface (Finding 1): nodes that crossed the stuck threshold THIS tick,
+                // collected for an honest "couldn't apply X" status without stopping the daemon.
+                val newlyStuckDescriptions = mutableListOf<String>()
+
                 if (effectiveTarget != currentState) {
                     val ops = TdpStateTransition.delta(
                         from = currentState,
@@ -808,6 +832,14 @@ class AutoTdpService : Service() {
                     )
 
                     for (op in ops) {
+                        // FINDING 1 (anti-spin): a node already proven un-writable (stuck) is NOT
+                        // re-attempted — we stop hammering it. Its field stays at the prior applied
+                        // value (the accumulator base) so we also stop INTENDING the unreachable
+                        // target; mark the tick partial so the HUD stays honest. Other ops run on.
+                        if (op.id.target in stuckNodes) {
+                            allOpsSucceeded = false
+                            continue
+                        }
                         // BUG A FIX: retry transient failures (Rejected / Failed) up to
                         // WRITE_RETRY_ATTEMPTS times with WRITE_RETRY_DELAY_MS backoff before
                         // giving up. CapabilityDenied is structural (no writer tier) and is
@@ -815,7 +847,23 @@ class AutoTdpService : Service() {
                         val result = writeWithRetry(op, report)
                         when (result) {
                             is WriteResult.Success -> {
-                                // Good — continue to next op.
+                                // Good — node accepted (exact or within-tolerance snap). Advance the
+                                // accumulator's tracked freq field for THIS node to the value that
+                                // actually landed (result.newValue carries the real readback on the
+                                // verified path; intent on the unverified-but-accepted path). Clear
+                                // any stuck streak. Non-freq fields (park/governor/uclamp/fan) are
+                                // adopted wholesale from effectiveTarget below IFF every op landed.
+                                val landed = result.newValue.toLongOrNull()
+                                if (landed != null) {
+                                    convergedState = TdpConvergence.convergeToReadback(
+                                        state = convergedState,
+                                        op = op,
+                                        readback = landed,
+                                        bigPolicyId = caps.bigPolicyId,
+                                        gpuRootPath = gpuRootPath,
+                                    ) ?: convergedState
+                                }
+                                rejectStuckTicks.remove(op.id.target)
                             }
                             is WriteResult.CapabilityDenied -> {
                                 // RUNTIME-GAP FIX: a CapabilityDenied is FATAL only when it
@@ -844,19 +892,76 @@ class AutoTdpService : Service() {
                                             "${op.description}: ${result.reason}",
                                     )
                                     allOpsSucceeded = false
+                                    // HONESTY: this lever did NOT land. The accumulator base is the
+                                    // prior applied state, so its field already stays at the current
+                                    // value — currentState never advances to an unwritten intent.
                                     // Do not return@collect — skip this lever, continue the loop.
                                 }
                             }
                             is WriteResult.Rejected -> {
-                                // Still rejected after all retries — transient became persistent
-                                // (e.g. governor is permanently protecting this OPP). Log it and
-                                // keep the daemon running; this op is skipped for this cycle.
-                                // The engine will try again next tick; if the condition clears
-                                // the write will succeed. We do NOT stop because a single
-                                // transient EBUSY from a governor that has since moved on should
-                                // not terminate the daemon session.
+                                // Still rejected after all retries. Two very different shapes hide
+                                // here — and conflating them is the stuck-spin bug (Finding 1):
+                                //
+                                //  (a) VERIFICATION MISMATCH where the kernel ACCEPTED a DIFFERENT
+                                //      VALID value (snapped/clamped the write to a real OPP off our
+                                //      tolerance, or a vendor daemon re-clamped scaling_max_freq).
+                                //      result.readbackValue is present and has MOVED away from the
+                                //      prior value → that readback IS the new truth. CONVERGE the
+                                //      controller's state for this node to the readback so next
+                                //      tick's delta is computed FROM REALITY and we stop re-emitting
+                                //      the identical failing write forever. (HONESTY: this is NOT a
+                                //      claim of success — the op is still Rejected and the tick is
+                                //      marked partial; we are only refusing to re-fight a write the
+                                //      kernel already answered with a valid alternative.)
+                                //
+                                //  (b) NO-EFFECT write (readback == the prior value, i.e. the node
+                                //      did not move at all) OR a non-numeric / transient reject (no
+                                //      readbackValue). This is an HONEST FAILURE — we do NOT
+                                //      converge (that would silently adopt the unchanged stock value
+                                //      as if we wanted it) and we count it toward the stuck detector.
+                                //      The engine retries next tick; if it never lands, the stuck
+                                //      backstop stops the hammering and surfaces it honestly.
                                 Log.w(TAG, "Write still rejected after retries for ${op.description}: ${result.message}")
                                 allOpsSucceeded = false
+
+                                val readback = result.readbackValue
+                                val prior = result.previousValue
+                                // "kernel chose a different valid value" vs "write had zero effect"
+                                // — the HONESTY fork (see TdpConvergence.classifyReject).
+                                val rejectKind = TdpConvergence.classifyReject(readback, prior)
+
+                                if (rejectKind == TdpConvergence.RejectKind.CONVERGE) {
+                                    val converged = TdpConvergence.convergeToReadback(
+                                        state = convergedState,
+                                        op = op,
+                                        readback = readback!!,
+                                        bigPolicyId = caps.bigPolicyId,
+                                        gpuRootPath = gpuRootPath,
+                                    )
+                                    if (converged != null) {
+                                        // CONVERGE: adopt the kernel's truth for this node and
+                                        // clear its stuck streak — the node IS moving, just not to
+                                        // the exact value we asked; the loop now settles.
+                                        convergedState = converged
+                                        rejectStuckTicks.remove(op.id.target)
+                                        Log.i(
+                                            TAG,
+                                            "Converged ${op.id.target} to kernel readback $readback " +
+                                                "(intended ${op.value}); engine re-decides from reality next tick.",
+                                        )
+                                    } else {
+                                        // A node we don't track as a numeric frequency field (e.g.
+                                        // pwrlevel) read back something odd — treat as a real reject
+                                        // and let the stuck detector watch it.
+                                        bumpStuck(rejectStuckTicks, stuckNodes, newlyStuckDescriptions, op)
+                                    }
+                                } else {
+                                    // NO-EFFECT or non-numeric reject — HONEST failure. The
+                                    // accumulator base is the prior applied state, so this node's
+                                    // field already stays at the current value (we NEVER adopt the
+                                    // unreached intent as truth). Count it toward the stuck backstop.
+                                    bumpStuck(rejectStuckTicks, stuckNodes, newlyStuckDescriptions, op)
+                                }
                                 // Do not return@collect — skip this op, continue the loop.
                             }
                             is WriteResult.Failed -> {
@@ -864,18 +969,42 @@ class AutoTdpService : Service() {
                                 // and keep running; the next tick will try again. If the device
                                 // has entered a state where binder is permanently dead the
                                 // safety-kill path will handle shutdown through temp / battery.
+                                // HONESTY: did not land — accumulator base already holds this node
+                                // at the current value, so currentState never advances to intent.
                                 Log.w(TAG, "Write failed after retries for ${op.description}: ${result.error.message}")
                                 allOpsSucceeded = false
                                 // Do not return@collect — skip this op, continue the loop.
                             }
                         }
                     }
-                    // Only advance currentState when all ops succeeded (BUG E FIX).
-                    // If any op was skipped, currentState stays at the last fully-applied
-                    // state so the HUD shows the ACTUAL written state, not the intent.
-                    if (allOpsSucceeded) {
-                        currentState = effectiveTarget
-                    }
+                    // FINDING 1 (stuck-spin) FIX — advance currentState.
+                    //  - ALL ops landed  → adopt the full intent (effectiveTarget). This is the
+                    //    BUG-E-FIX behaviour, byte-identical to before: every field, freq and
+                    //    non-freq (park/governor/uclamp/fan), is now the applied truth.
+                    //  - SOME did NOT    → adopt the per-node CONVERGED truth: tracked freq fields
+                    //    that landed or that the kernel snapped to a valid OPP carry their real
+                    //    value; every other field (including a freq write with ZERO effect, and all
+                    //    non-freq fields whose op failed) stays at the PRIOR applied value. Next
+                    //    tick's delta is therefore computed from reality, so the engine stops
+                    //    re-emitting the identical failing write (the infinite silent spin) — while
+                    //    NEVER claiming an unwritten value as applied (the honesty invariant).
+                    currentState = if (allOpsSucceeded) effectiveTarget else convergedState
+                }
+
+                // FINDING 1 (honesty surface) — if any node crossed the stuck threshold THIS tick,
+                // record an honest "couldn't apply X" on the run-state's writeFailure WITHOUT
+                // stopping the daemon (the rest of the tune keeps working). We do NOT clear an
+                // existing writeFailure when nothing newly stuck this tick — a sticky honest signal
+                // until the session ends or a kill path overwrites it. This is the anti-spin honest
+                // give-up: we stopped hammering the node (it is in stuckNodes now) and told the user.
+                if (newlyStuckDescriptions.isNotEmpty()) {
+                    val msg = "Couldn't apply: ${newlyStuckDescriptions.joinToString(", ")} " +
+                        "(kernel won't accept the write — left at the last value that landed). " +
+                        "Other tuning continues."
+                    Log.w(TAG, "Stuck node(s) — honest give-up, daemon keeps running: $msg")
+                    controller.updateState(
+                        controller.state.value.copy(writeFailure = msg),
+                    )
                 }
 
                 // BUG E FIX: show the actual applied state reason, not just the engine intent.
@@ -1067,6 +1196,31 @@ class AutoTdpService : Service() {
                 learnedGameModel.updateAfterSession(pkg, outcome, System.currentTimeMillis())
             }
         }.onFailure { Log.w(TAG, "persistLearnedParams failed (non-fatal)", it) }
+    }
+
+    /**
+     * FINDING 1 (anti-spin) — count a non-progressing reject for [op]'s node and, on
+     * crossing [STUCK_REJECT_TICKS] consecutive ticks, mark the node stuck (so the apply
+     * loop stops re-emitting its identical failing write) and record its description for
+     * the honest "couldn't apply X" surface. A node that converges or succeeds clears its
+     * streak via [HashMap.remove] at the call sites, so a transient EBUSY storm that later
+     * clears never trips this — only a node that truly will not accept writes does.
+     */
+    private fun bumpStuck(
+        rejectStuckTicks: HashMap<String, Int>,
+        stuckNodes: HashSet<String>,
+        newlyStuckDescriptions: MutableList<String>,
+        op: TdpStateTransition.WriteOp,
+    ) {
+        val target = op.id.target
+        if (target in stuckNodes) return // already given up on; nothing to escalate
+        val next = (rejectStuckTicks[target] ?: 0) + 1
+        rejectStuckTicks[target] = next
+        if (next >= STUCK_REJECT_TICKS) {
+            stuckNodes += target
+            rejectStuckTicks.remove(target)
+            newlyStuckDescriptions += op.description
+        }
     }
 
     /**
@@ -1794,6 +1948,19 @@ class AutoTdpService : Service() {
          * 50 ms is enough for a binder glitch or EBUSY from a governor to clear.
          */
         private const val WRITE_RETRY_DELAY_MS = 50L
+
+        /**
+         * FINDING 1 (stuck-spin) FIX: how many CONSECUTIVE ticks a single node may be
+         * Rejected with its readback making NO progress toward the intended value before
+         * the apply loop declares that node un-writable, stops re-emitting the identical
+         * failing write, and surfaces an honest "couldn't apply X" status (the rest of the
+         * tune keeps running). This is the anti-spin backstop: convergence (advancing
+         * currentState to a kernel-snapped readback) normally settles the loop in ONE tick;
+         * the counter only climbs for a node that truly won't accept writes AND whose
+         * readback never moves (a no-effect write). Small enough to give up quickly,
+         * large enough to ride a brief governor/EBUSY storm that the per-op retry missed.
+         */
+        private const val STUCK_REJECT_TICKS = 3
 
         /**
          * WAVE 3a: settle time after stopping the other clock owner (Game Boost)

@@ -170,6 +170,37 @@ fun OnboardingScreen(
         userTookManualControl = userTookManualControl,
     )
 
+    // ── MANDATORY-GRANT gate (the hard-require) ────────────────────────────────
+    // On a PServer-CAPABLE device the user MUST complete the one-tap grant before
+    // they can enter the app — every "Skip setup / Not now" escape is removed on
+    // these devices. [canCompleteOnboarding] is the single pure source of truth
+    // (unit-tested in OnboardingGateTest), with three honesty carve-outs baked in
+    // so we never permanently trap a user:
+    //   • non-capable device (no privilege path)        → door stays open
+    //   • probe in flight (cap == null)                 → neither complete nor lock
+    //   • bridge genuinely NotAvailable (looked capable
+    //     but the one-tap bridge isn't transactable)    → door opens (honesty)
+    //
+    // deviceCapable: there IS a privilege path to grant through (the vendor/runner
+    //   applicability probe OR a live path already detected).
+    // grantHeld: the mandatory grant is actually HELD — live tuning already active
+    //   (PServer-live / root / AYANEO-binder / sysfs-writable) OR the one-tap
+    //   setupEverything produced a post-grant readback (FullCompleted, even partial:
+    //   the user DID the grant and got what the bridge could give — we don't trap
+    //   them forever on a stubborn OPTIONAL extra).
+    // bridgeUnavailable: setupEverything was tried and PServer wasn't transactable.
+    val deviceCapable = advancedApplicable || liveAlreadyActive
+    val grantHeld = liveAlreadyActive ||
+        fullSetupState is AdvancedUnlockViewModel.FullSetupState.FullCompleted
+    val bridgeUnavailable =
+        fullSetupState is AdvancedUnlockViewModel.FullSetupState.NotAvailable
+    val canComplete = canCompleteOnboarding(
+        capResolved = cap != null,
+        deviceCapable = deviceCapable,
+        grantHeld = grantHeld,
+        bridgeUnavailable = bridgeUnavailable,
+    )
+
     // Full-screen scary-skip dialog: shown when the user tries to bypass
     // the forced advanced step on an applicable device.
     var showScarySkipDialog by remember { mutableStateOf(false) }
@@ -298,8 +329,14 @@ fun OnboardingScreen(
                 showScarySkipDialog = false
                 // Record the skip so gated features can re-surface the prompt.
                 viewModel.setAdvancedSetupSkipped(true)
-                viewModel.markComplete()
-                onFinished()
+                // HARD-REQUIRE: still routed through the mandatory-grant gate. On a
+                // capable device this is a no-op until the grant is held — the dialog
+                // path is not offered there anyway (requestSkip == enterApp on capable
+                // devices below), so this only ever completes where skipping is honest.
+                if (canComplete) {
+                    viewModel.markComplete()
+                    onFinished()
+                }
             },
         )
     }
@@ -316,24 +353,32 @@ fun OnboardingScreen(
 
         val allDoneStepIdx = items.size + 1 // last step index
 
-        // enterApp used ONLY for non-applicable devices and genuine
-        // completion paths — never for the silent TextButton skip on
-        // applicable devices.
+        // enterApp is the SINGLE chokepoint to finish onboarding. It is gated by
+        // [canComplete]: on a PServer-capable device the mandatory grant must be
+        // held first (or the bridge must be genuinely unavailable). On a
+        // non-capable device, or once the grant is held, it completes normally.
+        // The dedicated "Skip / Not now" buttons are also HIDDEN on capable
+        // devices below — this guard is defense-in-depth so no path can sneak a
+        // user in without the grant while the probe says they CAN grant.
         val enterApp: () -> Unit = {
-            viewModel.markComplete()
-            onFinished()
+            if (canComplete) {
+                viewModel.markComplete()
+                onFinished()
+            }
         }
 
-        // On applicable devices the "skip advanced" exit path normally goes
-        // through ScarySkipDialog (live tuning would be unavailable) — BUT on a
-        // PServer-live / root / AYANEO-binder device there is genuinely NOTHING
-        // being skipped (tuning is already live), so skipping the OPTIONAL HUD-
-        // permissions step is friction-free and must never show the scary dialog.
-        val requestSkip: () -> Unit = if (advancedApplicable && !liveAlreadyActive) {
-            { showScarySkipDialog = true }
-        } else {
-            enterApp
-        }
+        // Skip-exit routing under the HARD-REQUIRE policy:
+        //   • CAPABLE device, grant NOT held  → there is NO skip. requestSkip routes
+        //     to the gated [enterApp], which no-ops until the grant lands. The
+        //     dedicated skip buttons are HIDDEN on these devices (below), so the
+        //     user's only way forward is the one-tap grant.
+        //   • CAPABLE device, grant HELD (e.g. live-already-active: tuning is on
+        //     with zero setup) → nothing is actually being skipped; enterApp
+        //     completes cleanly (canComplete == true).
+        //   • NON-capable device → the door is open; enterApp completes.
+        // The ScarySkipDialog is retained only for the legacy non-capable warning
+        // surface and is never the path that lets a capable user skip the grant.
+        val requestSkip: () -> Unit = enterApp
 
         // Once the user is in the advanced sub-wizard, it owns the body
         // and the universal-step dispatch is bypassed entirely.
@@ -387,6 +432,11 @@ fun OnboardingScreen(
                     // Honest fallback: if PServer wasn't transactable, offer the script
                     // ladder for whatever's still missing.
                     onUseScript = { advancedPhase = AdvPhase.ScriptGuide },
+                    // HARD-REQUIRE: on a capable device the IDLE "Not now" escape is
+                    // removed — the only forward action is the one-tap grant. The
+                    // honesty escapes survive (NotAvailable's "enter app" when the
+                    // bridge can't grant; FullCompleted's enter after a grant ran).
+                    allowIdleSkip = !deviceCapable,
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
                     vendorName = vendorName,
@@ -436,6 +486,10 @@ fun OnboardingScreen(
                     stepIdx = 1
                 },
                 onSkipAll = enterApp,
+                // HARD-REQUIRE: hide "Skip setup" on a capable device. There the
+                // only forward action is "Get started", which leads INTO the
+                // (mandatory) grant — never past it. enterApp is gated regardless.
+                showSkip = !deviceCapable,
             )
             allDoneStepIdx -> AllDoneStep(
                 advancedApplicable = advancedApplicable,
@@ -479,15 +533,16 @@ fun OnboardingScreen(
             }
         }
 
-        // Always-visible escape hatch on permission steps only.
-        // Not shown on welcome (has its own Skip) or all-done (has Finish).
+        // Escape hatch on permission steps only — HIDDEN on PServer-capable
+        // devices (the hard-require: there's a privilege path, so the user MUST
+        // grant; this used to be the easiest bypass with a raw markComplete()).
+        // Shown only on genuinely non-capable devices, and routed through the
+        // gated [enterApp] so it can never complete where a grant is required.
+        // Not shown on welcome (has its own button) or all-done (has Finish).
         val allDoneStep = items.size + 1
-        if (stepIdx in 1 until allDoneStep) {
+        if (!deviceCapable && stepIdx in 1 until allDoneStep) {
             TextButton(
-                onClick = {
-                    viewModel.markComplete()
-                    onFinished()
-                },
+                onClick = enterApp,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Skip setup — let me into the app")
@@ -559,7 +614,7 @@ private fun ScarySkipDialog(
                     ),
                 ) {
                     Text(
-                        "You can always complete this setup later from Settings → Advanced unlock.",
+                        "You can always complete this setup later from Tune → HUD & FPS permissions.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.padding(10.dp),
@@ -704,7 +759,14 @@ private fun CheckingDeviceStep() {
 }
 
 @Composable
-private fun WelcomeStep(onNext: () -> Unit, onSkipAll: () -> Unit) {
+private fun WelcomeStep(
+    onNext: () -> Unit,
+    onSkipAll: () -> Unit,
+    // When false (PServer-capable device under the hard-require), the "Skip setup"
+    // button is hidden and "Get started" takes the full width — the only way
+    // forward is into the mandatory grant.
+    showSkip: Boolean = true,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -741,10 +803,12 @@ private fun WelcomeStep(onNext: () -> Unit, onSkipAll: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(
-                    onClick = onSkipAll,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Skip setup") }
+                if (showSkip) {
+                    OutlinedButton(
+                        onClick = onSkipAll,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Skip setup") }
+                }
                 Button(
                     onClick = onNext,
                     modifier = Modifier.weight(1f),
@@ -1366,6 +1430,11 @@ private fun AdvancedFullSetupStep(
     onRetry: () -> Unit,
     onEnterApp: () -> Unit,
     onUseScript: () -> Unit,
+    // When false (PServer-capable device under the hard-require), the IDLE-state
+    // "Not now" escape is hidden — the one-tap "Set up everything" is the only way
+    // forward. The NotAvailable/FullCompleted enter-app paths are honesty escapes
+    // and are NOT affected by this flag.
+    allowIdleSkip: Boolean = true,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1491,8 +1560,13 @@ private fun AdvancedFullSetupStep(
                             fontWeight = FontWeight.Bold,
                         )
                     }
-                    OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
-                        Text("Not now")
+                    // HARD-REQUIRE: "Not now" is shown ONLY on non-capable devices.
+                    // On a PServer-capable device the one-tap grant above is the only
+                    // way forward — there is no "not now."
+                    if (allowIdleSkip) {
+                        OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                            Text("Not now")
+                        }
                     }
                 }
             }

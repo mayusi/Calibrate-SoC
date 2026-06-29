@@ -39,10 +39,10 @@ import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
 
 /**
- * Phase 1 diagnostic screen: dumps the full probed capability report so we
- * can verify the probe layer on real hardware before building features on
- * top of it. Replaced by the Dashboard in Phase 3. Visible in both debug
- * and release builds for now — this IS the only screen.
+ * Device Info / capability diagnostic screen: dumps the full probed capability
+ * report so we can verify the probe layer on real hardware. The Dashboard
+ * (Phase 3) is the primary home screen; this screen surfaces the raw probe
+ * detail and is accessible from Settings → Device Info.
  */
 @Composable
 fun CapabilityReportScreen(

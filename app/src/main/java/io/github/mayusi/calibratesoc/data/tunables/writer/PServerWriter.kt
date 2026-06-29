@@ -251,7 +251,7 @@ class PServerWriter @Inject constructor(
                 verified = false,
             )
         }
-        return if (readbackAccepted(intended, readback)) {
+        return if (readbackAccepted(intended, readback, id.target)) {
             if (BuildConfig.DEBUG) Log.i(TAG, "writeSysfs(): readback confirmed: path=${id.target} readback='$readback'")
             WriteResult.Success(id, previousValue = previous, newValue = readback)
         } else {
@@ -261,33 +261,54 @@ class PServerWriter @Inject constructor(
                 errno = status,
                 message = "Write appeared to succeed (status $status) but readback returned " +
                     "'$readback' instead of '$intended'. Kernel may have rejected the value.",
+                // FINDING 1 FIX: carry the parsed numeric readback + the prior value so the
+                // AutoTDP apply loop can CONVERGE to the kernel's truth when the kernel snapped
+                // to a different VALID value (vs. a no-effect write where readback == previous).
+                // Null when the readback is non-numeric (governor / toggle mismatch).
+                readbackValue = readback.toLongOrNull(),
+                previousValue = previous?.toLongOrNull(),
             )
         }
     }
 
     /**
-     * Returns true when [readback] is an acceptable result for a write of [intended].
+     * Returns true when [readback] is an acceptable result for a write of [intended]
+     * to the node at [targetPath].
      *
-     * Exact match always passes. For numeric values (freq nodes reported in kHz) we
-     * also accept a snapped neighbor: the kernel's OPP table may round the intended
-     * frequency to the nearest available operating point, so we allow any numeric
-     * readback within [OPP_SNAP_TOLERANCE_KHZ] of the intended value.
+     * Exact match always passes. For numeric values (freq nodes) we also accept a
+     * snapped neighbor: the kernel's OPP table may round the intended frequency to the
+     * nearest available operating point, so we allow any numeric readback within an
+     * OPP-snap tolerance of the intended value.
+     *
+     * UNIT-AWARE (Finding 2): the tolerance depends on the node's reporting unit.
+     * cpufreq nodes report **kHz** ([OPP_SNAP_TOLERANCE_KHZ] / [FREQ_TOLERANCE_FLOOR_KHZ]);
+     * GPU/bus devfreq min/max nodes report **Hz** ([OPP_SNAP_TOLERANCE_HZ] /
+     * [FREQ_TOLERANCE_FLOOR_HZ]). Both express the SAME physical window (100 MHz snap,
+     * 200 MHz control-knob floor) — only the unit differs. Using the kHz tolerance on a
+     * ~1.1e9 Hz devfreq value would be a 0.1 MHz window and reject every legitimate
+     * kernel-normalised readback.
      *
      * Non-numeric values (governor names, "Y"/"N" toggles, etc.) must match exactly.
+     * Small control knobs (GPU pwrlevel 0-7, online 0/1) fall below the floor and also
+     * require an exact match — the tolerance must never accept an arbitrary index.
      */
-    internal fun readbackAccepted(intended: String, readback: String): Boolean {
+    internal fun readbackAccepted(intended: String, readback: String, targetPath: String? = null): Boolean {
         if (intended == readback) return true
         val intendedLong = intended.toLongOrNull() ?: return false
         val readbackLong = readback.toLongOrNull() ?: return false
-        // OPP-snap tolerance applies ONLY to large frequency values (kHz: cpufreq /
-        // GPU clocks, which the kernel quantises to the nearest OPP step). Small
-        // control knobs — GPU power levels (0-7), online flags (0/1), small indices —
-        // must match EXACTLY: a 100 MHz tolerance on a 0-7 pwrlevel would accept ANY
-        // value as success, re-introducing the false-success bug we are killing.
-        if (intendedLong < FREQ_TOLERANCE_FLOOR_KHZ || readbackLong < FREQ_TOLERANCE_FLOOR_KHZ) {
+        // Pick the tolerance unit from the node's reporting unit (Hz devfreq vs kHz cpufreq).
+        val hzNode = isHzDevfreqNode(targetPath)
+        val floor = if (hzNode) FREQ_TOLERANCE_FLOOR_HZ else FREQ_TOLERANCE_FLOOR_KHZ
+        val snap = if (hzNode) OPP_SNAP_TOLERANCE_HZ else OPP_SNAP_TOLERANCE_KHZ
+        // OPP-snap tolerance applies ONLY to large frequency values (cpufreq / GPU clocks,
+        // which the kernel quantises to the nearest OPP step). Small control knobs — GPU
+        // power levels (0-7), online flags (0/1), small indices — must match EXACTLY: a
+        // 100 MHz tolerance on a 0-7 pwrlevel would accept ANY value as success,
+        // re-introducing the false-success bug we are killing.
+        if (intendedLong < floor || readbackLong < floor) {
             return false // small control knob — exact match was required and already failed
         }
-        return kotlin.math.abs(intendedLong - readbackLong) <= OPP_SNAP_TOLERANCE_KHZ
+        return kotlin.math.abs(intendedLong - readbackLong) <= snap
     }
 
     /** Original SETTINGS_SYSTEM write path, extracted to its own function. */
@@ -574,7 +595,38 @@ class PServerWriter @Inject constructor(
          * above any control-knob index.
          */
         const val FREQ_TOLERANCE_FLOOR_KHZ = 200_000L  // 200 MHz in kHz units
+
+        /**
+         * UNIT-AWARE TOLERANCE (Finding 2 fix). The GPU devfreq nodes
+         * (`<gpuRoot>/devfreq/min_freq`, `<gpuRoot>/devfreq/max_freq`) report their
+         * value in **Hz**, not kHz — e.g. 1100000000 = 1.1 GHz (see
+         * [TdpStateTransition] which writes `gpuDevfreqMinHz`/`MaxHz` raw, and
+         * [BaselineDegradation] which documents the node as Hz). The kHz tolerances
+         * above are unit-wrong for these nodes: 100_000 against a ~1.1e9 Hz value is a
+         * 0.1 MHz window, so any normalisation the kgsl devfreq core applies (echoing
+         * back a rounded Hz value) trips a false MISMATCH → Rejected → the adaptive GPU
+         * lever wedges. We scale the same constants by 1000 for Hz-valued nodes so the
+         * physical tolerance (100 MHz snap, 200 MHz floor) is identical regardless of
+         * the node's reporting unit. The honesty discipline is unchanged: a readback
+         * that is NOT a real snapped neighbour still mismatches and is Rejected.
+         */
+        const val OPP_SNAP_TOLERANCE_HZ = OPP_SNAP_TOLERANCE_KHZ * 1000L   // 100 MHz in Hz units
+        const val FREQ_TOLERANCE_FLOOR_HZ = FREQ_TOLERANCE_FLOOR_KHZ * 1000L // 200 MHz in Hz units
+
+        /**
+         * A sysfs target whose value is reported in **Hz** (GPU devfreq min/max). Matches
+         * any node ending in `/devfreq/min_freq` or `/devfreq/max_freq` — the Adreno kgsl
+         * GPU devfreq nodes AutoTDP's adaptive GPU lever writes (see [Tunables.gpuMinFreq]
+         * / [Tunables.gpuMaxFreq]). DDR/bus devfreq nodes share the same `/devfreq/…_freq`
+         * suffix and are ALSO Hz-valued, so this correctly covers them too. The `governor`
+         * devfreq node is non-numeric and never reaches the numeric tolerance branch.
+         */
+        private val HZ_DEVFREQ_NODE = Regex(""".*/devfreq/(min|max)_freq$""")
     }
+
+    /** True when [targetPath] is a Hz-valued GPU/bus devfreq frequency node (vs kHz cpufreq). */
+    private fun isHzDevfreqNode(targetPath: String?): Boolean =
+        targetPath != null && HZ_DEVFREQ_NODE.matches(targetPath)
 
     // ── Shell quoting ─────────────────────────────────────────────────────────
 
