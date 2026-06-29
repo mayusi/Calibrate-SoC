@@ -1,3 +1,15 @@
+## [0.3.1-alpha] — 2026-06-29
+
+Fixes the big one: AutoTDP now actually changes your clocks. Plus a cleaner, mandatory setup.
+
+### Fixed
+- **AutoTDP would get stuck and never actually change anything.** If your device's firmware nudged a requested clock to a slightly different value, the app kept re-sending the same write forever and your clocks never moved — it *looked* like it was running but did nothing. It now accepts the value your kernel actually applied and converges, so tuning works. (It still honestly reports a failure if a write truly had no effect.)
+- Fixed a related issue that could wedge the new Adaptive GPU control on some kernels.
+
+### Changed
+- **Setup is now required** on supported handhelds — the one-tap grant is part of getting in, no more skipping past it and wondering why things don't work. (Devices that genuinely can't use the root bridge are never locked out.)
+- **Removed the leftover "re-unlock" clutter.** On devices where everything already works, the old unlock/script card no longer shows up, and the misleading "Re-run Unlock" button is gone. Stale "advanced unlock" wording across the app now points to the right place.
+
 ## [0.3.0-alpha] — 2026-06-28
 
 The new **Adaptive** mode: one dial that tunes your whole chip — CPU *and* GPU — for what you actually want.
