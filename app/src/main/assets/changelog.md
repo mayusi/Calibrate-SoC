@@ -1,3 +1,18 @@
+## [0.3.3-alpha] — 2026-07-01
+
+A polish + correctness pass — things now show right across every device, including AYANEO.
+
+### Fixed — systems now show correctly
+- **AYANEO devices now display their live tuning correctly.** The tier badge, the AutoTDP "live" banner, and the device-info screen used to describe "PServer / root" and even show "read-only" on an AYANEO that was actually tuning live via its vendor service — now they honestly show the real path that's active.
+- **Wi-Fi info** on the Hardware screen no longer shows a blank "—" while you're connected — it reads the real link.
+- **Fan readout** no longer reports a bogus 100% duty at idle — it shows your fan's real speed, with a loading indicator while it reads.
+- **Plain phones/tablets** now get the proper "here's what works" setup screen instead of being shown handheld-only script steps.
+- Tune presets refresh after changes instead of going stale; the Insights "applied" badge now marks the right game; the game-tune import "wrong device" warning actually works now.
+
+### Changed
+- Settings wording around root is now consistent with the app being root-optional (root is one of several paths — Shizuku, vendor, or a supported handheld also work).
+- Internal cleanup: unified color tokens, removed dead code, fixed stale text.
+
 ## [0.3.2-alpha] — 2026-06-30
 
 Calibrate works on *any* Android device now — root is optional, just better on handhelds.

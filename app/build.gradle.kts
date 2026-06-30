@@ -26,8 +26,8 @@ android {
         applicationId = "io.github.mayusi.calibratesoc"
         minSdk = 29              // Android 10 — earliest still in use on handhelds
         targetSdk = 35
-        versionCode = 42
-        versionName = "0.3.2-alpha"
+        versionCode = 43
+        versionName = "0.3.3-alpha"
 
         ndk {
             // arm64 only. Every supported handheld is aarch64.
