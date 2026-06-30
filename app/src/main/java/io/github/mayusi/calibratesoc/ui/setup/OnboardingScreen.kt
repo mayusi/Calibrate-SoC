@@ -105,7 +105,19 @@ import kotlinx.coroutines.delay
  *                 devices): generate + run the unlock script (pm grants).
  *   Done        → celebrate; live grants checklist; enter app
  */
-private enum class AdvPhase { None, Ask, AutoSetup, ScriptGuide, Done }
+private enum class AdvPhase {
+    None, Ask, AutoSetup, ScriptGuide, Done,
+    // ── Universal device paths (each routes a device to ITS real grant flow) ──
+    /** Root present but not enabled: offer the root-mode opt-in so the device
+     *  reaches the ROOT tier instead of falling to NONE. */
+    RootEnable,
+    /** Shizuku installed (no PServer/root): surface the EXISTING ShizukuOnboarding
+     *  state machine (install → pair → grant → per-node probe). */
+    ShizukuSetup,
+    /** Plain phone/tablet (no privilege path): the honest terminal — universal
+     *  HUD/monitoring perms + "live tuning needs a privilege path" note. */
+    PlainTerminal,
+}
 
 @Composable
 fun OnboardingScreen(
@@ -145,6 +157,23 @@ fun OnboardingScreen(
         cap.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT
     )
 
+    // ── UNIVERSAL routing signals (restores per-device grant paths) ─────────────
+    // Each of these is a REAL, already-built grant path; the universal router
+    // sends the device to the one that matches what the probe found instead of
+    // dumping every non-PServer device into the old manual ladder.
+    //   rootAvailable: a root binary (Magisk/KernelSU/other) is present. The
+    //     device CAN reach the ROOT tier — but only if the user opts in (root is
+    //     opt-in by design). Detected via rootKind, independent of the opt-in.
+    //   rootEnabled:   root present AND the user opted into root mode → the probe
+    //     classified the device as the ROOT tier (a live one-tap-capable path).
+    //   shizukuInstalled: the Shizuku app is on the device (running or not) — the
+    //     universal, vendor-agnostic privilege path.
+    val rootAvailable = cap != null &&
+        cap.rootKind != io.github.mayusi.calibratesoc.data.capability.RootKind.NONE
+    val rootEnabled = cap != null &&
+        cap.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT
+    val shizukuInstalled = cap?.shizuku?.installed == true
+
     // ── First-run route: PServer-live → one-click hero, not the old ladder ──
     //
     // THE FIX. The wizard used to ALWAYS fall into the per-permission stepIdx
@@ -170,35 +199,65 @@ fun OnboardingScreen(
         userTookManualControl = userTookManualControl,
     )
 
-    // ── MANDATORY-GRANT gate (the hard-require) ────────────────────────────────
-    // On a PServer-CAPABLE device the user MUST complete the one-tap grant before
-    // they can enter the app — every "Skip setup / Not now" escape is removed on
-    // these devices. [canCompleteOnboarding] is the single pure source of truth
-    // (unit-tested in OnboardingGateTest), with three honesty carve-outs baked in
-    // so we never permanently trap a user:
-    //   • non-capable device (no privilege path)        → door stays open
-    //   • probe in flight (cap == null)                 → neither complete nor lock
-    //   • bridge genuinely NotAvailable (looked capable
-    //     but the one-tap bridge isn't transactable)    → door opens (honesty)
+    // ── UNIVERSAL route: each device to ITS correct grant path ──────────────────
+    // [decideUniversalRoute] is the pure source of truth (unit-tested in
+    // OnboardingUniversalRouteTest). It reacts to the probe landing exactly like
+    // the legacy route: cap null → Checking; then PServer/AYANEO → AutoSetupHero,
+    // enabled-root → AutoSetupHero, root-not-enabled → RootEnable, Shizuku →
+    // ShizukuSetup, vendor-script → ScriptLadder, plain device → PlainTerminal.
+    val universalRoute = decideUniversalRoute(
+        UniversalSignals(
+            capResolved = cap != null,
+            userTookManualControl = userTookManualControl,
+            pserverSysfsLive = cap?.pserverSysfsLive == true,
+            ayaneoBinderLive = cap?.ayaneoBinderLive == true,
+            rootAvailable = rootAvailable,
+            rootEnabled = rootEnabled,
+            shizukuInstalled = shizukuInstalled,
+            advancedApplicable = advancedApplicable,
+        )
+    )
+
+    // FIX 1 (the soft-trap fix) — the "a privilege/permission path actually
+    // landed" signal, hoisted ABOVE the gate so grantHeld can include it. The
+    // unlock SCRIPT only ever sets dump / writeSecureSettings / direct-sysfs
+    // (the universal usage-stats perm is excluded — the user already granted it
+    // in step 2, so it isn't evidence the script ran). Without folding this into
+    // grantHeld, a non-PServer device that successfully ran the script auto-
+    // advanced to AdvPhase.Done but canComplete stayed false forever → "Enter
+    // app" silently no-op'd → the device was TRAPPED. Now a landed script (or a
+    // Shizuku grant, or enabled root) satisfies the gate.
+    val scriptUnlocked = grants.dump || grants.writeSecureSettings || grants.sysfsWritable
+    val shizukuGranted = cap?.shizuku?.permissionGranted == true
+    // privilegePathGranted: a NON-PServer privilege path actually landed.
+    val privilegePathGranted = scriptUnlocked || shizukuGranted || rootEnabled
+
+    // ── ROOT-OPTIONAL completion gate (never hard-locks ANY device) ─────────────
+    // Calibrate is ROOT-OPTIONAL: the app FULLY WORKS on every device with NO grant
+    // (HUD overlay, FPS, monitoring, benchmarks, profiles, insights all run on the
+    // NONE tier). Root / PServer / Shizuku / script only unlock the EXTRA live
+    // CPU/GPU tuning — "better with", never "required". So onboarding NEVER walls a
+    // device — including a PServer handheld. Once the probe RESOLVES, every device
+    // can ALWAYS enter; the grant is the strongly-OFFERED primary action per route
+    // (big inviting CTA) but is always skippable and stays re-reachable later from
+    // Settings / Tune. The only non-completable state is the momentary Checking
+    // (probe in flight) — a transient placeholder, not a lock.
     //
-    // deviceCapable: there IS a privilege path to grant through (the vendor/runner
-    //   applicability probe OR a live path already detected).
-    // grantHeld: the mandatory grant is actually HELD — live tuning already active
-    //   (PServer-live / root / AYANEO-binder / sysfs-writable) OR the one-tap
-    //   setupEverything produced a post-grant readback (FullCompleted, even partial:
-    //   the user DID the grant and got what the bridge could give — we don't trap
-    //   them forever on a stubborn OPTIONAL extra).
-    // bridgeUnavailable: setupEverything was tried and PServer wasn't transactable.
-    val deviceCapable = advancedApplicable || liveAlreadyActive
-    val grantHeld = liveAlreadyActive ||
+    // These signals no longer GATE entry; they drive UI EMPHASIS (whether the
+    // one-tap already landed so the hero collapses to a quiet "all set", whether
+    // the bridge was unavailable, whether a non-PServer path granted). FIX 1 is
+    // subsumed: a script/Shizuku/root device — like every device — always completes
+    // once resolved, so the old soft-trap is impossible.
+    val oneTapGrantHeld = liveAlreadyActive ||
         fullSetupState is AdvancedUnlockViewModel.FullSetupState.FullCompleted
     val bridgeUnavailable =
         fullSetupState is AdvancedUnlockViewModel.FullSetupState.NotAvailable
-    val canComplete = canCompleteOnboarding(
-        capResolved = cap != null,
-        deviceCapable = deviceCapable,
-        grantHeld = grantHeld,
+    val canComplete = canCompleteUniversal(
+        route = universalRoute,
+        oneTapGrantHeld = oneTapGrantHeld,
         bridgeUnavailable = bridgeUnavailable,
+        privilegePathGranted = privilegePathGranted,
+        universalPermsSatisfied = true,
     )
 
     // Full-screen scary-skip dialog: shown when the user tries to bypass
@@ -270,14 +329,20 @@ fun OnboardingScreen(
     // Steps: 0=welcome, 1..N=items, N+1=all-done/advanced-unlock nudge
     val totalSteps = items.size + 2
 
-    // Reactive auto-route (THE FIX): the moment the probe confirms a PServer-live
+    // Reactive auto-route (THE FIX): the moment the probe confirms a one-tap-live
     // device, jump straight to the one-click hero (AdvPhase.AutoSetup),
-    // collapsing the old per-permission ladder. Keyed on the route so it fires
-    // when pserverSysfsLive flips true a frame after first composition. Only acts
-    // from the pristine first-run state (still at welcome, no advanced phase yet)
-    // so it never fights a user who has already navigated somewhere on purpose.
-    LaunchedEffect(onboardingRoute) {
-        if (onboardingRoute == OnboardingRoute.AutoSetupHero &&
+    // collapsing the old per-permission ladder. Keyed on the universal route so it
+    // fires when the live signal flips true a frame after first composition. Only
+    // acts from the pristine first-run state (still at welcome, no advanced phase
+    // yet) so it never fights a user who has already navigated somewhere on
+    // purpose. Covers PServer-live, AYANEO-binder-live, AND enabled-root — all of
+    // which decideUniversalRoute maps to AutoSetupHero (a frictionless one-tap
+    // path). Non-live routes (RootEnable / ShizukuSetup / ScriptLadder /
+    // PlainTerminal) are NOT auto-jumped here: those devices walk the universal
+    // perm ladder first (the HUD/monitoring perms matter on every device), then
+    // the AllDone step offers their device-specific privilege path.
+    LaunchedEffect(universalRoute) {
+        if (universalRoute == UniversalRoute.AutoSetupHero &&
             advancedPhase == AdvPhase.None &&
             stepIdx == 0
         ) {
@@ -307,7 +372,7 @@ fun OnboardingScreen(
     // anyHeld would instantly skip the script guide to Done before they run
     // anything. DUMP / WRITE_SECURE_SETTINGS / direct-sysfs are only ever
     // granted by the unlock script, so they're the true "it ran" signal.
-    val scriptUnlocked = grants.dump || grants.writeSecureSettings || grants.sysfsWritable
+    // (scriptUnlocked is defined once above the gate so grantHeld can include it.)
     LaunchedEffect(advancedPhase, scriptUnlocked) {
         if (advancedPhase == AdvPhase.ScriptGuide && scriptUnlocked) {
             // The unlock script ran — pm grants + (on AYN) the PServer whitelist
@@ -432,11 +497,12 @@ fun OnboardingScreen(
                     // Honest fallback: if PServer wasn't transactable, offer the script
                     // ladder for whatever's still missing.
                     onUseScript = { advancedPhase = AdvPhase.ScriptGuide },
-                    // HARD-REQUIRE: on a capable device the IDLE "Not now" escape is
-                    // removed — the only forward action is the one-tap grant. The
-                    // honesty escapes survive (NotAvailable's "enter app" when the
-                    // bridge can't grant; FullCompleted's enter after a grant ran).
-                    allowIdleSkip = !deviceCapable,
+                    // ROOT-OPTIONAL: the IDLE "Not now" escape is ALWAYS available.
+                    // The one-tap "Set up everything" is the big inviting primary CTA
+                    // (clearly the recommended action for live tuning) but is never a
+                    // wall — a user can skip into the fully-working app and grant later
+                    // from Settings / Tune.
+                    allowIdleSkip = true,
                 )
                 AdvPhase.ScriptGuide -> AdvancedScriptStep(
                     vendorName = vendorName,
@@ -453,6 +519,44 @@ fun OnboardingScreen(
                 )
                 AdvPhase.Done -> AdvancedDoneStep(
                     grants = grants,
+                    onEnterApp = enterApp,
+                )
+                // ── ROOT route: a Magisk/KernelSU device that hasn't opted in ──
+                // Offer the EXISTING root-mode opt-in (UserPrefs.setRootModeEnabled
+                // via the VM) so the device reaches the ROOT tier instead of NONE.
+                // Once enabled, the capability probe re-classifies it as ROOT and
+                // the auto-route promotes it to the one-tap hero on the next frame.
+                AdvPhase.RootEnable -> RootEnableStep(
+                    rootKind = cap?.rootKind,
+                    rootModeEnabled = rootEnabled,
+                    onEnableRoot = {
+                        viewModel.setRootModeEnabled(true)
+                        // Re-probe so privilege flips to ROOT immediately; the
+                        // auto-route then moves to AutoSetup on the next frame.
+                        advancedUnlockVm.refresh()
+                    },
+                    // The universal HUD/monitoring perms still matter — let the user
+                    // walk them (or, if root is declined, this is their entry).
+                    onEnterApp = enterApp,
+                )
+                // ── SHIZUKU route: surface the EXISTING ShizukuOnboarding flow ──
+                AdvPhase.ShizukuSetup -> ShizukuSetupStep(
+                    state = viewModel.shizukuState,
+                    supportsOnDeviceWirelessPairing =
+                        viewModel.shizukuSupportsOnDeviceWirelessPairing,
+                    wirelessPairingSteps = viewModel.shizukuWirelessPairingSteps,
+                    onGrantPermission = { viewModel.requestShizukuPermission() },
+                    onRefresh = { viewModel.refreshShizuku() },
+                    onEnterApp = enterApp,
+                )
+                // ── PLAIN route: the honest universal terminal ──────────────────
+                AdvPhase.PlainTerminal -> PlainDeviceTerminalStep(
+                    statuses = statuses,
+                    onGrant = { item ->
+                        lastActionAtMs = System.currentTimeMillis()
+                        item.launch(context)
+                    },
+                    onSeeOptions = { advancedPhase = AdvPhase.Ask },
                     onEnterApp = enterApp,
                 )
                 AdvPhase.None -> Unit
@@ -486,15 +590,21 @@ fun OnboardingScreen(
                     stepIdx = 1
                 },
                 onSkipAll = enterApp,
-                // HARD-REQUIRE: hide "Skip setup" on a capable device. There the
-                // only forward action is "Get started", which leads INTO the
-                // (mandatory) grant — never past it. enterApp is gated regardless.
-                showSkip = !deviceCapable,
+                // ROOT-OPTIONAL: "Skip setup" is shown on EVERY device. The app
+                // fully works with no grant (HUD / monitoring / benchmarks); the
+                // grant is offered prominently later (AllDone / one-tap hero) but is
+                // never a wall. No device is hard-locked at the welcome step.
+                showSkip = true,
             )
             allDoneStepIdx -> AllDoneStep(
                 advancedApplicable = advancedApplicable,
                 liveAlreadyActive = liveAlreadyActive,
                 pserverSysfsLive = cap?.pserverSysfsLive == true,
+                // The device's UNIVERSAL route — drives which privilege path the
+                // AllDone step offers (Shizuku / root opt-in / vendor script /
+                // plain terminal) so every device sees ITS real path, not just the
+                // script for everyone.
+                universalRoute = universalRoute,
                 // Honest "everything already granted" off the live readbacks — when
                 // true (e.g. a re-open after a prior one-click setup) the full-setup
                 // hero collapses to a quiet "all set" with no button to re-run.
@@ -504,12 +614,19 @@ fun OnboardingScreen(
                 // setupEverything path) via the live checklist screen — collapses the
                 // old separate overlay/usage/battery/script steps into one click.
                 onSetupEverything = { advancedPhase = AdvPhase.AutoSetup },
-                // Non-PServer fallback still routes through the Ask
-                // explainer → script ladder (unchanged).
-                onSetupAdvanced = { advancedPhase = AdvPhase.Ask },
+                // Route the privilege offer to the device's REAL path:
+                //   Shizuku-installed  → the EXISTING ShizukuOnboarding flow
+                //   root-available     → the root-mode opt-in step
+                //   vendor-script/else → the Ask explainer → script ladder (unchanged)
+                onSetupAdvanced = {
+                    advancedPhase = when (universalRoute) {
+                        UniversalRoute.ShizukuSetup -> AdvPhase.ShizukuSetup
+                        UniversalRoute.RootEnable -> AdvPhase.RootEnable
+                        else -> AdvPhase.Ask
+                    }
+                },
                 onEnterApp = enterApp,
                 onBack = { stepIdx-- },
-                onSkipAdvanced = requestSkip,
             )
             else -> {
                 val itemIdx = stepIdx - 1
@@ -533,14 +650,13 @@ fun OnboardingScreen(
             }
         }
 
-        // Escape hatch on permission steps only — HIDDEN on PServer-capable
-        // devices (the hard-require: there's a privilege path, so the user MUST
-        // grant; this used to be the easiest bypass with a raw markComplete()).
-        // Shown only on genuinely non-capable devices, and routed through the
-        // gated [enterApp] so it can never complete where a grant is required.
-        // Not shown on welcome (has its own button) or all-done (has Finish).
+        // ROOT-OPTIONAL escape hatch on the permission steps — shown on EVERY
+        // device. The app fully works with no grant, so the user can always get
+        // into it; the privilege grant is offered prominently at the AllDone step
+        // (and re-reachable from Settings / Tune), never forced here. Not shown on
+        // welcome (has its own Skip) or all-done (has its own Enter / offer).
         val allDoneStep = items.size + 1
-        if (!deviceCapable && stepIdx in 1 until allDoneStep) {
+        if (stepIdx in 1 until allDoneStep) {
             TextButton(
                 onClick = enterApp,
                 modifier = Modifier.fillMaxWidth(),
@@ -819,29 +935,33 @@ private fun WelcomeStep(
 }
 
 /**
- * Final universal step — all 3 permissions done. Branches the terminal flow
- * on what the capability probe actually found:
+ * Final universal step — all 3 permissions done. Branches the terminal flow on
+ * what the capability probe found, and OFFERS each device its real grant path as
+ * the prominent primary action (ROOT-OPTIONAL — the offer is never a wall):
  *
- *  - [liveAlreadyActive] (PServer-live / root / AYANEO-binder — the common Odin
- *    + RP6 case): the app AUTO-DETECTED the device and live tuning is already
- *    on with ZERO setup. Show a clean "all set, nothing to do" success state.
- *    The HUD/FPS-permissions script is offered only as a clearly-OPTIONAL
- *    enhancement (no scary dialog, easy skip).
- *  - applicable but NOT live: honest "this device needs the one-time setup"
- *    path; [onSkipAdvanced] routes through ScarySkipDialog.
- *  - non-applicable: just let the user in.
+ *  - [liveAlreadyActive] (PServer-live / root / AYANEO-binder): the app
+ *    auto-detected the device and live tuning is already on with ZERO setup —
+ *    a clean "all set" state, with the optional one-tap extras / script offered.
+ *  - not live, [universalRoute] gives the device's path: ShizukuSetup → the
+ *    Shizuku flow; RootEnable → the root opt-in; ScriptLadder → the unlock
+ *    script. Each is the strongly-offered primary CTA with an honest skip.
+ *  - PlainTerminal: the honest "HUD/monitoring work now; live tuning needs a
+ *    privilege path" terminal — never trapped.
+ *
+ * [onSetupAdvanced] routes the offer to the device's path; the "Skip — enter app"
+ * always enters the fully-working app directly (no scary wall).
  */
 @Composable
 private fun AllDoneStep(
     advancedApplicable: Boolean,
     liveAlreadyActive: Boolean,
     pserverSysfsLive: Boolean,
+    universalRoute: UniversalRoute,
     fullSetupAllHeld: Boolean,
     onSetupEverything: () -> Unit,
     onSetupAdvanced: () -> Unit,
     onEnterApp: () -> Unit,
     onBack: () -> Unit,
-    onSkipAdvanced: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -990,7 +1110,10 @@ private fun AllDoneStep(
                 return@Column
             }
 
-            // ── Not live but applicable: honest one-time-setup path (unchanged) ──
+            // ── Not live: route the privilege OFFER to the device's REAL path ────
+            // Every device sees ITS path here — Shizuku, root opt-in, or the vendor
+            // script — instead of the script for everyone. The plain device gets the
+            // honest terminal (no privilege path; HUD/monitoring still work).
             Text(
                 "You're set up!",
                 style = MaterialTheme.typography.titleLarge,
@@ -1002,21 +1125,47 @@ private fun AllDoneStep(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            if (advancedApplicable) {
+            // Route-specific offer copy + CTA label. Each is the device's genuine
+            // path, surfaced honestly.
+            val offer: Triple<String, String, String>? = when (universalRoute) {
+                UniversalRoute.ShizukuSetup -> Triple(
+                    "Unlock live tuning with Shizuku",
+                    "Your device has Shizuku. Pair it once (on-device, no PC needed) to unlock " +
+                        "live CPU/GPU tuning, AutoTDP, and the HUD ± buttons.",
+                    "Set up Shizuku",
+                )
+                UniversalRoute.RootEnable -> Triple(
+                    "Root detected — enable root tuning",
+                    "We detected root (Magisk/KernelSU) on your device. Turn on root mode to unlock " +
+                        "full live CPU/GPU/governor tuning and AutoTDP.",
+                    "Enable root tuning",
+                )
+                UniversalRoute.ScriptLadder -> Triple(
+                    "One more thing — live in-app tuning (this device needs setup)",
+                    "Your device supports instant ± CPU/GPU clock changes straight from the HUD, " +
+                        "AutoTDP, and vendor tuning. This one-time ~2-minute setup is needed to use " +
+                        "those features.",
+                    "Set up live tuning",
+                )
+                // PlainTerminal / AutoSetupHero / Checking → no per-device privilege
+                // offer here (plain device gets the honest note below; the others are
+                // handled by their own branches/auto-route).
+                else -> null
+            }
+
+            if (offer != null) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "One more thing — live in-app tuning (this device needs setup)",
+                            offer.first,
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            "Your device supports instant ± CPU/GPU clock changes straight from the HUD, " +
-                                "AutoTDP, and vendor tuning. This one-time ~2-minute setup is needed " +
-                                "to use those features.",
+                            offer.second,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1025,29 +1174,47 @@ private fun AllDoneStep(
                 Button(
                     onClick = onSetupAdvanced,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Set up live tuning") }
+                ) { Text(offer.third) }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(onClick = onBack) { Text("Back") }
-                    // On applicable-but-not-live devices this routes through
-                    // ScarySkipDialog so the user sees the consequences before skipping.
+                    // ROOT-OPTIONAL: every route's "Skip" enters the fully-working
+                    // app directly (HUD / monitoring / benchmarks need no grant). The
+                    // grant is the prominent primary CTA above and stays re-reachable
+                    // from Settings / Tune — skipping is honest, never a wall. (The
+                    // ScarySkipDialog's "read-only" framing is obsolete under this
+                    // philosophy, so we no longer route Skip through it.)
                     OutlinedButton(
-                        onClick = onSkipAdvanced,
+                        onClick = onEnterApp,
                         modifier = Modifier.weight(1f),
                     ) { Text("Skip — enter app") }
                 }
             } else {
+                // ── PLAIN device — the honest terminal ──────────────────────────
+                // No privilege path exists. The universal perms already gave the HUD
+                // + monitoring; be honest that live tuning needs root / Shizuku / a
+                // supported handheld, and point the user at the options. NEVER trapped.
+                AdvNoteCard(
+                    "Live CPU/GPU tuning needs a privilege path — root, Shizuku, or a supported " +
+                        "handheld. The HUD overlay, FPS & performance monitoring, benchmarks, " +
+                        "profiles, and insights all work on your device right now.",
+                )
+                Button(
+                    onClick = onEnterApp,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Enter app") }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(onClick = onBack) { Text("Back") }
-                    Button(
-                        onClick = onEnterApp,
+                    // Honest "how to unlock more" — opens the same options explainer.
+                    OutlinedButton(
+                        onClick = onSetupAdvanced,
                         modifier = Modifier.weight(1f),
-                    ) { Text("Enter app") }
+                    ) { Text("How to unlock tuning") }
                 }
             }
         }
@@ -1961,6 +2128,306 @@ private fun AdvancedDoneStep(
                 )
             }
             Button(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) { Text("Enter app") }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// UNIVERSAL device steps (wire the orphaned root / Shizuku / plain paths)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * ROOT route — a device with su/Magisk/KernelSU present but root mode NOT yet
+ * enabled. We surface the EXISTING root-mode opt-in (UserPrefs.setRootModeEnabled
+ * via the VM) so the device reaches the ROOT tier instead of falling to NONE.
+ *
+ * Root is opt-in by design, so declining is honest (not a trap): "Not now" enters
+ * the app with the universal HUD/monitoring features still working.
+ */
+@Composable
+private fun RootEnableStep(
+    rootKind: io.github.mayusi.calibratesoc.data.capability.RootKind?,
+    rootModeEnabled: Boolean,
+    onEnableRoot: () -> Unit,
+    onEnterApp: () -> Unit,
+) {
+    val rootName = when (rootKind) {
+        io.github.mayusi.calibratesoc.data.capability.RootKind.MAGISK -> "Magisk"
+        io.github.mayusi.calibratesoc.data.capability.RootKind.KERNELSU -> "KernelSU"
+        else -> "root"
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            AdvCardHeader(Icons.Outlined.Bolt, "Root detected — enable root tuning", "Full live tuning")
+            Text(
+                "We detected $rootName on your device. Turn on root mode and Calibrate gets the " +
+                    "strongest tuning path: live CPU/GPU clocks and governors, AutoTDP, and the HUD ± " +
+                    "buttons — applied instantly, no script, no reboot.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            AdvNoteCard(
+                "Root mode is off by default and stays off until you enable it here. You can turn it " +
+                    "back off any time in Settings. Every root command passes the built-in safety gate.",
+            )
+            if (rootModeEnabled) {
+                // Already flipped — the probe will promote the device to ROOT and the
+                // auto-route moves it to the one-tap hero on the next frame. Show a
+                // brief confirmation so the screen isn't blank during that beat.
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        "Root mode enabled — finishing setup…",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+            } else {
+                Button(
+                    onClick = onEnableRoot,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
+                ) {
+                    Icon(Icons.Outlined.Bolt, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Enable root tuning",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            // Root is opt-in: declining is honest, never a trap.
+            OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                Text("Not now — enter app")
+            }
+        }
+    }
+}
+
+/**
+ * SHIZUKU route — surfaces the EXISTING
+ * [io.github.mayusi.calibratesoc.data.shizuku.ShizukuOnboarding] state machine as
+ * an onboarding step. This composable is pure presentation over that machine's
+ * [OnboardingState]; it does NOT reimplement Shizuku detection or permission
+ * logic — every state/button delegates back to the VM, which delegates to the
+ * existing singleton.
+ *
+ * States surfaced honestly:
+ *   NOT_INSTALLED        → explain Shizuku + an install pointer
+ *   INSTALLED_STOPPED    → the on-device wireless-debugging pairing guide
+ *   RUNNING_NO_PERMISSION→ the "Grant Shizuku permission" button (real requestPermission)
+ *   GRANTED              → success; live tuning enabled
+ *   GRANTED_NO_WRITES    → the HONEST "this kernel blocks shell writes" disclosure
+ */
+@Composable
+private fun ShizukuSetupStep(
+    state: kotlinx.coroutines.flow.StateFlow<io.github.mayusi.calibratesoc.data.shizuku.OnboardingState>,
+    supportsOnDeviceWirelessPairing: Boolean,
+    wirelessPairingSteps: List<io.github.mayusi.calibratesoc.data.shizuku.GuideStep>,
+    onGrantPermission: () -> Unit,
+    onRefresh: () -> Unit,
+    onEnterApp: () -> Unit,
+) {
+    val shizukuState by state.collectAsState()
+    // Re-evaluate on resume so returning from Shizuku's pairing/permission UI
+    // updates the state without a manual tap.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) onRefresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            AdvCardHeader(Icons.Outlined.Bolt, "Set up Shizuku", "Live tuning without root")
+            when (shizukuState) {
+                io.github.mayusi.calibratesoc.data.shizuku.OnboardingState.NOT_INSTALLED -> {
+                    Text(
+                        "Shizuku lets Calibrate run privileged tuning commands without root. Install " +
+                            "Shizuku (Play Store / F-Droid / GitHub), then come back — we'll walk you " +
+                            "through pairing it on-device (no PC needed on Android 11+).",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AdvNoteCard(
+                        "After installing Shizuku, return here and tap Refresh — this step will advance " +
+                            "to the pairing guide automatically.",
+                    )
+                    Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+                        Text("I installed Shizuku — refresh")
+                    }
+                }
+                io.github.mayusi.calibratesoc.data.shizuku.OnboardingState.INSTALLED_STOPPED -> {
+                    Text(
+                        if (supportsOnDeviceWirelessPairing)
+                            "Shizuku is installed but not running. Pair it once using wireless debugging " +
+                                "— entirely on-device, no computer required:"
+                        else
+                            "Shizuku is installed but not running. On this Android version you'll need a " +
+                                "one-time PC connection to start it (adb). Follow Shizuku's own guide, then " +
+                                "return here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (supportsOnDeviceWirelessPairing) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            wirelessPairingSteps.forEachIndexed { i, step ->
+                                NumberedStep(i + 1, "${step.title} — ${step.detail}")
+                            }
+                        }
+                    }
+                    Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+                        Text("I started Shizuku — refresh")
+                    }
+                }
+                io.github.mayusi.calibratesoc.data.shizuku.OnboardingState.RUNNING_NO_PERMISSION -> {
+                    Text(
+                        "Shizuku is running. Grant Calibrate permission to use it for live tuning.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = onGrantPermission,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                    ) {
+                        Icon(Icons.Outlined.Bolt, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Grant Shizuku permission",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                io.github.mayusi.calibratesoc.data.shizuku.OnboardingState.GRANTED -> {
+                    SetupCelebration(
+                        title = "Shizuku connected",
+                        body = "Live tuning is enabled through Shizuku — CPU/GPU clocks, governors, and " +
+                            "AutoTDP work where your kernel allows it.",
+                    )
+                }
+                io.github.mayusi.calibratesoc.data.shizuku.OnboardingState.GRANTED_NO_WRITES -> {
+                    // HONEST disclosure — preserved exactly as the state machine intends.
+                    AdvCardHeader(Icons.Outlined.Info, "Shizuku connected — limited on this device")
+                    Text(
+                        "Shizuku is connected, but this device's kernel (vendor SELinux policy) blocks " +
+                            "shell writes to the CPU/GPU tuning nodes. Monitoring, the HUD, benchmarks, " +
+                            "and vendor settings still work — but live ± clock tuning isn't available " +
+                            "here. That's a kernel lock, not a setup error.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            // Enter app is always available — Shizuku is offered, never forced.
+            OutlinedButton(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) {
+                Text("Enter app")
+            }
+        }
+    }
+}
+
+/**
+ * PLAIN device terminal — a stock phone/tablet with no PServer / root / Shizuku /
+ * vendor runner. Honest by construction: the universal perms (overlay / usage /
+ * battery) make the HUD + monitoring work on ANY device, and we tell the user
+ * plainly what they get and what unlocking more would take. The door is ALWAYS
+ * open (canComplete is true for this route) — a plain device is NEVER trapped.
+ */
+@Composable
+private fun PlainDeviceTerminalStep(
+    statuses: Map<String, Boolean>,
+    onGrant: (SetupItem) -> Unit,
+    onSeeOptions: () -> Unit,
+    onEnterApp: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            AdvCardHeader(Icons.Outlined.CheckCircle, "You're ready to go")
+            Text(
+                "Calibrate works on your device for the HUD overlay, FPS & performance monitoring, " +
+                    "benchmarks, profiles, and insights. Grant the permissions below so the HUD and " +
+                    "monitoring run reliably.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // The universal perms — system-dialog grants that work on ANY device.
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    for (item in AllSetupItems) {
+                        val done = statuses[item.id] == true
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Icon(
+                                if (done) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (done) MaterialTheme.colorScheme.tertiary
+                                    else MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(
+                                item.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (!done) {
+                                TextButton(onClick = { onGrant(item) }) { Text("Grant") }
+                            }
+                        }
+                    }
+                }
+            }
+            AdvNoteCard(
+                "Live CPU/GPU tuning needs a privilege path — root, Shizuku, or a supported handheld. " +
+                    "Want to unlock it? Here's how.",
+            )
+            Button(onClick = onEnterApp, modifier = Modifier.fillMaxWidth()) { Text("Enter app") }
+            OutlinedButton(onClick = onSeeOptions, modifier = Modifier.fillMaxWidth()) {
+                Text("How to unlock live tuning")
+            }
         }
     }
 }
