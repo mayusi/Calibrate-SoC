@@ -134,16 +134,23 @@ class TuneViewModel @Inject constructor(
     }
 
     /** Full preset list — community + generic algorithmic — as produced
-     *  by [PresetGenerator]. Re-derived on each refresh because the OPP
-     *  table can change if the user enables core-online tuning (Phase 4
-     *  follow-up). */
-    val presets: StateFlow<List<Preset>> = MutableStateFlow(emptyList<Preset>())
-        .also { sink ->
-            viewModelScope.launch {
-                val report = capabilityProbe.refresh()
-                sink.value = presetGenerator.presetsFor(report)
-            }
-        }.asStateFlow()
+     *  by [PresetGenerator]. Derived REACTIVELY from [capability]: every time
+     *  the capability report changes (after apply()/applyPreset() call
+     *  capabilityProbe.refresh(), or on a dock/redetect event) the preset
+     *  list AND its VerificationTier badges recompute against the device's
+     *  actual current state — they never go stale relative to the kernel. */
+    val presets: StateFlow<List<Preset>> = capability
+        .map { report -> report?.let(presetGenerator::presetsFor) ?: emptyList() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    init {
+        // Warm the capability report once so the reactive [presets] flow (and
+        // the Tune screen's "PROBING DEVICE…" gate) settles on first open.
+        // Previously the (one-shot) presets builder did this implicitly; now
+        // that presets is purely reactive the warm is explicit. refresh()
+        // populates capabilityProbe.report, which drives presets to recompute.
+        viewModelScope.launch { capabilityProbe.refresh() }
+    }
 
     fun setEdit(policyId: Int, edit: PolicyEdit) {
         _pending.value = _pending.value.toMutableMap().apply { put(policyId, edit) }

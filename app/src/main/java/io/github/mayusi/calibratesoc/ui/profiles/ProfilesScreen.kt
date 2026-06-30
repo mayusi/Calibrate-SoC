@@ -338,7 +338,9 @@ fun ProfilesScreen(viewModel: ProfilesViewModel = hiltViewModel()) {
             gameDisplayName = viewModel.resolveAppLabel(pkg).ifBlank { pkg },
             bundle = bundle,
             profile = profile,
-            currentDeviceKey = null,
+            // Real running-device key from the capability report — drives the
+            // import-time device-mismatch warning + guard (was hardcoded null).
+            currentDeviceKey = capability?.device?.knownHandheldKey,
             onDone = { gameTuneApp = null },
         )
     }

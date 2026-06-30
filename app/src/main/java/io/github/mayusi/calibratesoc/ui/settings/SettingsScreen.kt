@@ -81,6 +81,7 @@ import io.github.mayusi.calibratesoc.ui.components.AlertType
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
+import io.github.mayusi.calibratesoc.ui.components.ArsenalText
 import io.github.mayusi.calibratesoc.ui.components.SectionCard
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
@@ -355,7 +356,10 @@ fun SettingsScreen(
                         if (rootDetected) {
                             "Magisk / KernelSU detected. Enable to let Calibrate SoC use it for direct kernel writes (custom MHz caps without the script step)."
                         } else {
-                            "No su binary found. Install Magisk or KernelSU first if you want this tier."
+                            "No su binary found — root is optional, not required. This device can still tune via " +
+                                "Shizuku, a vendor binder (AYANEO / Retroid), PServer, or the Generate-script path " +
+                                "from the PRIVILEGE TIER panel above. Install Magisk or KernelSU only if you " +
+                                "specifically want the root tier."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1042,7 +1046,7 @@ private fun SegmentedToggle(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bgColor = androidx.compose.ui.graphics.Color(0xFF0C0C10)
+    val bgColor = ArsenalText.Tile
     val accentColor = AccentBar.Blue
     Row(
         modifier = modifier
@@ -1168,7 +1172,8 @@ private fun ExperimentalCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
         }
         Text(
             "Unlocks the HUD ± clock steppers and other features that " +
-                "can put the device in a bad state if used without root. " +
+                "need a privilege path — root, Shizuku, PServer, or the generated script — " +
+                "to actually take effect, and can put the device in a bad state if misused. " +
                 "Anything that happens with experimental features ON is on you, not the app.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

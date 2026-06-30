@@ -8,8 +8,6 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyAdvisor
 import io.github.mayusi.calibratesoc.data.efficiency.EfficiencyPlan
 import io.github.mayusi.calibratesoc.data.efficiency.EstimateSource
-import io.github.mayusi.calibratesoc.data.monitor.BatteryEstimate
-import io.github.mayusi.calibratesoc.data.monitor.EstimateBasis
 import io.github.mayusi.calibratesoc.data.monitor.MonitorService
 import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.presets.Preset
@@ -64,20 +62,13 @@ class IntelligencePanelViewModel @Inject constructor(
 ) : ViewModel() {
 
     // ── Battery estimate ─────────────────────────────────────────────────────
-
-    /**
-     * Live battery time-to-empty estimate. Collected fresh from the monitor
-     * service so this panel's own ViewModel doesn't depend on DashboardViewModel's
-     * internal state (avoids cross-ViewModel coupling). The DashboardViewModel and
-     * this ViewModel both collect from the same singleton [MonitorService], so the
-     * underlying telemetry is shared, not duplicated.
-     *
-     * This field mirrors the type and honesty contract of
-     * [DashboardViewModel.batteryEstimate]: basis is always set, hoursRemaining
-     * is null when basis is not LIVE_DRAW.
-     */
-    private val _batteryEstimate = MutableStateFlow<BatteryEstimate?>(null)
-    val batteryEstimate: StateFlow<BatteryEstimate?> = _batteryEstimate.asStateFlow()
+    //
+    // NOTE: this panel does NOT own a batteryEstimate StateFlow. The battery
+    // time-to-empty figure is computed by DashboardViewModel (which owns the
+    // BatteryChargeReader binder read) and passed DOWN into IntelligencePanelCard
+    // as a composable parameter from DashboardScreen — see the init block below.
+    // A duplicate StateFlow here was dead (never assigned, never collected) and
+    // was removed to avoid implying a second, divergent source of truth.
 
     // ── Thermal headroom ─────────────────────────────────────────────────────
 

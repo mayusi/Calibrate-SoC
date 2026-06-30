@@ -47,10 +47,11 @@ sealed class Destination(val route: String, val label: String) {
 
     // ── Off-nav deep-links ───────────────────────────────────────────
     data object DeviceInfo : Destination("device_info", "Device")
-    /** Per-game tune share / import / community hub — pushed from the per-app bundle editor. */
-    data object GameTunes : Destination("game_tunes/{packageName}", "Game Tunes") {
-        fun route(packageName: String) = "game_tunes/${packageName}"
-    }
+    // NOTE: There is intentionally no GameTunes destination. The per-game tune
+    // share/import/community hub is opened inline from ProfilesScreen via local
+    // state (gameTuneApp = pkg), never through the nav graph. The former
+    // Destination.GameTunes + its composable had zero navigate() call sites and
+    // were removed as dead routing.
     /** Session detail / timeline — sub-screen of Sessions. */
     data object SessionDetail : Destination("session_detail/{sessionId}", "Session") {
         fun route(id: Long) = "session_detail/$id"
@@ -81,7 +82,10 @@ sealed class Destination(val route: String, val label: String) {
                 AutoTdp.route,
                 Profiles.route,
                 TuneHistory.route,
-                GameTunes.route,
+                // The Game Tunes screen has no nav Destination (it's reached via
+                // Profiles' local state), but it lives under the Tune section, so its
+                // route pattern must still highlight the Tune tab in the bottom bar.
+                "game_tunes/{packageName}",
             )
 
         /** Routes that belong to the Performance hub. */

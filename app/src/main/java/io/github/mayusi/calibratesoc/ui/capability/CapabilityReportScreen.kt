@@ -32,8 +32,6 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.CpuPolicyProbe
 import io.github.mayusi.calibratesoc.data.capability.FanProbe
 import io.github.mayusi.calibratesoc.data.capability.GpuProbe
-import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
-import io.github.mayusi.calibratesoc.data.capability.ShizukuStatus
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneProbe
 import io.github.mayusi.calibratesoc.data.capability.VendorAppPresence
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapter
@@ -130,7 +128,7 @@ private fun ReadyPane(
 
         item { DeviceCard(report) }
         item { SoCCard(report) }
-        item { PrivilegeCard(report.privilege, report.shizuku, report.rootKind.name) }
+        item { PrivilegeCard(report) }
         if (adapter != null) item { AdapterCard(adapter) }
         items(report.cpuPolicies) { CpuPolicyCard(it) }
         report.gpu?.let { item { GpuCard(it) } }
@@ -159,10 +157,28 @@ private fun SoCCard(report: CapabilityReport) = SectionCard("SoC") {
 }
 
 @Composable
-private fun PrivilegeCard(tier: PrivilegeTier, shizuku: ShizukuStatus, rootKind: String) =
+private fun PrivilegeCard(report: CapabilityReport) {
+    val shizuku = report.shizuku
+    val rootKind = report.rootKind.name
     SectionCard("Privilege tier") {
-        LabelValue("Tier", tier.name)
+        LabelValue("Tier", report.privilege.name)
         LabelValue("Root", if (rootKind == "NONE") "no" else rootKind)
+        // ── Live write-path round-trip results ──────────────────────────────
+        // This is the diagnostic screen — surface whether the actual live-write
+        // bridges round-tripped, so a tester can confirm the binder/PServer probe
+        // succeeded on real hardware (these flags drive whether Apply works, and
+        // can be true while the Tier above still reads NONE/VENDOR_SETTINGS).
+        LabelValue("PServer live", yesNo(report.pserverSysfsLive))
+        LabelValue("AYANEO binder live", yesNo(report.ayaneoBinderLive))
+        LabelValue("Direct sysfs writable", yesNo(report.sysfsDirectlyWritable))
+        LabelValue(
+            "SELinux",
+            when (report.selinuxEnforcing) {
+                true -> "enforcing"
+                false -> "permissive"
+                null -> "unknown"
+            },
+        )
         LabelValue("Shizuku installed", shizuku.installed.toString())
         LabelValue("Shizuku running", shizuku.running.toString())
         LabelValue("Shizuku perm granted", shizuku.permissionGranted.toString())
@@ -175,6 +191,9 @@ private fun PrivilegeCard(tier: PrivilegeTier, shizuku: ShizukuStatus, rootKind:
             },
         )
     }
+}
+
+private fun yesNo(b: Boolean): String = if (b) "yes" else "no"
 
 @Composable
 private fun AdapterCard(adapter: DeviceAdapter) = SectionCard("Matched device adapter") {

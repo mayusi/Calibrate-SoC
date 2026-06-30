@@ -622,7 +622,24 @@ fun OnboardingScreen(
                     advancedPhase = when (universalRoute) {
                         UniversalRoute.ShizukuSetup -> AdvPhase.ShizukuSetup
                         UniversalRoute.RootEnable -> AdvPhase.RootEnable
-                        else -> AdvPhase.Ask
+                        // PLAIN device (no privilege path): the honest terminal —
+                        // universal HUD/monitoring perms + "live tuning needs a
+                        // privilege path" note. Previously fell to AdvPhase.Ask,
+                        // which showed vendor-script copy ("run script via
+                        // <vendor>") for a script runner this device doesn't have —
+                        // dead-ending PlainDeviceTerminalStep. (0.3.2 wiring gap.)
+                        UniversalRoute.PlainTerminal -> AdvPhase.PlainTerminal
+                        // VENDOR-SCRIPT device: the Ask explainer → script ladder is
+                        // the correct, completable flow (advancedApplicable is true,
+                        // so AdvancedAskStep → ScriptGuide reaches the real unlock
+                        // script — and the live-already shortcut still applies).
+                        UniversalRoute.ScriptLadder -> AdvPhase.Ask
+                        // Live one-tap hero (PServer / AYANEO / enabled root): the
+                        // self-grant trust prompt, not the script ladder.
+                        UniversalRoute.AutoSetupHero -> AdvPhase.AutoSetup
+                        // Probe still in flight — Ask is the safe interactive entry;
+                        // a real route lands on the next frame.
+                        UniversalRoute.Checking -> AdvPhase.Ask
                     }
                 },
                 onEnterApp = enterApp,

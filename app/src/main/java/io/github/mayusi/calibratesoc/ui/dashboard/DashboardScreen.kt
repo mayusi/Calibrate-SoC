@@ -43,7 +43,9 @@ import io.github.mayusi.calibratesoc.data.autotdp.AutoTdpStatus
 import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
 import io.github.mayusi.calibratesoc.data.capability.DevfreqDeviceProbe
 import io.github.mayusi.calibratesoc.data.capability.PrivilegeTier
+import io.github.mayusi.calibratesoc.ui.capability.chipLabel
 import io.github.mayusi.calibratesoc.ui.capability.tierAccent
+import io.github.mayusi.calibratesoc.data.vendor.VendorBranding
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneExtras
 import io.github.mayusi.calibratesoc.data.capability.ThermalZoneProbe
 import io.github.mayusi.calibratesoc.data.insights.GameRecommendation
@@ -427,10 +429,15 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
         )
 
         // Tier + device chip row
-        val tier = capability?.privilege ?: PrivilegeTier.NONE
+        // Use the SAME branded, live-flag-aware label as TuneScreen so the pill
+        // is consistent across screens (raw enum "VENDOR_SETTINGS"/"NONE" was
+        // wrong on AYANEO/vendor + ignored the live write-path flags). chipLabel
+        // + tierAccent both consult pserverSysfsLive / ayaneoBinderLive first.
+        val vb = VendorBranding.of(capability)
+        val tierLabel = capability?.chipLabel(vb) ?: PrivilegeTier.NONE.name
         val tierAccent = capability?.tierAccent() ?: AccentBar.Neutral
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            StatusPill(text = tier.name, accent = tierAccent)
+            StatusPill(text = tierLabel, accent = tierAccent)
             capability?.device?.knownHandheldKey?.let { key ->
                 StatusPill(text = key, accent = AccentBar.Neutral)
             }

@@ -47,7 +47,7 @@ class HudPrefs @Inject constructor(
         it[KEY_ENABLED_POLICIES]?.mapNotNull(String::toIntOrNull)?.toSet() ?: emptySet()
     }
 
-    /** 0 = small (~220dp), 1 = medium (~270dp), 2 = large (~330dp). Default 1. */
+    /** 0 = small (300dp), 1 = medium (330dp), 2 = large (372dp). Default 1. See HudDisplayUtils.hudWidthDp(). */
     val hudSizeIndex: Flow<Int> = context.hudDataStore.data.map { (it[KEY_HUD_SIZE_INDEX] ?: 1).coerceIn(0, 2) }
 
     /** Overlay alpha, 0.0..1.0. Default 0.94. */

@@ -122,6 +122,15 @@ class AutoTdpViewModel @Inject constructor(
     ) { report, state -> resolveRung(report, state, primeFreqLiveWritable(report)) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, AutoTdpRung.ADVISORY)
 
+    /** The CONCRETE live mechanism backing the LIVE rung (PServer / AYANEO binder / root /
+     *  direct sysfs / Shizuku), derived from the SAME report flags + live-write gate as
+     *  [rung] — exposed alongside [rung] (not flattened into it) so the rung banner can
+     *  describe the device's REAL path honestly instead of generic "PServer/sysfs/root"
+     *  copy. [LiveMechanism.NONE] when not LIVE. */
+    val liveMechanism: StateFlow<LiveMechanism> = capabilityProbe.report
+        .map { report -> resolveLiveMechanism(report, primeFreqLiveWritable(report)) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, LiveMechanism.NONE)
+
     // ── Profile picker ────────────────────────────────────────────────────────
 
     private val _selectedProfile = MutableStateFlow(AutoTdpProfile.BALANCED)
@@ -855,6 +864,42 @@ class AutoTdpViewModel @Inject constructor(
         }
 
         /**
+         * Pure derivation of the CONCRETE live mechanism backing the LIVE rung, so the
+         * rung banner can describe the real path instead of the generic "PServer, direct
+         * sysfs, or root" copy. Returns [LiveMechanism.NONE] whenever the prime cap is not
+         * live-writable (rung is SCRIPT/ADVISORY) or the report isn't ready.
+         *
+         * Precedence MIRRORS the app-wide live-flag order used by
+         * `ui.capability.CapabilityUi.chipLabel`/`explainerText`:
+         *   pserverSysfsLive → ayaneoBinderLive → ROOT → sysfsDirectlyWritable → SHIZUKU.
+         * Keeping the same order means the AutoTDP rung banner agrees with the capability
+         * tier chip on every device.
+         *
+         * HONESTY: [primeFreqLiveWritable] gates this — we only ever name a mechanism when
+         * the device is genuinely LIVE, and each branch keys on a probe-confirmed flag, so
+         * a binder-live AYANEO can never fall through to a PServer/root/sysfs description.
+         *
+         * @param primeFreqLiveWritable The honest live-writability of the prime cpufreq
+         *   node (from [WriterRegistry.isLiveWritable]) — the same gate [resolveRung] uses.
+         */
+        fun resolveLiveMechanism(
+            report: CapabilityReport?,
+            primeFreqLiveWritable: Boolean,
+        ): LiveMechanism {
+            if (report == null || !primeFreqLiveWritable) return LiveMechanism.NONE
+            return when {
+                report.pserverSysfsLive -> LiveMechanism.PSERVER_ROOT
+                report.ayaneoBinderLive -> LiveMechanism.AYANEO_BINDER
+                report.privilege == PrivilegeTier.ROOT -> LiveMechanism.GENERIC_ROOT
+                report.sysfsDirectlyWritable -> LiveMechanism.DIRECT_SYSFS
+                report.privilege == PrivilegeTier.SHIZUKU -> LiveMechanism.SHIZUKU
+                // Live per the per-node probe but via a path with no dedicated flag
+                // (e.g. a generic device the probe confirmed) — describe it as direct.
+                else -> LiveMechanism.DIRECT_SYSFS
+            }
+        }
+
+        /**
          * Returns true when this device *could* reach the LIVE rung via the AYN
          * PServer binder after the one-time unlock, but has not yet done so.
          *
@@ -1086,6 +1131,38 @@ enum class AutoTdpRung {
     SCRIPT,
     /** Zero privilege: monitor + advice only. */
     ADVISORY,
+}
+
+/**
+ * The CONCRETE live-write mechanism backing the LIVE rung on THIS device.
+ *
+ * The [AutoTdpRung] enum flattens every live path into a single LIVE value, which is
+ * correct for the rung gate but is NOT enough to describe the rung HONESTLY in the UI:
+ * an AYANEO Pocket DS that is live ONLY through its vendor binder (no PServer, no root,
+ * no direct sysfs) must never read banner copy that claims "PServer, direct sysfs, or
+ * root". This enum preserves the which-mechanism distinction the VM already computes
+ * from the report flags, so the rung banner can name the real path.
+ *
+ * Precedence mirrors the app-wide live-flag order (see
+ * `ui.capability.CapabilityUi.chipLabel/explainerText`): PServer → AYANEO binder → ROOT
+ * → direct sysfs → Shizuku. NONE means no live path (rung is SCRIPT/ADVISORY).
+ *
+ * HONESTY: each branch is only ever taken when its probe-confirmed flag is genuinely
+ * set — never inferred from the privilege enum alone.
+ */
+enum class LiveMechanism {
+    /** Cross-vendor PServer root runner (AYN Odin + Retroid RP6) — [CapabilityReport.pserverSysfsLive]. */
+    PSERVER_ROOT,
+    /** AYANEO's exported AyaAidlService vendor binder — [CapabilityReport.ayaneoBinderLive]. */
+    AYANEO_BINDER,
+    /** Magisk/KernelSU root, opted in — [PrivilegeTier.ROOT]. */
+    GENERIC_ROOT,
+    /** Unlock-script chmod'd cpufreq nodes — [CapabilityReport.sysfsDirectlyWritable]. */
+    DIRECT_SYSFS,
+    /** Shizuku-shell sysfs writes the per-node probe confirmed — [PrivilegeTier.SHIZUKU]. */
+    SHIZUKU,
+    /** No live write path on this device — rung is SCRIPT or ADVISORY. */
+    NONE,
 }
 
 /** UI state for the efficiency curve sweep. */

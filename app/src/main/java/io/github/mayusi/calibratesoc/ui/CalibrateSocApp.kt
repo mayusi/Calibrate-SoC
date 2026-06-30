@@ -51,15 +51,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import io.github.mayusi.calibratesoc.data.update.UpdateInfo
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.ui.capability.CapabilityReportScreen
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.dashboard.DashboardScreen
 import io.github.mayusi.calibratesoc.ui.hardware.HardwareScreen
 import io.github.mayusi.calibratesoc.ui.performance.PerformanceHubScreen
-import io.github.mayusi.calibratesoc.ui.profiles.GameTuneScreen
-import io.github.mayusi.calibratesoc.ui.profiles.PerAppBundleViewModel
 import io.github.mayusi.calibratesoc.ui.session.AppStatsScreen
 import io.github.mayusi.calibratesoc.ui.session.SessionDetailScreen
 import io.github.mayusi.calibratesoc.ui.settings.SettingsScreen
@@ -243,32 +240,12 @@ fun CalibrateSocApp(
                     )
                 }
 
-                // ── 5. Game Tunes hub — per-game share / import / community ──
-                composable(Destination.GameTunes.route) { backStackEntry ->
-                    val packageName = backStackEntry.arguments
-                        ?.getString("packageName") ?: return@composable
-                    // Resolve the live bundle and profile for this game so
-                    // GameTuneScreen has context to generate a share code.
-                    val bundleVm: PerAppBundleViewModel = hiltViewModel()
-                    val store by bundleVm.store.collectAsStateWithLifecycle()
-                    val bundle = store.perAppBundles[packageName]
-                    val profile = bundle?.profileId?.let { id ->
-                        store.profiles.firstOrNull { it.id == id }
-                    }
-                    val pm = LocalContext.current.packageManager
-                    val gameDisplayName = runCatching {
-                        pm.getApplicationInfo(packageName, 0)
-                            .let { pm.getApplicationLabel(it).toString() }
-                    }.getOrDefault(packageName)
-                    GameTuneScreen(
-                        packageName = packageName,
-                        gameDisplayName = gameDisplayName,
-                        bundle = bundle,
-                        profile = profile,
-                        currentDeviceKey = null,
-                        onDone = { nav.popBackStack() },
-                    )
-                }
+                // NOTE: The Game Tunes hub has NO nav-graph entry. It is opened
+                // inline from ProfilesScreen via local state (gameTuneApp = pkg),
+                // which is the single live path. A composable(Destination.GameTunes)
+                // entry used to live here but had ZERO navigate() call sites — it
+                // was unreachable dead routing and has been removed (along with the
+                // Destination.GameTunes object). See ProfilesScreen for the real path.
 
                 // ── 6. Off-nav deep-link screens ──────────────────────────
                 composable(Destination.SessionDetail.route) { backStackEntry ->

@@ -10,6 +10,7 @@ import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderCli
 import io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanBinderClient
 import io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanConfig
 import io.github.mayusi.calibratesoc.data.util.readSysfsString
+import io.github.mayusi.calibratesoc.data.vendor.readFanMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -438,22 +439,38 @@ class FanCurveController @Inject constructor(
     }
 
     /**
-     * RETROID live readout: read the current fan value over the FanProvider binder
-     * (txn 2) — the SAME ~25000 scale the speed uses. We put the raw value in
-     * [LiveFanReading.dutyRaw] and [RetroidFanConfig.SPEED_MAX] in
-     * [LiveFanReading.periodRaw] so the existing [LiveFanReading.dutyPct] getter
-     * (`duty*100/period`) renders a meaningful percentage with no duplicate math.
-     * Retroid has no fan_mode node we read here, so [LiveFanReading.fanMode] is null.
+     * RETROID live readout — HONEST.
+     *
+     * The FanProvider binder (txn 2 `b()`) returns the configured custom-SPEED SETPOINT
+     * on the ~25000 scale (it returned the stock 25000 on the live probe), NOT the
+     * governor's live actual fan duty — Retroid's vendor service exposes no live-duty
+     * node. So we must NOT present `setpoint/SPEED_MAX` as the live "Fan duty": at idle
+     * the fan runs at the Smart-mode governor's ~20% while the setpoint reads 25000,
+     * which would otherwise show a fabricated 100%.
+     *
+     * Instead we:
+     *   - put the setpoint in [LiveFanReading.dutyRaw] and [RetroidFanConfig.SPEED_MAX]
+     *     in [LiveFanReading.periodRaw] so [LiveFanReading.dutyPct] is the setpoint as a
+     *     percent of full scale, and
+     *   - flag [LiveFanReading.dutyIsSetpoint] = true so the UI labels it "Custom speed
+     *     (setpoint)" — never the live actual duty — and explains that in Smart/auto the
+     *     governor controls the fan and the live duty isn't exposed, and
+     *   - resolve the REAL fan mode from the vendor's `fan_mode` Settings.System key
+     *     (public read, no root) so "Fan mode unknown" becomes the honest current mode.
      *
      * NOTE: this is a suspend binder call (not a sysfs read), so unlike the AYANEO/Odin
      * helpers it is itself suspending. Null fields on read failure (honest — no fake 0).
      */
     private suspend fun readLiveFanDutyRetroid(): LiveFanReading {
         val raw = runCatching { retroidBinder.readFanValue() }.getOrNull()
+        val mode = runCatching {
+            readFanMode(context.contentResolver, RETROID_FAN_MODE_KEY)?.trim()?.toIntOrNull()
+        }.getOrNull()
         return LiveFanReading(
             dutyRaw = raw,
             periodRaw = raw?.let { RetroidFanConfig.SPEED_MAX },
-            fanMode = null,
+            fanMode = mode,
+            dutyIsSetpoint = true,
         )
     }
 
@@ -518,6 +535,12 @@ class FanCurveController @Inject constructor(
          *  node the AYANEO writer matches for fan verification. */
         const val AYANEO_PWM1_PATH =
             "/sys/devices/platform/soc/soc:pwm-fan/hwmon/hwmon0/pwm1"
+
+        /** Retroid's vendor `fan_mode` Settings.System key (owned by
+         *  com.rp.gameassistant). Public read (no root) — lets the live readout
+         *  resolve the honest current mode (Off/Quiet/Smart/Sport/Custom) instead
+         *  of "Fan mode unknown". Mode ints map via [retroidFanModeName]. */
+        const val RETROID_FAN_MODE_KEY = "fan_mode"
     }
 }
 
@@ -554,8 +577,25 @@ data class LiveFanReading(
     val dutyRaw: Int?,
     val periodRaw: Int?,
     val fanMode: Int?,
+    /**
+     * HONESTY (Retroid): on Odin/AYANEO [dutyRaw]/[periodRaw] are a LIVE duty over a
+     * period (gpio duty, or pwm1/255), so [dutyPct] is the actual fan duty. On Retroid
+     * the only readable value (FanProvider txn 2) is the configured custom-SPEED
+     * SETPOINT on the ~25000 scale — NOT the live actual fan duty, which the vendor
+     * service does not expose. When true, [dutyPct] is the setpoint as a percent of
+     * full scale (so the UI can label it "Custom speed (setpoint)" instead of falsely
+     * claiming it is the live fan duty). Default false (Odin/AYANEO unchanged).
+     */
+    val dutyIsSetpoint: Boolean = false,
 ) {
-    /** Duty as a 0..100 percentage when both nodes are readable, else null. */
+    /**
+     * Duty as a 0..100 percentage when both nodes are readable, else null.
+     *
+     * On Odin/AYANEO this is the live actual fan duty. On Retroid (`dutyIsSetpoint`)
+     * it is the configured custom-speed SETPOINT as a percent of full scale — the
+     * vendor binder cannot read the governor's live actual duty, so this honestly
+     * reflects only what the setpoint is, NOT the real fan speed in Smart/auto mode.
+     */
     val dutyPct: Int?
         get() {
             val p = periodRaw ?: return null

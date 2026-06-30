@@ -201,6 +201,13 @@ fun GameTuneScreen(
                 viewModel = viewModel,
                 onCopy = { code ->
                     clipboardManager.setText(AnnotatedString(code))
+                    // Match ProfilesScreen's copy feedback so the user gets a
+                    // confirmation (the clipboard write is otherwise silent).
+                    android.widget.Toast.makeText(
+                        context,
+                        "Copied to clipboard",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
                 },
                 onSystemShare = { code ->
                     val intent = Intent(Intent.ACTION_SEND).apply {
@@ -219,7 +226,7 @@ fun GameTuneScreen(
                 importCode = importCode,
                 onImportCodeChange = { newCode ->
                     importCode = newCode
-                    viewModel.decodeImportCode(newCode)
+                    viewModel.decodeImportCode(newCode, currentDeviceKey)
                 },
                 importState = importState,
                 currentDeviceKey = currentDeviceKey,
@@ -236,7 +243,7 @@ fun GameTuneScreen(
                 tunes = communityTunes,
                 isLoading = communityLoading,
                 onPreviewAndImport = { tune ->
-                    viewModel.decodeImportCode(tune.tuneCode)
+                    viewModel.decodeImportCode(tune.tuneCode, currentDeviceKey)
                     // LaunchedEffect on importState switches tab to Import once Preview lands.
                 },
             )

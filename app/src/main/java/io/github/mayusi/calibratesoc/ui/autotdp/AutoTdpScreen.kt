@@ -120,6 +120,7 @@ fun AutoTdpScreen(
     adaptiveVm: AdaptiveViewModel = hiltViewModel(),
 ) {
     val rung by viewModel.rung.collectAsStateWithLifecycle()
+    val liveMechanism by viewModel.liveMechanism.collectAsStateWithLifecycle()
     val runState by viewModel.runState.collectAsStateWithLifecycle()
     // NOTE: the legacy top-level `selectedProfile` collection was removed with the
     // legacy PROFILE picker (Wave 4b). The Per-App dialog keeps its OWN local profile
@@ -250,7 +251,7 @@ fun AutoTdpScreen(
         }
 
         // ── 4. Rung disclosure ─────────────────────────────────────────────────
-        item { ArsenalRungBanner(rung = rung, runState = runState) }
+        item { ArsenalRungBanner(rung = rung, liveMechanism = liveMechanism, runState = runState) }
 
         // ── 5. Mode segmented control + control panel (Unit 4) ────────────────
         // Adaptive is the new default tab; Goal Modes preserves the existing
@@ -584,17 +585,73 @@ private fun SavingsHeroRow(savings: SavingsResult) {
 //  Rung disclosure banner
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Mechanism-aware body copy for the LIVE rung banner.
+ *
+ * The LIVE rung is reached by several DISTINCT live-write paths; the banner must name
+ * the one THIS device actually uses instead of the old generic "PServer, direct sysfs,
+ * or root" line — which is flat-out wrong on a zero-setup AYANEO that is live ONLY via
+ * its vendor binder (no PServer, no root, no sysfs). Each branch is honest about what its
+ * path can and cannot drive.
+ *
+ * Copy is kept consistent with `ui.capability.CapabilityUi.explainerText` (the tier-chip
+ * explainer) so the AutoTDP screen and the Capability screen never contradict each other.
+ *
+ * HONESTY: the AYANEO branch is only ever shown when [LiveMechanism.AYANEO_BINDER] — which
+ * the VM derives strictly from `ayaneoBinderLive` — and it states accurately that the
+ * binder drives the CPU cluster cap, governor, GPU max, and fan, but NOT core parking
+ * (the engine rides the cap lever instead, which is why AutoTDP still runs live there).
+ */
+private fun liveRungBody(mechanism: LiveMechanism, running: Boolean): String {
+    val revertTail = "All writes revert on stop."
+    return when (mechanism) {
+        LiveMechanism.AYANEO_BINDER ->
+            if (running) {
+                "Live control confirmed via AYANEO's vendor service (AyaAidlService) — CPU cluster capped at the efficiency knee, governor + GPU max + fan applied directly. (Core parking isn't on the binder path, so the engine rides the cap lever.) $revertTail"
+            } else {
+                "Live tuning is active through AYANEO's vendor service (AyaAidlService) — no root, no script, no reboot, nothing to set up. AutoTDP caps the CPU cluster, sets the governor, and drives GPU max + fan directly. (Core parking isn't on the binder path — the engine caps instead, so the loop still runs live.)"
+            }
+        LiveMechanism.PSERVER_ROOT ->
+            if (running) {
+                "Live control confirmed via PServer — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. $revertTail"
+            } else {
+                "Live via PServer (the vendor root runner) — Apply works for everything directly, no script and no reboot. AutoTDP runs a closed-loop daemon: parks prime cores, caps the big cluster, reverts everything on stop."
+            }
+        LiveMechanism.GENERIC_ROOT ->
+            if (running) {
+                "Live control confirmed via root — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. $revertTail"
+            } else {
+                "Live via root (Magisk/KernelSU) — direct sysfs writes, Apply works for everything. AutoTDP runs a closed-loop daemon: parks prime cores, caps the big cluster, reverts everything on stop."
+            }
+        LiveMechanism.SHIZUKU ->
+            if (running) {
+                "Live control confirmed via Shizuku — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. $revertTail"
+            } else {
+                "Live via Shizuku — the per-node probe confirmed shell can write the cpufreq nodes, so AutoTDP runs its closed-loop daemon with no root and no reboot: parks prime cores, caps the big cluster, reverts everything on stop."
+            }
+        LiveMechanism.DIRECT_SYSFS, LiveMechanism.NONE ->
+            // DIRECT_SYSFS = the unlock script chmod'd the nodes. NONE should not occur for
+            // a LIVE rung, but fall back to the accurate vendor-neutral "unlocked" copy
+            // rather than naming a path we cannot confirm.
+            if (running) {
+                "Live control confirmed — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. $revertTail"
+            } else {
+                "Sysfs is live-writable on this device (the unlock script chmod'd the cpufreq nodes — no root, no reboot). AutoTDP runs a closed-loop daemon: parks prime cores, caps the big cluster, reverts everything on stop."
+            }
+    }
+}
+
 @Composable
-private fun ArsenalRungBanner(rung: AutoTdpRung, runState: AutoTdpRunState) {
+private fun ArsenalRungBanner(
+    rung: AutoTdpRung,
+    liveMechanism: LiveMechanism,
+    runState: AutoTdpRunState,
+) {
     val (accent, statusLabel, body) = when (rung) {
         AutoTdpRung.LIVE -> Triple(
             AccentBar.Emerald,
             "RUNG: LIVE",
-            if (runState.status == AutoTdpStatus.RUNNING) {
-                "Live control confirmed — daemon writing every second. Prime cores park when GPU-bound; big cluster capped at efficiency knee; GPU prioritised. All writes revert on stop."
-            } else {
-                "Sysfs is live-writable on this device (PServer, direct sysfs, or root). AutoTDP runs a closed-loop daemon — parks prime cores, caps big cluster, reverts everything on stop."
-            },
+            liveRungBody(liveMechanism, running = runState.status == AutoTdpStatus.RUNNING),
         )
         AutoTdpRung.SCRIPT -> Triple(
             AccentBar.Amber,

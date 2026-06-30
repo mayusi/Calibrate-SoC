@@ -58,15 +58,14 @@ import java.util.Locale
  * (direct sysfs / vendor key / script / boot install), and the
  * specific frequency caps that landed.
  *
- * Two intentional design choices:
- *   - "Reapply" lives next to each entry so the user can roll back to
- *     a known-good config in one tap. The reapply is just a fresh
- *     GENERATED_SCRIPT — never a silent root write — so the user has
- *     to confirm via Odin Settings, matching the rest of the no-root
- *     flow.
+ * One intentional design choice:
  *   - "Clear all" is a destructive dialog because users have built a
  *     mental model that the list IS their tuning notebook. We don't
  *     want a one-tap wipe.
+ *
+ * Note: there is currently no per-entry "Reapply" action — only Delete.
+ * Rolling back to a known-good config means re-generating/re-applying
+ * the tune from its original screen.
  */
 @Composable
 fun TuneHistoryScreen(viewModel: TuneHistoryViewModel = hiltViewModel()) {

@@ -741,6 +741,11 @@ private fun HudFullPanel(
                 batteryTempC = state.batteryTempC,
             )
 
+            // ALL ZONES — expandable full per-thermal-zone breakdown (collapsed
+            // by default). Surfaces every kernel thermal zone beyond the CPU/GPU/
+            // BATT summary; previously assembled per tick but never rendered.
+            FullAllZonesSection(state.zones)
+
             // PER-CORE load bars (parked cores dimmed). Hidden until data exists.
             if (state.perCoreMhz.isNotEmpty()) {
                 HudDivider()
@@ -1881,6 +1886,62 @@ private fun FullThermalRow(
         ThermalMini(label = "CPU▲", tempC = cpuTempC, modifier = Modifier.weight(1f))
         ThermalMini(label = "GPU", tempC = gpuTempC, modifier = Modifier.weight(1f))
         ThermalMini(label = "BATT", tempC = batteryTempC, modifier = Modifier.weight(1f))
+    }
+}
+
+/**
+ * Expandable "ALL ZONES" row — surfaces every raw thermal zone the kernel
+ * reports (label → °C), not just the CPU/GPU/BATT summary above. Collapsed by
+ * default to keep the panel compact; tap to reveal the full per-zone list as a
+ * wrapping grid of mini temp chips. This is the on-device ground truth from
+ * [HudUiState.zones] (assembled per tick from Telemetry.zoneTempsMilliC).
+ *
+ * Honest: shows ONLY zones the kernel actually exposed — never a fabricated
+ * sensor. Hidden entirely when no zones are readable this tick.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FullAllZonesSection(zones: List<Pair<String, Float>>) {
+    if (zones.isEmpty()) return
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .semantics {
+                    contentDescription =
+                        "All thermal zones (${zones.size}). Tap to ${if (expanded) "hide" else "show"}."
+                },
+        ) {
+            VerboseSectionLabel("ALL ZONES", HudAmber)
+            Text(
+                text = "${zones.size}",
+                color = HudDim,
+                fontSize = 8.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = if (expanded) "[hide]" else "[show]",
+                color = HudDim,
+                fontSize = 8.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        if (expanded) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                zones.forEach { (label, tempC) ->
+                    ThermalMini(label = label.uppercase(), tempC = tempC)
+                }
+            }
+        }
     }
 }
 

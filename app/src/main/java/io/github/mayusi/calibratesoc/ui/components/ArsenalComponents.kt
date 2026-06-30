@@ -103,6 +103,37 @@ object AccentBar {
     }
 }
 
+/**
+ * Shared neutral surface + muted-text tokens for the Direction-C ("Arsenal")
+ * look — the single public source for the greys/surfaces that were
+ * previously hand-duplicated as private constants in both
+ * [ArsenalComponents] (this file, e.g. [ArsenalPanel]'s local
+ * `surfaceColor`) and `SharedComponents.kt` (`CArsenalSurface`,
+ * `CArsenalTile`, `CLabelGray`, `CDimGray`, ...).
+ *
+ * That duplication was the root cause of call sites re-typing literals
+ * like `Color(0xFF999999)` instead of reusing a shared label-gray token —
+ * the "real" token existed but was `private`. Centralizing here lets new
+ * (and migrated) call sites reference `ArsenalText.Label` / `ArsenalText.Dim`
+ * / `ArsenalText.Surface` / `ArsenalText.Tile` instead.
+ *
+ * All values are copied verbatim from the existing private constants —
+ * this is a pure de-duplication, NOT a restyle. Same hex in, same hex out.
+ */
+object ArsenalText {
+    /** Arsenal panel surface background (#141419). Was `CArsenalSurface` / [ArsenalPanel]'s local `surfaceColor`. */
+    val Surface = Color(0xFF141419)
+
+    /** Arsenal tile/inset background, darker than [Surface] (#0C0C10). Was `CArsenalTile`. */
+    val Tile = Color(0xFF0C0C10)
+
+    /** Uppercase tracked label / muted body text (#999999). Was `CLabelGray`. */
+    val Label = Color(0xFF999999)
+
+    /** Dimmer secondary text — units, explainers (#777777). Was `CDimGray`. */
+    val Dim = Color(0xFF777777)
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 //  SECTION 2 — CutCornerShape
 // ───────────────────────────────────────────────────────────────────────────
@@ -234,7 +265,7 @@ fun ArsenalPanel(
     accentEdge: PanelAccentEdge = PanelAccentEdge.Start,
     content: @Composable () -> Unit,
 ) {
-    val surfaceColor = Color(0xFF141419)
+    val surfaceColor = ArsenalText.Surface
     val accentBarWidth = 4.dp
     val cornerRadius = 4.dp
 
@@ -343,7 +374,7 @@ fun ArsenalButton(
 
     val bg = when (style) {
         ArsenalButtonStyle.Primary   -> accent.copy(alpha = alpha)
-        ArsenalButtonStyle.Secondary -> Color(0xFF141419).copy(alpha = alpha)
+        ArsenalButtonStyle.Secondary -> ArsenalText.Surface.copy(alpha = alpha)
     }
     val textColor = when (style) {
         ArsenalButtonStyle.Primary   -> Color(0xFF0A0A0E)
@@ -410,7 +441,7 @@ fun MetricTile(
     unit: String? = null,
     valueColor: Color? = null,
 ) {
-    val tileBg = Color(0xFF0C0C10)
+    val tileBg = ArsenalText.Tile
     val accentBarHeight = 3.dp
     val cornerRadius = 4.dp
 
@@ -428,7 +459,7 @@ fun MetricTile(
             Text(
                 text = label.uppercase(),
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF999999),
+                color = ArsenalText.Label,
                 letterSpacing = 0.07.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -451,7 +482,7 @@ fun MetricTile(
                     Text(
                         text = unit,
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF777777),
+                        color = ArsenalText.Dim,
                         modifier = Modifier.padding(bottom = 3.dp),
                         maxLines = 1,
                     )
@@ -513,7 +544,7 @@ fun StatBar(
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF999999),
+                color = ArsenalText.Label,
                 letterSpacing = 0.04.sp,
             )
             Text(
@@ -567,7 +598,7 @@ fun StatusPill(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
-    val pillBg = Color(0xFF0C0C10).copy(alpha = 1f)
+    val pillBg = ArsenalText.Tile.copy(alpha = 1f)
     // Tinted background: blend 18 % accent over near-black
     val tinted = Color(
         red   = accent.red   * 0.18f + pillBg.red   * 0.82f,

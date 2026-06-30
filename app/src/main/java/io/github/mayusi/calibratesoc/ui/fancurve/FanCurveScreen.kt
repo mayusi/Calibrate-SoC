@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -42,6 +43,7 @@ import io.github.mayusi.calibratesoc.data.fancurve.FanCurvePreset
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurveValidation
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurveVendor
 import io.github.mayusi.calibratesoc.data.fancurve.LiveFanReading
+import io.github.mayusi.calibratesoc.data.tunables.writer.retroid.RetroidFanConfig
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
@@ -80,6 +82,7 @@ fun FanCurveScreen(
     val allowSubFloor by viewModel.allowSubFloor.collectAsStateWithLifecycle()
     val applyOnOpen by viewModel.applyOnOpen.collectAsStateWithLifecycle()
     val live by viewModel.live.collectAsStateWithLifecycle()
+    val isLoadingLive by viewModel.isLoadingLive.collectAsStateWithLifecycle()
     val applying by viewModel.applying.collectAsStateWithLifecycle()
     val lastApply by viewModel.lastApply.collectAsStateWithLifecycle()
 
@@ -140,7 +143,7 @@ fun FanCurveScreen(
         }
 
         // ── 3. Live readout ─────────────────────────────────────────────────
-        item { LiveFanReadout(live, vendor) }
+        item { LiveFanReadout(live, vendor, isLoadingLive) }
 
         // ── 4. Presets ──────────────────────────────────────────────────────
         item {
@@ -316,13 +319,23 @@ private fun AvailabilityPill(availability: FanCurveAvailability) {
 }
 
 @Composable
-private fun LiveFanReadout(live: LiveFanReading?, vendor: FanCurveVendor?) {
+private fun LiveFanReadout(
+    live: LiveFanReading?,
+    vendor: FanCurveVendor?,
+    isLoading: Boolean = false,
+) {
     val isAyaneo = vendor == FanCurveVendor.AYANEO
+    // Retroid's only readable value is the configured custom-SPEED SETPOINT (not the
+    // governor's live actual duty), so the readout is labelled + explained honestly.
+    val isSetpoint = live?.dutyIsSetpoint == true
     ArsenalPanel(accent = AccentBar.Amber, title = "LIVE FAN") {
         val dutyPct = live?.dutyPct
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
             MetricTile(
-                label = "Fan duty",
+                // HONESTY: on Retroid this percent is the custom-speed SETPOINT (of full
+                // scale), NOT the live fan duty — the vendor service can't read live
+                // duty. Label it so we never claim a fabricated "Fan duty 100%".
+                label = if (isSetpoint) "Custom speed" else "Fan duty",
                 value = dutyPct?.toString() ?: "—",
                 unit = "%",
                 accent = AccentBar.Amber,
@@ -330,31 +343,84 @@ private fun LiveFanReadout(live: LiveFanReading?, vendor: FanCurveVendor?) {
             )
             MetricTile(
                 // On AYANEO the raw node is the 8-bit pwm1 value (0..255); on Odin
-                // it's the gpio duty. Label it per-vendor so the number is honest.
-                label = if (isAyaneo) "pwm1 (0-255)" else "Raw duty",
+                // it's the gpio duty; on Retroid it's the ~25000-scale setpoint.
+                label = when {
+                    isAyaneo -> "pwm1 (0-255)"
+                    isSetpoint -> "Setpoint"
+                    else -> "Raw duty"
+                },
                 value = live?.dutyRaw?.toString() ?: "—",
                 accent = AccentBar.Amber,
                 modifier = Modifier.weight(1f),
             )
             MetricTile(
-                label = if (isAyaneo) "Scale" else "Period",
+                label = when {
+                    isAyaneo -> "Scale"
+                    isSetpoint -> "Full scale"
+                    else -> "Period"
+                },
                 value = live?.periodRaw?.toString() ?: "—",
                 accent = AccentBar.Amber,
                 modifier = Modifier.weight(1f),
             )
         }
-        Text(
-            text = when {
-                live == null -> "Reading the live fan node…"
-                isAyaneo -> "Reading the AYANEO fan PWM (pwm1). The duty tracks the current " +
-                    "temperature, so a low value at idle is normal."
-                live.fanMode == 4 -> "Fan mode: Smart (curve-driven)."
-                live.fanMode != null -> "Fan mode: ${live.fanMode} (not Smart — apply a curve to engage Smart)."
-                else -> "Fan mode unknown."
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (live == null && isLoading) {
+            // BUG-3: the first live read (a slow binder round-trip on Retroid) used to
+            // sit on frozen static text. Show a spinner so it reads as "working", not
+            // "stuck".
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.dense),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                    color = AccentBar.Amber,
+                )
+                Text(
+                    text = "Reading the live fan node…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            Text(
+                text = when {
+                    live == null -> "Reading the live fan node…"
+                    isAyaneo -> "Reading the AYANEO fan PWM (pwm1). The duty tracks the current " +
+                        "temperature, so a low value at idle is normal."
+                    isSetpoint -> retroidFanModeNote(live.fanMode)
+                    live.fanMode == 4 -> "Fan mode: Smart (curve-driven)."
+                    live.fanMode != null -> "Fan mode: ${live.fanMode} (not Smart — apply a curve to engage Smart)."
+                    else -> "Fan mode unknown."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * HONEST live-fan note for Retroid. The value shown above is the configured custom-speed
+ * SETPOINT, not the governor's live actual duty (the vendor fan service exposes no
+ * live-duty node). In any non-Custom mode the governor runs the fan (e.g. ~20% at idle)
+ * and the setpoint is inert, so we say so plainly instead of implying the setpoint is the
+ * real fan speed. The mode itself is read from the vendor `fan_mode` Settings.System key.
+ */
+private fun retroidFanModeNote(mode: Int?): String {
+    val name = RetroidFanConfig.fanModeName(mode)
+    return when {
+        RetroidFanConfig.isCustomMode(mode) ->
+            "Fan mode: Custom — the held custom speed above is driving the fan."
+        name != null ->
+            "Fan mode: $name — the fan is governor-controlled, so the live actual " +
+                "duty isn't exposed by Retroid's fan service. The percent above is the " +
+                "configured custom-speed setpoint, which only takes effect in Custom mode."
+        else ->
+            "The percent above is the configured custom-speed setpoint (not the live fan " +
+                "duty — Retroid's fan service doesn't expose the governor's actual duty). " +
+                "It only drives the fan in Custom mode."
     }
 }
 

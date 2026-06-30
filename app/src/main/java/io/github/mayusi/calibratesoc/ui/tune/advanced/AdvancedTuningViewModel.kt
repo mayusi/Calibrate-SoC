@@ -89,12 +89,9 @@ class AdvancedTuningViewModel @Inject constructor(
     private val _pendingAdvanced = MutableStateFlow<Map<String, String>>(emptyMap())
     val pendingAdvanced: StateFlow<Map<String, String>> = _pendingAdvanced.asStateFlow()
 
-    /** Count of staged knobs for the "Generate Script (N)" CTA badge. */
-    val pendingAdvancedCount: StateFlow<Int> = MutableStateFlow(0).also { counter ->
-        viewModelScope.launch {
-            _pendingAdvanced.collect { counter.value = it.size }
-        }
-    }
+    // The "Generate Script (N)" CTA badge reads pendingAdvanced.size directly in
+    // the screen — there is no separate count StateFlow. (A derived count flow
+    // here was dead: built but never collected; removed.)
 
     fun clearPendingAdvanced() { _pendingAdvanced.value = emptyMap() }
 

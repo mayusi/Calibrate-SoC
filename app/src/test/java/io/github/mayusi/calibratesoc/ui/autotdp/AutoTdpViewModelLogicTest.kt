@@ -37,6 +37,7 @@ class AutoTdpViewModelLogicTest {
         privilege: PrivilegeTier = PrivilegeTier.NONE,
         sysfsDirectlyWritable: Boolean = false,
         pserverSysfsLive: Boolean = false,
+        ayaneoBinderLive: Boolean = false,
         aynGameAssistant: Boolean = false,
         langerhansOdinTools: Boolean = false,
     ): CapabilityReport = CapabilityReport(
@@ -85,6 +86,7 @@ class AutoTdpViewModelLogicTest {
         ),
         sysfsDirectlyWritable = sysfsDirectlyWritable,
         pserverSysfsLive = pserverSysfsLive,
+        ayaneoBinderLive = ayaneoBinderLive,
     )
 
     private val efficiencyConfig = AutoTdpProfileConfig(AutoTdpProfile.EFFICIENCY)
@@ -216,6 +218,100 @@ class AutoTdpViewModelLogicTest {
         // No vendor apps present — PServer is unlikely to exist.
         val report = makeReport(privilege = PrivilegeTier.NONE)
         assertThat(AutoTdpViewModel.shouldShowPServerUnlockCta(report, primeFreqLiveWritable = false)).isFalse()
+    }
+
+    // ─── resolveLiveMechanism (honest live-path naming for the rung banner) ───
+    //
+    // The rung enum flattens every live path to LIVE; resolveLiveMechanism preserves
+    // WHICH path so the banner can describe it honestly. Precedence mirrors the
+    // app-wide live-flag order (CapabilityUi.chipLabel/explainerText):
+    //   pserverSysfsLive → ayaneoBinderLive → ROOT → sysfsDirectlyWritable → SHIZUKU.
+
+    @Test
+    fun `resolveLiveMechanism returns NONE when report is null`() {
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(null, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.NONE)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns NONE when not live-writable`() {
+        // Even with a live flag set, NONE when the prime cap isn't live-writable
+        // (the rung is SCRIPT/ADVISORY — no LIVE banner to describe).
+        val report = makeReport(pserverSysfsLive = true)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = false))
+            .isEqualTo(LiveMechanism.NONE)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns AYANEO_BINDER when ayaneoBinderLive`() {
+        // The core fix: a binder-live AYANEO maps to AYANEO_BINDER, NOT a PServer/root path.
+        val report = makeReport(ayaneoBinderLive = true)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.AYANEO_BINDER)
+    }
+
+    @Test
+    fun `resolveLiveMechanism AYANEO branch never names PServer or root`() {
+        // HONESTY: an AYANEO that is live ONLY via its binder (no pserver, no root,
+        // no direct sysfs, privilege NONE) must resolve to AYANEO_BINDER so the banner
+        // can never claim "PServer, direct sysfs, or root".
+        val report = makeReport(
+            privilege = PrivilegeTier.NONE,
+            ayaneoBinderLive = true,
+            pserverSysfsLive = false,
+            sysfsDirectlyWritable = false,
+        )
+        val mechanism = AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true)
+        assertThat(mechanism).isEqualTo(LiveMechanism.AYANEO_BINDER)
+        assertThat(mechanism).isNotEqualTo(LiveMechanism.PSERVER_ROOT)
+        assertThat(mechanism).isNotEqualTo(LiveMechanism.GENERIC_ROOT)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns PSERVER_ROOT when pserverSysfsLive`() {
+        // RP6/Odin PServer path — must still resolve to PSERVER_ROOT (regression guard).
+        val report = makeReport(pserverSysfsLive = true)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.PSERVER_ROOT)
+    }
+
+    @Test
+    fun `resolveLiveMechanism prefers PSERVER_ROOT over ayaneoBinder when both set`() {
+        // Precedence: PServer wins (matches CapabilityUi chipLabel order).
+        val report = makeReport(pserverSysfsLive = true, ayaneoBinderLive = true)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.PSERVER_ROOT)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns GENERIC_ROOT for ROOT tier`() {
+        val report = makeReport(privilege = PrivilegeTier.ROOT)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.GENERIC_ROOT)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns DIRECT_SYSFS for chmod-unlocked nodes`() {
+        val report = makeReport(sysfsDirectlyWritable = true)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.DIRECT_SYSFS)
+    }
+
+    @Test
+    fun `resolveLiveMechanism returns SHIZUKU for shizuku-live device`() {
+        // No vendor flag, privilege SHIZUKU, probe confirmed → SHIZUKU.
+        val report = makeReport(privilege = PrivilegeTier.SHIZUKU)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.SHIZUKU)
+    }
+
+    @Test
+    fun `resolveLiveMechanism falls back to DIRECT_SYSFS for live device with no specific flag`() {
+        // Live per the per-node probe but no dedicated flag/tier (generic probed device)
+        // → describe as direct/unlocked, never a vendor-specific path we can't confirm.
+        val report = makeReport(privilege = PrivilegeTier.NONE)
+        assertThat(AutoTdpViewModel.resolveLiveMechanism(report, primeFreqLiveWritable = true))
+            .isEqualTo(LiveMechanism.DIRECT_SYSFS)
     }
 
     // ─── buildUnlockLadder (vendor-neutral path ladder) ──────────────────────

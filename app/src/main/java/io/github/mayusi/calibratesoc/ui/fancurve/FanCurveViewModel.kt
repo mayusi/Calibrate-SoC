@@ -62,6 +62,17 @@ class FanCurveViewModel @Inject constructor(
     private val _live = MutableStateFlow<LiveFanReading?>(null)
     val live: StateFlow<LiveFanReading?> = _live.asStateFlow()
 
+    /**
+     * True while the FIRST live-fan read is in flight (before any value has arrived).
+     * On Retroid the read is a slow binder round-trip (SettingsController → FanProvider
+     * bind + txn, ~seconds on the first acquire), so the screen must show a spinner
+     * instead of looking frozen on the static "Reading the live fan node…" text.
+     * Cleared once the first reading lands (or the read errors). Subsequent polls don't
+     * flip this — they refresh in place without a spinner.
+     */
+    private val _isLoadingLive = MutableStateFlow(false)
+    val isLoadingLive: StateFlow<Boolean> = _isLoadingLive.asStateFlow()
+
     // ── Apply status ────────────────────────────────────────────────────────
     private val _applying = MutableStateFlow(false)
     val applying: StateFlow<Boolean> = _applying.asStateFlow()
@@ -98,14 +109,33 @@ class FanCurveViewModel @Inject constructor(
         }
     }
 
-    /** Poll the live fan duty every few seconds while the screen is shown. */
+    /**
+     * Poll the live fan duty every few seconds while the screen is shown.
+     *
+     * BUG-3 fix: the old loop checked availability, then `delay(3s)` BEFORE the first
+     * read — so even after availability resolved, the first reading was up to 3s late on
+     * top of the slow first binder acquire. Now we WAIT for availability to become
+     * Available (no fixed pre-delay), then read IMMEDIATELY with a loading flag set so
+     * the UI shows a spinner during that first (slow) read instead of frozen text. After
+     * the first reading lands we clear the flag and poll on the interval (read → delay),
+     * refreshing in place without flashing the spinner again.
+     */
     private fun startLivePolling() {
         viewModelScope.launch {
-            while (isActive) {
-                if (_availability.value is FanCurveAvailability.Available) {
-                    _live.value = controller.readLiveFanDuty()
+            // Don't burn a 3s delay before we even know if the feature is available;
+            // suspend cheaply until availability resolves to Available.
+            availability.first { it is FanCurveAvailability.Available }
+            _isLoadingLive.value = true
+            try {
+                while (isActive) {
+                    if (_availability.value is FanCurveAvailability.Available) {
+                        _live.value = controller.readLiveFanDuty()
+                        _isLoadingLive.value = false // first (and every) reading has landed
+                    }
+                    delay(LIVE_POLL_MS)
                 }
-                delay(LIVE_POLL_MS)
+            } finally {
+                _isLoadingLive.value = false
             }
         }
     }

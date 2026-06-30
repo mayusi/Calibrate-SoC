@@ -56,12 +56,16 @@ import java.util.Locale
  *
  * "Not enough data" states are always shown honestly — no fabricated numbers.
  *
- * The "BEST PROFILE PER GAME" panel shows the evidence (avg FPS, throttle rate,
- * session count) and an Apply button. Tapping Apply calls
- * [InsightsViewModel.applyBestProfile], which resolves the display label →
- * package name via PackageManager and the profile name → profile id via
- * [ProfileRepository], then writes the bundle. [ForegroundAppWatcher] picks it
- * up automatically on the next foreground switch.
+ * The "BEST PROFILE PER GAME" panel is rendered from the package-keyed
+ * [InsightsAggregator.InsightsSummary.bestProfilePerPackage] map. It shows the
+ * evidence (avg FPS, throttle rate, session count) and an Apply button. Tapping
+ * Apply calls [InsightsViewModel.applyBestProfileByPackage], which binds the
+ * bundle using the stable packageName directly (no fragile label→package scan),
+ * so the right app is always targeted. The "APPLIED" badge is computed by
+ * matching THIS package's own bundle (perAppBundles[packageName]) against the
+ * recommended profile — never "any bundle with this profileId" — so it can't
+ * mislabel a sibling app. [ForegroundAppWatcher] picks up the bound bundle
+ * automatically on the next foreground switch.
  */
 @Composable
 fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
@@ -175,35 +179,41 @@ fun InsightsScreen(viewModel: InsightsViewModel = hiltViewModel()) {
         }
 
         // ── Best profile per game ─────────────────────────────────────────
-        if (summary.bestProfilePerApp.isNotEmpty()) {
+        // Rendered from bestProfilePerPackage (package-keyed) — the honest,
+        // stable source. packageName is the real bundle key, so the APPLIED
+        // badge and the apply action both bind the EXACT app, never a sibling
+        // that happens to share a display label.
+        if (summary.bestProfilePerPackage.isNotEmpty()) {
             item {
                 SectionHeader(title = "BEST PROFILE PER GAME", accent = AccentBar.Blue)
             }
-            items(summary.bestProfilePerApp.entries.toList(), key = { it.key }) { (appLabel, entry) ->
-                // Determine whether this profile is already bound so we can show "APPLIED".
-                // We look at perAppBundles only — the canonical write path used by applyBestProfile.
-                // We resolve profileId → name via the store's profile list for the comparison.
+            items(summary.bestProfilePerPackage.entries.toList(), key = { it.key }) { (packageName, entry) ->
+                // APPLIED is true ONLY when THIS package's own bundle is bound to
+                // THIS recommended profile — matched by packageName (the bundle
+                // key), not "any bundle in the store with this profileId". That
+                // package-precise check is what makes the badge honest.
                 val boundProfileName: String? = run {
-                    val bundles = store.perAppBundles
-                    // We can't look up by package name here because the key is appLabel, not
-                    // packageName — the bundle map is keyed by packageName. We check bundles
-                    // whose profileId matches a profile whose name == entry.profileName, and
-                    // whose value (packageName) *might* correspond to this appLabel. Since we
-                    // cannot resolve label→package in a pure composable without IO, we instead
-                    // check whether ANY bundle in the store has this profileId, and let the
-                    // success snackbar be the primary confirmation. The "APPLIED" badge is best-
-                    // effort — it will show correctly once the user sees the snackbar and re-
-                    // enters the screen (store is live).
                     val profileId = store.profiles.firstOrNull { it.name == entry.profileName }?.id
-                    if (profileId != null && bundles.values.any { it.profileId == profileId }) {
-                        entry.profileName
-                    } else null
+                    val boundId = store.perAppBundles[packageName]?.profileId
+                    if (profileId != null && boundId == profileId) entry.profileName else null
                 }
+                // appLabel may be null when the package never recorded a label —
+                // fall back to the packageName so the panel still identifies the app.
+                val displayLabel = entry.appLabel ?: packageName
                 BestProfilePanel(
-                    appLabel = appLabel,
-                    entry = entry,
+                    appLabel = displayLabel,
+                    profileName = entry.profileName,
+                    avgFps = entry.avgFps,
+                    avgThrottleEventsPerSession = entry.avgThrottleEventsPerSession,
+                    sessionCount = entry.sessionCount,
                     boundProfileName = boundProfileName,
-                    onApply = { viewModel.applyBestProfile(appLabel, entry.profileName) },
+                    onApply = {
+                        viewModel.applyBestProfileByPackage(
+                            packageName = packageName,
+                            appLabel = displayLabel,
+                            profileName = entry.profileName,
+                        )
+                    },
                 )
             }
         } else if (summary.insufficientDataReason == null) {
@@ -340,17 +350,20 @@ private fun SessionReportPanel(report: SessionReport, isLatest: Boolean) {
  * - App name (uppercase)
  * - "RECOMMENDED" pill + profile name pill to emphasise it is learned from data
  * - Evidence: avg FPS, throttle/session, session count (the "why")
- * - "APPLIED" pill when this profile is already bound in the store (best-effort:
- *   matched by profileId across any bundle — see call site comment)
+ * - "APPLIED" pill when THIS app's own bundle is bound to this profile (matched
+ *   by packageName at the call site — precise, never a sibling app)
  * - Apply button (AccentBar.Emerald, Secondary style) that calls [onApply]
  *
- * [boundProfileName] is non-null when the profile is already bound somewhere in
- * the store; used to show the "APPLIED" pill and disable the Apply button.
+ * [boundProfileName] is non-null when this app's bundle is bound to the
+ * recommended profile; used to show the "APPLIED" pill and disable the button.
  */
 @Composable
 private fun BestProfilePanel(
     appLabel: String,
-    entry: InsightsAggregator.BestProfileEntry,
+    profileName: String,
+    avgFps: Float?,
+    avgThrottleEventsPerSession: Double,
+    sessionCount: Int,
     boundProfileName: String?,
     onApply: () -> Unit,
 ) {
@@ -371,7 +384,7 @@ private fun BestProfilePanel(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(Spacing.dense)) {
                 StatusPill(text = "RECOMMENDED", accent = AccentBar.Emerald)
-                StatusPill(text = entry.profileName, accent = AccentBar.Blue)
+                StatusPill(text = profileName, accent = AccentBar.Blue)
                 if (isApplied) {
                     StatusPill(text = "APPLIED", accent = AccentBar.Emerald)
                 }
@@ -381,13 +394,13 @@ private fun BestProfilePanel(
         Spacer(Modifier.height(Spacing.dense))
 
         // ── Evidence — the "why" ─────────────────────────────────────────
-        entry.avgFps?.let { fps ->
+        avgFps?.let { fps ->
             KvRow(label = "Avg FPS", value = "%.0f fps".format(fps))
         }
         KvRow(
             label = "Throttle/session",
-            value = "%.1f".format(entry.avgThrottleEventsPerSession),
-            explainer = "Lower = more stable. Based on ${entry.sessionCount} sessions.",
+            value = "%.1f".format(avgThrottleEventsPerSession),
+            explainer = "Lower = more stable. Based on $sessionCount sessions.",
         )
 
         Spacer(Modifier.height(Spacing.item))

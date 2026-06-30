@@ -260,19 +260,7 @@ class HardwareScanner @Inject constructor(
 
     private fun scanRadios(): RadioInfo {
         val pm = context.packageManager
-        val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        val wifiStd = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                when (wifi?.connectionInfo?.wifiStandard) {
-                    4 -> "Wi-Fi 4 (802.11n)"
-                    5 -> "Wi-Fi 5 (802.11ac)"
-                    6 -> "Wi-Fi 6 (802.11ax)"
-                    7 -> "Wi-Fi 6E"
-                    8 -> "Wi-Fi 7 (802.11be)"
-                    else -> "—"
-                }
-            } else "—"
-        }.getOrDefault("—")
+        val wifiStd = resolveWifi()
 
         // No public Bluetooth-version API. Devices vary; we just
         // report whether BT is present and let the user check.
@@ -299,6 +287,67 @@ class HardwareScanner @Inject constructor(
         )
     }
 
+    /**
+     * Resolve an HONEST Wi-Fi description for the Radios card.
+     *
+     * BUG FIX: the old read used only `WifiManager.getConnectionInfo().wifiStandard`
+     * and printed a bare "—" for anything that wasn't a known standard int. Two
+     * failure modes made it show "—" while Wi-Fi was clearly connected:
+     *   1. No ACCESS_WIFI_STATE permission was declared, so getConnectionInfo()
+     *      returned a blanked WifiInfo (standard = UNKNOWN/0 → "—"). (Permission now
+     *      declared in the manifest.)
+     *   2. On Android 12+ getConnectionInfo() is deprecated and can return
+     *      WIFI_STANDARD_UNKNOWN for the standard even on a healthy connection.
+     *
+     * Now we: (a) detect connectivity via ConnectivityManager (TRANSPORT_WIFI on the
+     * active network — needs no location permission), (b) read WifiInfo via the modern
+     * NetworkCapabilities.transportInfo path on API 31+ (falling back to the deprecated
+     * getConnectionInfo()), and (c) NEVER show a bare "—" when Wi-Fi is up — we fall
+     * back to the link speed ("Connected · 866 Mbps") or at least "Connected". When the
+     * device has no Wi-Fi at all we say so honestly; when the read can't even tell, we
+     * surface that honestly too.
+     */
+    @Suppress("DEPRECATION")
+    private fun resolveWifi(): String {
+        val pm = context.packageManager
+        val hasWifiHardware = pm.hasSystemFeature(PackageManager.FEATURE_WIFI)
+
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? android.net.ConnectivityManager
+        val caps = runCatching {
+            cm?.let { it.getNetworkCapabilities(it.activeNetwork) }
+        }.getOrNull()
+        val wifiConnected = caps?.hasTransport(
+            android.net.NetworkCapabilities.TRANSPORT_WIFI,
+        ) ?: false
+
+        // Prefer the modern transportInfo WifiInfo (API 31+); fall back to the
+        // deprecated WifiManager.getConnectionInfo() so older SDKs still resolve.
+        val wifiInfo: android.net.wifi.WifiInfo? = run {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wifiConnected) {
+                (caps?.transportInfo as? android.net.wifi.WifiInfo)
+            } else null
+        } ?: runCatching {
+            val wm = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wm?.connectionInfo
+        }.getOrNull()
+
+        val standard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { wifiInfo?.wifiStandard }.getOrNull()
+        } else null
+
+        // Link speed is in Mbps; -1 / 0 means "unknown".
+        val linkSpeedMbps = runCatching { wifiInfo?.linkSpeed }.getOrNull()
+            ?.takeIf { it > 0 }
+
+        return describeWifi(
+            standard = standard,
+            wifiConnected = wifiConnected,
+            linkSpeedMbps = linkSpeedMbps,
+            hasWifiHardware = hasWifiHardware,
+        )
+    }
+
     // --- Helpers ------------------------------------------------------
 
     private fun readFirstReadable(vararg paths: String): String? {
@@ -307,5 +356,55 @@ class HardwareScanner @Inject constructor(
             if (!v.isNullOrBlank()) return v
         }
         return null
+    }
+
+    companion object {
+        /**
+         * PURE honest Wi-Fi description. Separated from the Android plumbing in
+         * [resolveWifi] so it is unit-testable.
+         *
+         * Honesty rules (in priority order):
+         *  - A KNOWN standard always wins (most informative + true).
+         *  - If Wi-Fi is connected but the standard is unknown, NEVER return "—":
+         *    show the link speed if we have it ("Connected · 866 Mbps"), else just
+         *    "Connected".
+         *  - If Wi-Fi is NOT connected: "Not connected" (the device has Wi-Fi but isn't
+         *    on a network) or "—" only when there's no Wi-Fi hardware at all.
+         *
+         * @param standard the WifiInfo.wifiStandard int (4/5/6/7/8…), or null/0 when
+         *   unknown/unavailable.
+         * @param wifiConnected true when the active network reports TRANSPORT_WIFI.
+         * @param linkSpeedMbps the WifiInfo.linkSpeed in Mbps when > 0, else null.
+         * @param hasWifiHardware whether the device declares FEATURE_WIFI at all.
+         */
+        internal fun describeWifi(
+            standard: Int?,
+            wifiConnected: Boolean,
+            linkSpeedMbps: Int?,
+            hasWifiHardware: Boolean,
+        ): String {
+            val byStandard = when (standard) {
+                4 -> "Wi-Fi 4 (802.11n)"
+                5 -> "Wi-Fi 5 (802.11ac)"
+                6 -> "Wi-Fi 6 (802.11ax)"
+                7 -> "Wi-Fi 6E"
+                8 -> "Wi-Fi 7 (802.11be)"
+                else -> null
+            }
+            if (byStandard != null) {
+                // When connected, append the live link speed for extra signal.
+                return if (wifiConnected && linkSpeedMbps != null) {
+                    "$byStandard · $linkSpeedMbps Mbps"
+                } else {
+                    byStandard
+                }
+            }
+            // Standard unknown. If we're clearly on Wi-Fi, say so honestly — never "—".
+            if (wifiConnected) {
+                return if (linkSpeedMbps != null) "Connected · $linkSpeedMbps Mbps" else "Connected"
+            }
+            // Not on Wi-Fi. Distinguish "has radio, just not connected" from "no radio".
+            return if (hasWifiHardware) "Not connected" else "—"
+        }
     }
 }

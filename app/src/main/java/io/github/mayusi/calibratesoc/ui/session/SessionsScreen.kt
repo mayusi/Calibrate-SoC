@@ -46,8 +46,9 @@ import java.util.Locale
  * List of the ≤10 saved game sessions, newest first. Tap a row to open
  * the timeline detail. Swipe / tap the delete icon to remove a session.
  *
- * Navigation: reachable from the Dashboard "View sessions" button, NOT
- * from the bottom bar (keeping 6 tabs on the handheld).
+ * Navigation: the "SESSIONS" tab inside the Performance hub
+ * (Benchmark | Stability | Sessions | Insights | Games), NOT a
+ * standalone bottom-bar destination — keeps the bottom bar lean.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

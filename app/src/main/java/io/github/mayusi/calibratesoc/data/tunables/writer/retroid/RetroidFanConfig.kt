@@ -98,4 +98,27 @@ object RetroidFanConfig {
      * never above [SPEED_MAX]. Pure.
      */
     fun clampSpeed(speed: Int): Int = speed.coerceIn(SPEED_SAFE_MIN, SPEED_MAX)
+
+    /**
+     * Human-readable name for a Retroid `fan_mode` Settings.System value. Pure.
+     *
+     * The vendor app's preset order is Off/Quiet/Smart/Sport/Custom, indexed 0..4
+     * (per the decompiled `presets` list + [SMART_MODE]=2 / [CUSTOM_MODE]=4). Used by
+     * the live readout to turn the raw mode int into an honest label instead of
+     * "Fan mode unknown". Returns null for an unrecognised int (so the UI can fall
+     * back honestly rather than inventing a name).
+     */
+    fun fanModeName(mode: Int?): String? = when (mode) {
+        0 -> "Off"
+        1 -> "Quiet"
+        SMART_MODE -> "Smart (auto)"
+        3 -> "Sport"
+        CUSTOM_MODE -> "Custom"
+        else -> null
+    }
+
+    /** True when [mode] is the CUSTOM mode — the only mode in which the custom-speed
+     *  setpoint actually drives the fan (otherwise the governor controls it and the
+     *  setpoint is inert). Pure. Null/unknown → false (governor-controlled). */
+    fun isCustomMode(mode: Int?): Boolean = mode == CUSTOM_MODE
 }

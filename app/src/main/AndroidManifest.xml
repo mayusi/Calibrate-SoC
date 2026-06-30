@@ -9,6 +9,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      Read Wi-Fi connection state for the Hardware screen's Radios card:
+      WifiManager.connectionInfo (link speed) + the active network's Wi-Fi
+      standard. Normal permission, granted at install. Without it
+      getConnectionInfo() returns a blanked WifiInfo so the Wi-Fi row showed
+      a bare "—" even while Wi-Fi was connected.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
     <!-- Notifications: monitoring service + benchmark progress + overlay foreground svc. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

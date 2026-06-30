@@ -104,14 +104,26 @@ class GameTuneViewModel @Inject constructor(
      *  - Decode error → [GameTuneImportState.Error]
      *  - Success → [GameTuneImportState.Preview]
      *
-     * Device-mismatch logic:
-     * TODO: obtain the running device key (e.g. from CapabilityProbe) and pass it
-     *       to this function; then set deviceMismatch = tune.targetHandheldKeys != null
-     *       && tune.targetHandheldKeys.isNotEmpty()
-     *       && !tune.targetHandheldKeys.contains(deviceKey).
-     *       For now we conservatively set deviceMismatch = false (no false positives).
+     * Device-mismatch logic (now wired):
+     *  [currentDeviceKey] is the running device's
+     *  [io.github.mayusi.calibratesoc.data.capability.DeviceIdentity.knownHandheldKey]
+     *  (passed in by the screen from the capability report). A tune is a
+     *  mismatch when it declares a non-empty device-targeting list
+     *  ([ShareableGameTune.targetHandheldKeys]) that does NOT include this
+     *  device — i.e. it was built for different silicon. This is the SAME
+     *  predicate [io.github.mayusi.calibratesoc.data.profiles.PresetSafetyGate]
+     *  Gate 1 enforces at apply time, surfaced early here as a warning so the
+     *  user sees it before import (the warning informs, it does not block —
+     *  the gate still blocks the actual write).
+     *
+     *  Honesty: an untargeted tune (targetHandheldKeys null/empty) is NOT a
+     *  mismatch — it applies anywhere. A null [currentDeviceKey] (device key
+     *  not yet probed / unknown device) is treated as a mismatch ONLY when the
+     *  tune is targeted, since we cannot prove the unknown device is in the
+     *  target set — matching the gate's "unknown current key fails a targeted
+     *  preset" behaviour.
      */
-    fun decodeImportCode(code: String) {
+    fun decodeImportCode(code: String, currentDeviceKey: String? = null) {
         if (code.isBlank()) {
             _importState.value = GameTuneImportState.Idle
             return
@@ -119,9 +131,7 @@ class GameTuneViewModel @Inject constructor(
         when (val result = gameTuneCodec.decode(code)) {
             is GameTuneDecodeResult.Success -> {
                 val tune = result.tune
-                // TODO: compare tune.targetHandheldKeys against the running device key
-                //       once CapabilityProbe exposes a stable deviceKey property.
-                val deviceMismatch = false
+                val deviceMismatch = isDeviceMismatch(tune.targetHandheldKeys, currentDeviceKey)
                 _importState.value = GameTuneImportState.Preview(tune, deviceMismatch)
             }
             is GameTuneDecodeResult.Error -> {
@@ -159,6 +169,20 @@ class GameTuneViewModel @Inject constructor(
         onResult: (error: String?) -> Unit,
     ) {
         viewModelScope.launch {
+            // ── 0. Device-targeting guard ────────────────────────────────────
+            // Refuse to persist a tune built for a different device family. The
+            // preview already WARNED about this (deviceMismatch), but a user can
+            // tap Import anyway; this is the honest hard stop. Same predicate as
+            // the preview + PresetSafetyGate Gate 1. An untargeted tune passes.
+            if (isDeviceMismatch(tune.targetHandheldKeys, currentDeviceKey)) {
+                val target = tune.targetHandheldKeys?.joinToString(", ").orEmpty()
+                onResult(
+                    "This tune targets [$target] and was not built for your device " +
+                        "[${currentDeviceKey ?: "unknown"}]. Import a tune made for your device.",
+                )
+                return@launch
+            }
+
             // ── 1. Reconstruct a UserProfile from tune clock fields ──────────
             val profile = UserProfile(
                 id = "shared_game_${tune.packageName}_${System.currentTimeMillis()}",
@@ -248,6 +272,28 @@ class GameTuneViewModel @Inject constructor(
             runCatching { remoteContentRepository.refresh() }
             loadCommunityTunes(deviceKey)
             _communityLoading.value = false
+        }
+    }
+
+    companion object {
+        /**
+         * Pure device-targeting predicate. Returns true when [targetHandheldKeys]
+         * declares a non-empty target list that does NOT include [currentDeviceKey]
+         * (the running device is foreign to the tune). Mirrors
+         * [io.github.mayusi.calibratesoc.data.profiles.PresetSafetyGate] Gate 1:
+         *
+         *  - null / empty targets  → false (untargeted tune applies anywhere).
+         *  - non-empty targets, currentDeviceKey null  → true (cannot prove the
+         *    unknown device is in the target set — fail safe, same as the gate).
+         *  - non-empty targets, key present  → !targets.contains(key).
+         *
+         * Extracted as a pure static helper so it is unit-testable on the JVM
+         * without constructing the (Android-dependent) ViewModel.
+         */
+        @JvmStatic
+        fun isDeviceMismatch(targetHandheldKeys: List<String>?, currentDeviceKey: String?): Boolean {
+            if (targetHandheldKeys.isNullOrEmpty()) return false
+            return currentDeviceKey == null || currentDeviceKey !in targetHandheldKeys
         }
     }
 }

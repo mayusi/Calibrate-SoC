@@ -29,9 +29,10 @@ import javax.inject.Inject
  *  - Owns all Adaptive-mode UI state: preset, custom intent, GPU OC tier, consent.
  *  - Persists state via [AdaptivePrefs] (own store, no collision risk).
  *  - Reads the live run-state from [AutoTdpController] for the live readout card.
- *  - DOES NOT start/stop the daemon — that is Unit 5's job. [setAdaptiveActive]
- *    persists the active flag and exposes [adaptiveConfig] for Unit 5 to consume;
- *    see the [TODO] stub at the bottom of this file.
+ *  - Starts/stops the daemon via [setAdaptiveActive]: turning Adaptive ON builds the
+ *    resolved [io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveRunConfig]
+ *    from the current VM state and engages the unified governor through
+ *    [AutoTdpController.start]; turning it OFF stops it (single revert handle).
  *
  * ## Custom-weights renormalization contract
  *  - Weights are stored as RAW slider values (0..100 int mapped to 0f..1f float).
@@ -282,22 +283,19 @@ class AdaptiveViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    // ── Unit 5 hook ───────────────────────────────────────────────────────────
+    // ── Adaptive config readiness ─────────────────────────────────────────────
 
     /**
-     * The resolved adaptive configuration that Unit 5 should pass to the governor.
+     * Whether an adaptive run config can be built + engaged right now.
      *
-     * Combines the effective intent + GPU OC tier so Unit 5 can compute
-     * [AdaptiveSetpoints] via [AdaptivePolicy.resolve(effectiveIntent, caps, optIn, probe)].
-     *
-     * Unit 5 accesses:
-     *  - [effectiveIntent]      — the normalized weight vector
-     *  - [gpuOcTier]            — the chosen OC tier (consent already gated)
-     *  - [beyondStockConsent]   — the raw consent flag
-     *  - [beyondStockProbeVerdict] — the cached probe result
-     *
-     * TODO(Unit 5): add AutoTdpController.start(setpoints: AdaptiveSetpoints) overload,
-     * then observe adaptiveModeActive + effectiveIntent here and call it.
+     * The governor wiring is LIVE: [setAdaptiveActive] snapshots the current VM state
+     * (the normalized [effectiveIntent] + [gpuOcTier] + [beyondStockConsent] +
+     * [beyondStockProbeVerdict]) into an
+     * [io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveRunConfig] via
+     * [buildAdaptiveRunConfig] and hands it to
+     * [AutoTdpController.start] (the adaptive overload → the daemon's ADAPTIVE branch,
+     * [io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveCoordinator]). This
+     * flow simply mirrors [adaptiveModeActive] so the UI can reflect that readiness.
      */
     val adaptiveConfigReady: StateFlow<Boolean> = combine(
         adaptiveModeActive,

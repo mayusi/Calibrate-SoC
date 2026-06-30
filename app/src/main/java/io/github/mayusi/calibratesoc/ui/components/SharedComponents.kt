@@ -47,15 +47,19 @@ import io.github.mayusi.calibratesoc.ui.theme.Spacing
  */
 
 // ── Internal palette ─────────────────────────────────────────────────────
-// These constants mirror the ArsenalComponents palette so that the
-// restyled components look identical to native Arsenal widgets even when
-// callers haven't migrated yet.
-
-private val CArsenalSurface  = Color(0xFF141419)
-private val CArsenalTile     = Color(0xFF0C0C10)
-private val CAccentNeutral   = Color(0xFF6B7280)
-private val CLabelGray       = Color(0xFF999999)
-private val CDimGray         = Color(0xFF777777)
+// These aliases now resolve to the single public token source in
+// ArsenalComponents.kt (AccentBar / ArsenalText) instead of re-declaring
+// their own hex literals. This was the root cause of the hardcoded-color
+// drift: two parallel hand-synced palettes (this one + ArsenalComponents)
+// that callers couldn't reuse because these constants were private — so
+// screens re-typed Color(0xFF999999) etc. instead of referencing a shared
+// token. Values are unchanged (verbatim same hex via ArsenalText /
+// AccentBar) — this is a pure de-duplication, not a restyle.
+private val CArsenalSurface  = ArsenalText.Surface
+private val CArsenalTile     = ArsenalText.Tile
+private val CAccentNeutral   = AccentBar.Neutral
+private val CLabelGray       = ArsenalText.Label
+private val CDimGray         = ArsenalText.Dim
 private val CBorderSubtle    = Color.White.copy(alpha = 0.06f)
 private val CAccentBarWidth  = 3.dp
 private val CCornerRadius    = 4.dp
@@ -361,9 +365,9 @@ fun AlertCard(
     action: (@Composable () -> Unit)? = null,
 ) {
     val (icon, accentColor) = when (type) {
-        AlertType.ERROR   -> Icons.Outlined.ErrorOutline to Color(0xFFFF4D6D)
-        AlertType.WARNING -> Icons.Outlined.WarningAmber to Color(0xFFE0A93D)
-        AlertType.INFO    -> Icons.Outlined.Info          to Color(0xFF5C93F0)
+        AlertType.ERROR   -> Icons.Outlined.ErrorOutline to AccentBar.Red
+        AlertType.WARNING -> Icons.Outlined.WarningAmber to AccentBar.Amber
+        AlertType.INFO    -> Icons.Outlined.Info          to AccentBar.Blue
     }
 
     // Tinted background: blend 15 % accent over Arsenal surface
