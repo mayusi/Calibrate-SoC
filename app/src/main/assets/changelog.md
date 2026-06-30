@@ -1,3 +1,17 @@
+## [0.3.2-alpha] — 2026-06-30
+
+Calibrate works on *any* Android device now — root is optional, just better on handhelds.
+
+### Fixed / Changed — universal again
+- **No more getting locked out.** Calibrate is root-optional: the HUD overlay, FPS & performance monitoring, benchmarks, profiles, and insights all work on **any** device with no special access. A recent build wrongly required the one-tap setup to even get in — that's gone. Every device can always enter the app.
+- **Setup now matches your device.** Onboarding detects what you have and offers the right path:
+  - **PServer handhelds** (Odin, Retroid) → the one-tap auto-setup.
+  - **Rooted devices** → a simple "enable root tuning" step (previously these were ignored).
+  - **Shizuku** → the full Shizuku setup flow, finally built into onboarding.
+  - **Other handhelds** → the run-as-root unlock script — and a device that ran the script can now actually finish setup (it used to get stuck on the last screen).
+  - **Phones / tablets** → an honest "here's what works, and how to unlock live tuning if you want it."
+- The grant for live tuning is always **offered** (and re-reachable later from Settings/Tune), never forced.
+
 ## [0.3.1-alpha] — 2026-06-29
 
 Fixes the big one: AutoTDP now actually changes your clocks. Plus a cleaner, mandatory setup.
