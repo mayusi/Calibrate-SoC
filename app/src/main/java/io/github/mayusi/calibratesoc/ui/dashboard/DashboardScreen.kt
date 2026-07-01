@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -113,7 +114,9 @@ fun DashboardScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_screen"),
         contentPadding = PaddingValues(Spacing.screen),
         verticalArrangement = Arrangement.spacedBy(Spacing.item),
     ) {
@@ -437,7 +440,11 @@ private fun DashHeader(capability: CapabilityReport?, activeTuneState: ActiveTun
         val tierLabel = capability?.chipLabel(vb) ?: PrivilegeTier.NONE.name
         val tierAccent = capability?.tierAccent() ?: AccentBar.Neutral
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.group)) {
-            StatusPill(text = tierLabel, accent = tierAccent)
+            StatusPill(
+                text = tierLabel,
+                accent = tierAccent,
+                modifier = Modifier.testTag("tier_badge"),
+            )
             capability?.device?.knownHandheldKey?.let { key ->
                 StatusPill(text = key, accent = AccentBar.Neutral)
             }

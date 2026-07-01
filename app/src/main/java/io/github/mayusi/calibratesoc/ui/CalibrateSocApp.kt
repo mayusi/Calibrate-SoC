@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -344,6 +345,7 @@ private fun ArsenalBottomBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("bottom_nav")
             .background(bgColor)
             .border(
                 width = 0.5.dp,
@@ -393,6 +395,7 @@ private fun ArsenalBottomBar(
                     modifier = Modifier
                         .weight(1f)
                         .height(barHeight)
+                        .testTag("nav_${dest.route}")
                         .clickable { onNavigate(dest) }
                         .padding(vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,

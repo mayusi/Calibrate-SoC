@@ -2,11 +2,14 @@ package io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Log
 import com.google.common.truth.Truth.assertThat
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.test.runTest
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -32,15 +35,36 @@ import org.junit.Test
 class AyaneoBinderClientCacheTest {
 
     /**
-     * A Context whose PackageManager reports `com.ayaneo.gamewindow` ABSENT, so
+     * android.util.Log is not available in the pure-JVM unit-test runtime. [AyaneoBinderClient]
+     * now logs its probe outcome unconditionally (always-on diagnostics, not DEBUG-gated), so
+     * the static Log calls must be stubbed or they NPE. Mirrors the sibling
+     * AyaneoVendorWriterTest / AppReaperTest setup.
+     */
+    @Before
+    fun stubLog() {
+        mockkStatic(Log::class)
+        every { Log.d(any<String>(), any<String>()) } returns 0
+        every { Log.i(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.e(any<String>(), any<String>()) } returns 0
+    }
+
+    /**
+     * A Context whose PackageManager reports EVERY AYANEO candidate package ABSENT, so
      * [AyaneoBinderClient.isAvailable] short-circuits to false with NO bind/IPC — a clean,
      * deterministic probe we can count via the getPackageInfo invocation.
+     *
+     * isAvailable() checks each DISTINCT candidate package for presence; with all absent the
+     * probe returns false before any bind. We count re-probes via the canonical TARGET_PKG
+     * lookup, which runs exactly once per probe pass.
      */
     private fun contextWithGamewindowAbsent(): Pair<Context, PackageManager> {
         val pm = mockk<PackageManager>()
-        every {
-            pm.getPackageInfo(AyaneoBinderClient.TARGET_PKG, 0)
-        } throws PackageManager.NameNotFoundException()
+        // Stub presence checks for ALL distinct candidate packages as absent (the candidate
+        // list now spans more than one package). Each distinct package is queried once/probe.
+        AyaneoBinderClient.CANDIDATES.map { it.first }.distinct().forEach { pkg ->
+            every { pm.getPackageInfo(pkg, 0) } throws PackageManager.NameNotFoundException()
+        }
         val ctx = mockk<Context>()
         every { ctx.packageManager } returns pm
         every { ctx.applicationContext } returns ctx

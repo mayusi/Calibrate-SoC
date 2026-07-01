@@ -4,8 +4,15 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import androidx.lifecycle.lifecycleScope
@@ -42,6 +49,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var fanCurveController: FanCurveController
 
+    @OptIn(ExperimentalComposeUiApi::class) // testTagsAsResourceId (uiautomator a11y fix)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -52,14 +60,42 @@ class MainActivity : ComponentActivity() {
             // change until the user picks a different accent).
             val accent by userPrefs.accentColor.collectAsStateWithLifecycle(AccentColor.BLUE)
             CalibrateSocTheme(accent = accent) {
-                // Gate: show onboarding wizard until user finishes or
-                // explicitly skips it. State persisted in DataStore so
-                // it appears exactly once per install (or after a wipe).
-                val done by userPrefs.onboardingComplete.collectAsState(initial = null)
-                when (done) {
-                    null -> { /* DataStore still loading — render nothing for ~1 frame */ }
-                    false -> OnboardingScreen(onFinished = { /* state flip triggers recompose */ })
-                    true -> CalibrateSocApp()
+                // ACCESSIBILITY / TESTABILITY: wrap the whole app in a root Box
+                // that enables `testTagsAsResourceId`. Whenever the accessibility
+                // framework actually queries this window (TalkBack on, or a
+                // cooperating uiautomator/UiAutomation connection), Compose exports
+                // its full semantics tree AND surfaces every `Modifier.testTag(...)`
+                // as a dumpable `resource-id`, so screens are addressable for
+                // automated UI verification (verified on Odin 3 / AYANEO Pocket DS:
+                // calibrate_root, dashboard_screen, bottom_nav, nav_*, tier_badge all
+                // appear). This is the standard, side-effect-free way to make a
+                // Compose app uiautomator-addressable.
+                //
+                // NOTE: it does NOT, by itself, resurrect a NULL accessibility root
+                // on a firmware whose UiAutomation never queries Compose windows at
+                // all (observed on the Retroid Pocket 6 firmware RP6_V1.0.0.406 —
+                // a device-side defect; see the task report). Forcing Compose's
+                // internal a11y flag on to work around that CRASHES the app
+                // (AccessibilityManager.sendAccessibilityEvent throws when the
+                // framework's a11y is off), so we deliberately do NOT do that.
+                //
+                // The Box is fillMaxSize + no padding/background, so layout and
+                // appearance are byte-for-byte identical to before.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .semantics { testTagsAsResourceId = true }
+                        .testTag("calibrate_root"),
+                ) {
+                    // Gate: show onboarding wizard until user finishes or
+                    // explicitly skips it. State persisted in DataStore so
+                    // it appears exactly once per install (or after a wipe).
+                    val done by userPrefs.onboardingComplete.collectAsState(initial = null)
+                    when (done) {
+                        null -> { /* DataStore still loading — render nothing for ~1 frame */ }
+                        false -> OnboardingScreen(onFinished = { /* state flip triggers recompose */ })
+                        true -> CalibrateSocApp()
+                    }
                 }
             }
         }

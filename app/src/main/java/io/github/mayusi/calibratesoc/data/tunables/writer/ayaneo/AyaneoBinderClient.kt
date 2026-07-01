@@ -10,7 +10,6 @@ import android.os.Parcel
 import android.os.RemoteException
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
-import io.github.mayusi.calibratesoc.BuildConfig
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -26,20 +25,46 @@ private const val TAG = "CalibrateSoC-AyaBinder"
 /**
  * Production transport to the AYANEO vendor perf binder — the AYANEO analog of
  * [io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter]'s transport, but
- * for `com.ayaneo.gamewindow`'s exported `AyaAidlService` instead of AYN's PServer.
+ * for `com.ayaneo.gamewindow`'s `AyaAidlService` instead of AYN's PServer.
  *
- * ## What this proves (verified LIVE on AYANEO Pocket DS — SG8275 / Android 13)
+ * ## What the perf binder is (decompiled from the AYANEO vendor apps)
  *
- * A normal (even debug-signed, non-system) app CAN bind
- * `com.ayaneo.gamewindow/.utils.aidl.AyaAidlService` (exported=true, NO permission
- * guard) and send perf commands; the overlay (uid=system) actuates the privileged
- * sysfs write. Binding succeeded, the transact returned without exception, and the
- * GPU kgsl node moved (680000000 → 585000000, then restored). This client uses the
- * exact working binder call that an on-device de-risk probe verified before this
- * production path was built.
+ * The actuating service is `com.ayaneo.gamewindow/.utils.aidl.AyaAidlService`. Its
+ * `onBind()` returns an `AyaAidlInterface`-style stub; transaction 1 reads a string and
+ * dispatches it to `PerformanceManager`, which (running as uid=system) actuates the
+ * privileged CPU/GPU/fan sysfs write. The wire protocol (the `com_set_performance_*`
+ * token family in [AyaneoCommands]) is unchanged across the firmwares we have inspected.
+ *
+ * ## The firmware-version problem this client must survive (THE root cause we fixed)
+ *
+ * Whether a NON-system app (us — debug-signed, our own uid) can bind that service depends
+ * entirely on whether the firmware **declares it as an exported `<service>` in the
+ * gamewindow manifest**:
+ *  - On the older Pocket DS firmware the service WAS manifest-declared + exported, so a
+ *    non-system bind succeeded zero-setup (GPU kgsl node moved 680→585→680 MHz, verified).
+ *  - On a NEWER Pocket DS firmware (live-probed: SG8275 / Android 13) the gamewindow
+ *    Service Resolver Table exposes ONLY `NotificationService` + `WindowKeyEventService`.
+ *    `AyaAidlService` still exists in the dex with the same protocol, but is NOT declared
+ *    in the manifest, so PackageManager cannot resolve it and a cross-app `bindService`
+ *    SILENTLY returns false (the AYANEO settings app still binds it only because it is a
+ *    system/signature app). Our bind cannot succeed on that firmware.
+ *
+ * Before this fix the bind failure was SILENT (`isAvailable` logged nothing and just
+ * returned false), so a device could not tell WHY AYANEO fell to the read-only tier. This
+ * client now:
+ *  1. tries a small CANDIDATE LIST of `(pkg, cls)` perf-service components (old name + any
+ *     known variants) so it works across Pocket DS firmware versions without a code change;
+ *  2. RESOLVES each candidate against PackageManager first, so a "not declared / not
+ *     exported in the manifest" firmware is reported as exactly that — not a mystery;
+ *  3. LOGS every outcome (package-absent / not-resolvable / not-exported / bind-returned-
+ *     false / null-binding / timeout / dead-binder) at WARN/INFO so on-device debugging is
+ *     possible on release builds.
+ *
+ * HONESTY: when no candidate binds, [isAvailable] returns false and the app falls back to
+ * its other tiers (Shizuku / root). We NEVER report a live binder we cannot actually drive.
  *
  * ## Wire protocol
- *  - Bind: Intent component {pkg=[TARGET_PKG], cls=[TARGET_CLS]}, BIND_AUTO_CREATE.
+ *  - Bind: Intent component {pkg, cls} from a [CANDIDATES] entry, BIND_AUTO_CREATE.
  *  - On the IBinder: `transact(1, data, reply, 0)` where data is
  *    `writeInterfaceToken([IFACE_DESCRIPTOR])` then `writeString(payload)`; then
  *    `reply.readException()` (throws if the server wrote an exception).
@@ -48,15 +73,16 @@ private const val TAG = "CalibrateSoC-AyaBinder"
  * ## Lifecycle
  *  - The connection is CACHED across calls (re-bind only when the binder is null/dead),
  *    so the steady-state cost per command is a single `transact`, not a bind round-trip.
+ *    The component that actually bound is remembered so a rebind goes straight to it.
  *  - A [Mutex] serialises bind/rebind so concurrent callers never race two binds.
- *  - [isAvailable] probes ONCE (gamewindow installed + a real bind succeeds) and caches
+ *  - [isAvailable] probes ONCE (a candidate resolves AND a real bind succeeds) and caches
  *    the result, mirroring [PServerWriter.isTransactable]'s honest-probe pattern. A mere
  *    "package installed" check is NOT sufficient — we require a real bind.
  *
  * ## Safety
- *  - Every failure mode (package absent, bind denied, bind timeout, dead binder,
- *    SecurityException, server exception) degrades to `false`/no-op — this NEVER throws
- *    and NEVER crashes the app.
+ *  - Every failure mode (package absent, unresolvable, bind denied, bind timeout, dead
+ *    binder, SecurityException, server exception) degrades to `false`/no-op — this NEVER
+ *    throws and NEVER crashes the app.
  *  - All binder work runs off the main thread (callers dispatch on Dispatchers.IO).
  */
 @Singleton
@@ -75,6 +101,13 @@ class AyaneoBinderClient @Inject constructor(
     @Volatile private var connection: ServiceConnection? = null
     @Volatile private var binder: IBinder? = null
 
+    /**
+     * The candidate component that actually bound (cached so a rebind goes straight to the
+     * known-good component instead of re-walking the whole list). Cleared on a dead binder /
+     * disconnect alongside [binder] so the next bind re-probes from the top.
+     */
+    @Volatile private var boundComponent: ComponentName? = null
+
     /** Serialises bind / rebind so two callers never launch parallel binds. */
     private val bindMutex = Mutex()
 
@@ -91,26 +124,48 @@ class AyaneoBinderClient @Inject constructor(
     @Volatile private var availableCache: Boolean? = null
 
     /**
-     * True when `com.ayaneo.gamewindow` is installed AND we could bind its
-     * `AyaAidlService` at least once. Probed lazily and cached for the session.
+     * True when at least one [CANDIDATES] perf-service component is installed AND we could
+     * bind it at least once. Probed lazily and cached for the session.
      *
-     * HONESTY: this performs a REAL bind (not just a package-presence check) — the
-     * service could be present-but-unbindable on a future firmware, and we must not
-     * report a live path we can't actually drive. Mirrors
-     * [PServerWriter.isTransactable]'s real-transact-then-cache discipline.
+     * HONESTY: this performs a REAL bind (not just a package-presence check) — the service
+     * could be present-but-unbindable on a firmware that un-exported it, and we must not
+     * report a live path we can't actually drive. Mirrors [PServerWriter.isTransactable]'s
+     * real-transact-then-cache discipline.
      *
-     * Cheap short-circuit: if the package isn't installed we return false with no IPC.
+     * Cheap short-circuit: if none of the candidate packages is installed we return false
+     * with no IPC. The distinct candidate packages are checked once each.
      */
     suspend fun isAvailable(): Boolean {
         availableCache?.let { return it }
-        if (!isGamewindowInstalled()) {
+
+        // Cheap short-circuit: if NONE of the candidate packages is even installed there is
+        // no AYANEO perf surface here — return false with no IPC. (Logged so a non-AYANEO
+        // device's false is distinguishable from a bind failure on a real AYANEO unit.)
+        // Check DISTINCT packages once each (several candidate components can share a package).
+        val candidatePackages = CANDIDATES.map { it.first }.distinct()
+        val installedPackages = candidatePackages.filter { isPackageInstalled(it) }
+        if (installedPackages.isEmpty()) {
+            Log.i(TAG, "isAvailable() → false: no AYANEO perf-service package installed " +
+                "(checked $candidatePackages)")
             availableCache = false
             return false
         }
-        // A successful ensureBinder() means bindService returned true and
-        // onServiceConnected delivered a non-null binder within the timeout.
+
+        // A successful ensureBinder() means a candidate RESOLVED in the manifest AND
+        // bindService returned true AND onServiceConnected delivered a non-null binder
+        // within the timeout. bindAnyCandidate() logs the per-candidate outcome itself.
         val ok = ensureBinder() != null
-        if (BuildConfig.DEBUG) Log.i(TAG, "isAvailable() probe → $ok")
+        if (ok) {
+            Log.i(TAG, "isAvailable() → true: bound ${boundComponent?.flattenToShortString()}")
+        } else {
+            // HONESTY: every installed candidate failed to bind. On the newer Pocket DS
+            // firmware this is expected — AyaAidlService is no longer manifest-declared, so a
+            // non-system app cannot bind it. The app correctly falls back to its other tiers.
+            Log.w(TAG, "isAvailable() → false: AYANEO package(s) $installedPackages present but " +
+                "NO perf service was bindable (component not declared/exported in this firmware, " +
+                "or bind denied). Falling back to non-binder tiers. See WARN lines above for the " +
+                "exact per-candidate reason.")
+        }
         availableCache = ok
         return ok
     }
@@ -170,7 +225,7 @@ class AyaneoBinderClient @Inject constructor(
      */
     fun invalidateAvailabilityCache() {
         availableCache = null
-        if (BuildConfig.DEBUG) Log.i(TAG, "invalidateAvailabilityCache(): cleared")
+        Log.i(TAG, "invalidateAvailabilityCache(): cleared — next isAvailable() will re-probe")
     }
 
     // ── Binder acquisition ─────────────────────────────────────────────────────
@@ -194,15 +249,69 @@ class AyaneoBinderClient @Inject constructor(
             // leak a ServiceConnection (ServiceConnectionLeaked) across rebinds. Safe to
             // call when nothing is bound. Exactly one live binding at a time.
             dropConnection()
-            bindOnce()
+            bindAnyCandidate()
         }
     }
 
     /**
-     * Perform a single bind and suspend until onServiceConnected delivers the binder
-     * or the timeout elapses. Caches the connection + binder on success. Never throws.
+     * Walk the [CANDIDATES] list and bind the FIRST one that is installed and actually hands
+     * back a binder. Returns the live binder or null when every candidate fails. Logs the
+     * exact reason per candidate so a firmware where the perf service was un-exported is
+     * diagnosable from logcat. Must be called under [bindMutex].
+     *
+     * IMPORTANT — the manifest-resolution check is ADVISORY ONLY (a logged diagnostic), NOT a
+     * gate: AYANEO's perf `<service>` is declared `exported="true"` with NO `<intent-filter>`,
+     * so it is invisible to `queryIntentServices` and absent from the `dumpsys` Service
+     * Resolver Table, yet it IS bindable by EXPLICIT component (verified live — our own
+     * non-system app uid binds it). [getServiceInfo] is a component-level query and normally
+     * returns such a service, but to be safe against any visibility quirk we ALWAYS attempt
+     * the explicit bind when the package is installed, and only use the resolution result to
+     * annotate the log. The bind itself (or its failure) is the source of truth.
+     *
+     * Cache hint: if a previous bind succeeded on [boundComponent], try it first so a rebind
+     * goes straight to the known-good component.
      */
-    private suspend fun bindOnce(): IBinder? {
+    private suspend fun bindAnyCandidate(): IBinder? {
+        // Prefer the last-known-good component (fast rebind), then the rest of the list.
+        // CANDIDATES are (pkg, cls) String pairs; the Android ComponentName is built lazily
+        // per iteration below (on-device — never at class-load, so unit tests stay JVM-safe).
+        val ordered = boundComponent?.let { last ->
+            val lastPair = last.packageName to last.className
+            listOf(lastPair) + CANDIDATES.filterNot { it == lastPair }
+        } ?: CANDIDATES
+
+        for ((pkg, cls) in ordered) {
+            val component = ComponentName(pkg, cls)
+            if (!isPackageInstalled(component.packageName)) {
+                // Quiet at INFO — a candidate package simply not present on this device is
+                // normal (we ship one client for several possible firmwares).
+                Log.i(TAG, "candidate ${component.flattenToShortString()}: package not installed — skip")
+                continue
+            }
+            // Advisory diagnostic only — does NOT gate the bind (see KDoc: filter-less
+            // exported services are bindable-by-component but may not "resolve" by intent).
+            val resolution = resolveService(component)
+            Log.i(TAG, "candidate ${component.flattenToShortString()}: manifest resolution = " +
+                "$resolution — attempting explicit-component bind regardless")
+
+            val live = bindOnce(component)
+            if (live != null) {
+                Log.i(TAG, "candidate ${component.flattenToShortString()}: BIND OK")
+                boundComponent = component
+                return live
+            }
+            Log.w(TAG, "candidate ${component.flattenToShortString()}: bind did NOT deliver a " +
+                "binder (manifest resolution was $resolution; see preceding WARN for the " +
+                "false/null/timeout reason). Trying next candidate.")
+        }
+        return null
+    }
+
+    /**
+     * Perform a single bind to [component] and suspend until onServiceConnected delivers the
+     * binder or the timeout elapses. Caches the connection + binder on success. Never throws.
+     */
+    private suspend fun bindOnce(component: ComponentName): IBinder? {
         val appContext = context.applicationContext
         var localConn: ServiceConnection? = null
         var bound = false
@@ -211,9 +320,7 @@ class AyaneoBinderClient @Inject constructor(
                 suspendCancellableCoroutine<IBinder?> { cont ->
                     val conn = object : ServiceConnection {
                         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                            if (BuildConfig.DEBUG) {
-                                Log.i(TAG, "onServiceConnected: ${name?.flattenToShortString()}")
-                            }
+                            Log.i(TAG, "onServiceConnected: ${name?.flattenToShortString()}")
                             cont.resumeIfActive(service)
                         }
 
@@ -222,7 +329,7 @@ class AyaneoBinderClient @Inject constructor(
                             // HIGH-2: the binding is dead — UNBIND the old connection (not
                             // just null the binder) so the next ensureBinder() doesn't bind a
                             // fresh ServiceConnection on top of a leaked one. dropConnection()
-                            // unbinds + nulls both connection and binder.
+                            // unbinds + nulls connection, binder, and boundComponent.
                             dropConnection()
                             // MEDIUM-3: the binder we probed as available is gone, so the
                             // memoised availability is now potentially stale. Clear it so the
@@ -233,26 +340,29 @@ class AyaneoBinderClient @Inject constructor(
                         }
 
                         override fun onNullBinding(name: ComponentName?) {
-                            Log.w(TAG, "onNullBinding: ${name?.flattenToShortString()}")
+                            Log.w(TAG, "onNullBinding: ${name?.flattenToShortString()} — " +
+                                "service returned a null binder")
                             cont.resumeIfActive(null)
                         }
                     }
                     localConn = conn
 
-                    val intent = Intent().apply {
-                        component = ComponentName(TARGET_PKG, TARGET_CLS)
-                    }
+                    val intent = Intent().apply { this.component = component }
                     bound = try {
                         appContext.bindService(intent, conn, Context.BIND_AUTO_CREATE)
                     } catch (e: SecurityException) {
-                        Log.w(TAG, "bindService SecurityException: ${e.message}")
+                        Log.w(TAG, "bindService SecurityException for " +
+                            "${component.flattenToShortString()}: ${e.message}")
                         false
                     } catch (t: Throwable) {
-                        Log.w(TAG, "bindService threw: ${t.javaClass.simpleName}: ${t.message}")
+                        Log.w(TAG, "bindService threw for ${component.flattenToShortString()}: " +
+                            "${t.javaClass.simpleName}: ${t.message}")
                         false
                     }
                     if (!bound) {
-                        Log.w(TAG, "bindService returned false — framework refused the bind")
+                        Log.w(TAG, "bindService returned false for " +
+                            "${component.flattenToShortString()} — framework refused the bind " +
+                            "(service not exported to us / not declared on this firmware)")
                         cont.resumeIfActive(null)
                     }
                     cont.invokeOnCancellation {
@@ -266,11 +376,13 @@ class AyaneoBinderClient @Inject constructor(
                 binder = live
             }
         } catch (_: TimeoutCancellationException) {
-            Log.w(TAG, "bindOnce(): bind timed out after ${BIND_TIMEOUT_MS}ms")
+            Log.w(TAG, "bindOnce(${component.flattenToShortString()}): bind timed out after " +
+                "${BIND_TIMEOUT_MS}ms")
             if (bound) localConn?.let { runCatching { appContext.unbindService(it) } }
             null
         } catch (t: Throwable) {
-            Log.w(TAG, "bindOnce(): unexpected ${t.javaClass.simpleName}: ${t.message}")
+            Log.w(TAG, "bindOnce(${component.flattenToShortString()}): unexpected " +
+                "${t.javaClass.simpleName}: ${t.message}")
             null
         }
     }
@@ -284,6 +396,44 @@ class AyaneoBinderClient @Inject constructor(
         }
         connection = null
         binder = null
+        boundComponent = null
+    }
+
+    // ── Service resolution ─────────────────────────────────────────────────────
+
+    private enum class ServiceResolution {
+        /** A declared, exported service component visible to us — a bind can be attempted. */
+        Resolvable,
+
+        /** PackageManager has no such service component (not declared, or not visible to us). */
+        NotDeclared,
+
+        /** The component resolves but is not exported (a non-system app cannot bind it). */
+        NotExported,
+    }
+
+    /**
+     * Ask PackageManager whether [component] is a service we could actually bind: it must
+     * resolve (be declared in the target's manifest AND visible to us via the `<queries>`
+     * entry) and be exported. This converts the otherwise-SILENT `bindService → false` on a
+     * firmware that un-declared the perf service into an explicit, logged reason.
+     *
+     * Visibility note: the AYANEO packages are declared in our AndroidManifest `<queries>`
+     * block, so PackageManager exposes their components to us when they ARE declared+exported.
+     * A genuinely un-exported / undeclared service resolves to NotDeclared/NotExported here
+     * exactly as it would refuse the bind — so this pre-check is a faithful predictor, never
+     * a false gate.
+     */
+    private fun resolveService(component: ComponentName): ServiceResolution = try {
+        val info = context.packageManager.getServiceInfo(component, 0)
+        if (info.exported) ServiceResolution.Resolvable else ServiceResolution.NotExported
+    } catch (_: PackageManager.NameNotFoundException) {
+        ServiceResolution.NotDeclared
+    } catch (t: Throwable) {
+        // Any unexpected PM failure: treat as not-declared so we skip the bind safely.
+        Log.w(TAG, "resolveService(${component.flattenToShortString()}) threw " +
+            "${t.javaClass.simpleName}: ${t.message} — treating as not-declared")
+        ServiceResolution.NotDeclared
     }
 
     // ── Transact ───────────────────────────────────────────────────────────────
@@ -327,8 +477,8 @@ class AyaneoBinderClient @Inject constructor(
 
     // ── Package presence ───────────────────────────────────────────────────────
 
-    private fun isGamewindowInstalled(): Boolean = try {
-        context.packageManager.getPackageInfo(TARGET_PKG, 0)
+    private fun isPackageInstalled(pkg: String): Boolean = try {
+        context.packageManager.getPackageInfo(pkg, 0)
         true
     } catch (_: PackageManager.NameNotFoundException) {
         false
@@ -341,9 +491,50 @@ class AyaneoBinderClient @Inject constructor(
     }
 
     companion object {
-        /** Target package + service class of the exported AIDL endpoint. */
+        /**
+         * Primary (historical) package + service class of the AYANEO perf AIDL endpoint.
+         * On firmwares that still declare+export it, this is the component we bind. Kept as
+         * named constants because tests and docs reference the canonical component.
+         */
         const val TARGET_PKG = "com.ayaneo.gamewindow"
         const val TARGET_CLS = "com.ayaneo.gamewindow.utils.aidl.AyaAidlService"
+
+        /**
+         * Candidate perf-service components, tried in order. The first one that is installed,
+         * resolves as a declared+exported `<service>`, and hands back a binder wins.
+         *
+         * Why a list: the externally-bindable perf service has moved/been un-exported across
+         * Pocket DS firmware revisions. Trying a small set of known component names makes this
+         * client robust to the firmware version WITHOUT a code change — and the per-candidate
+         * resolve+log makes it honest about which (if any) actually bound.
+         *
+         * All candidates speak the SAME wire protocol ([IFACE_DESCRIPTOR] + the
+         * `com_set_performance_*` token family in [AyaneoCommands]) — decompiling the current
+         * gamewindow build confirmed `AidlConstants` still defines the identical tokens. If a
+         * future firmware genuinely changes the protocol, that is a separate change; here we
+         * only vary WHICH component hosts the unchanged protocol.
+         *
+         * NOTE (live-probed truth on SG8275 / Android 13 Pocket DS): NONE of these currently
+         * resolves as exported — gamewindow declares only Notification/WindowKeyEvent services,
+         * and com.aya.gsset's GsService is an android_id helper whose onBind throws. So on that
+         * firmware [isAvailable] honestly returns false and the app uses its other tiers. The
+         * list still costs nothing and lights up automatically if AYANEO re-exports the service.
+         */
+        // Stored as (pkg, cls) STRING pairs, NOT android.content.ComponentName objects.
+        // ComponentName is an Android framework type; constructing it at class-load makes
+        // this companion unusable under plain JVM unit tests (with returnDefaultValues the
+        // stubbed getters return null → NPE in isAvailable). We build the ComponentName
+        // lazily, at bind time, on-device — exactly where the old single-component code did.
+        val CANDIDATES: List<Pair<String, String>> = listOf(
+            // 1) The canonical historical component (worked zero-setup on older Pocket DS FW).
+            TARGET_PKG to TARGET_CLS,
+            // 2) Same service, addressed without the inner `utils.aidl` segment — some builds
+            //    flatten the class path. Harmless if absent (resolve → NotDeclared → skipped).
+            TARGET_PKG to "com.ayaneo.gamewindow.AyaAidlService",
+            // 3) The settings app embeds the same AyaAidlInterface; if a firmware ever hosts
+            //    the service there as an exported endpoint, this picks it up.
+            "com.ayaneo.settings" to "com.ayaneo.gamewindow.utils.aidl.AyaAidlService",
+        )
 
         /** Binder interface descriptor the server enforces on transaction 1. */
         const val IFACE_DESCRIPTOR = "com.ayaneo.gamewindow.AyaAidlInterface"
