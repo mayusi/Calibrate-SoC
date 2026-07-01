@@ -1,3 +1,11 @@
+## [0.3.4-alpha] — 2026-07-01
+
+Better AYANEO support and an accessibility fix.
+
+### Fixed
+- **AYANEO tuning detection is firmware-robust now.** Newer AYANEO Pocket DS firmware moved its performance service, so Calibrate couldn't find it and fell back to read-only. It now tries several known service locations and uses whichever your firmware exposes — and tells you honestly if none are available (so it uses another path instead of showing a wrong "live" state).
+- **Accessibility fix:** the app's screens can now be read by screen readers (TalkBack) and automated tools — previously the UI wasn't exposing its content to the accessibility layer at all.
+
 ## [0.3.3-alpha] — 2026-07-01
 
 A polish + correctness pass — things now show right across every device, including AYANEO.
