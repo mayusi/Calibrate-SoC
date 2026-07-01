@@ -40,14 +40,17 @@ private const val TAG = "CalibrateSoC-AyaBinder"
  * Whether a NON-system app (us — debug-signed, our own uid) can bind that service depends
  * entirely on whether the firmware **declares it as an exported `<service>` in the
  * gamewindow manifest**:
- *  - On the older Pocket DS firmware the service WAS manifest-declared + exported, so a
- *    non-system bind succeeded zero-setup (GPU kgsl node moved 680→585→680 MHz, verified).
- *  - On a NEWER Pocket DS firmware (live-probed: SG8275 / Android 13) the gamewindow
- *    Service Resolver Table exposes ONLY `NotificationService` + `WindowKeyEventService`.
- *    `AyaAidlService` still exists in the dex with the same protocol, but is NOT declared
- *    in the manifest, so PackageManager cannot resolve it and a cross-app `bindService`
- *    SILENTLY returns false (the AYANEO settings app still binds it only because it is a
- *    system/signature app). Our bind cannot succeed on that firmware.
+ *  - The `AyaAidlService` is bindable zero-setup by explicit ComponentName from a normal
+ *    (non-system) app. LIVE-VERIFIED on a Pocket DS running SG8275 / Android 13: the bind
+ *    succeeds (`manifest resolution = Resolvable`, `BIND OK`) AND actuates — a GPU-set via
+ *    the binder physically moved the kgsl ceiling 680→550→680 MHz (restored to stock).
+ *  - CAVEAT on `dumpsys package`: the Service Resolver Table only lists services with an
+ *    intent-filter (Notification/WindowKeyEvent here). `AyaAidlService` is exported WITHOUT
+ *    a filter, so it is absent from that table yet still bindable by explicit component —
+ *    do NOT treat "not in the resolver table" as "not bindable". We bind by component and
+ *    let PackageManager resolution + the real bind result be the source of truth.
+ *  - Firmware variance is still possible (a build could un-export or rename the service),
+ *    which is why this client walks a candidate list + probes honestly rather than assuming.
  *
  * Before this fix the bind failure was SILENT (`isAvailable` logged nothing and just
  * returned false), so a device could not tell WHY AYANEO fell to the read-only tier. This
@@ -514,11 +517,12 @@ class AyaneoBinderClient @Inject constructor(
          * future firmware genuinely changes the protocol, that is a separate change; here we
          * only vary WHICH component hosts the unchanged protocol.
          *
-         * NOTE (live-probed truth on SG8275 / Android 13 Pocket DS): NONE of these currently
-         * resolves as exported — gamewindow declares only Notification/WindowKeyEvent services,
-         * and com.aya.gsset's GsService is an android_id helper whose onBind throws. So on that
-         * firmware [isAvailable] honestly returns false and the app uses its other tiers. The
-         * list still costs nothing and lights up automatically if AYANEO re-exports the service.
+         * NOTE (live-verified on SG8275 / Android 13 Pocket DS): candidate #1
+         * `com.ayaneo.gamewindow/.utils.aidl.AyaAidlService` resolves + binds cleanly from
+         * our own uid and ACTUATES (GPU ceiling moved 680→550→680 MHz via the binder). It is
+         * exported without an intent-filter, so it's absent from the `dumpsys` Service
+         * Resolver Table but bindable by explicit component. The other candidates are
+         * firmware-variance fallbacks; the honest per-candidate probe picks whichever binds.
          */
         // Stored as (pkg, cls) STRING pairs, NOT android.content.ComponentName objects.
         // ComponentName is an Android framework type; constructing it at class-load makes
