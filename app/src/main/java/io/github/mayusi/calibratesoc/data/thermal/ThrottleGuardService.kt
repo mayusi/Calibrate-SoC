@@ -176,15 +176,39 @@ class ThrottleGuardService : Service() {
             return
         }
 
-        val stockCeilingKhz = bigPolicy.availableFreqsKhz.maxOrNull()
-            ?: bigPolicy.currentMaxKhz
+        // CRITICAL (AYANEO crash fix, sibling of the AutoTDP writable-ceiling fix in
+        // TdpCaps.from): bigPolicy.availableFreqsKhz is the RAW full kernel OPP table
+        // (top 2 592 000 on AYANEO Pocket DS). On a constrained vendor write path
+        // (AYANEO's `gamewindow` overlay, no root/PServer/chmod-direct) the vendor
+        // REJECTS any scaling_max_freq above the stock ceiling (1 785 600) — targeting
+        // above it is the same rejected-write storm that crashed `com.ayaneo.gamewindow`
+        // via the AutoTDP idle path. Route through TdpCaps.from(report), the SAME
+        // writable-bounded model AutoTdpEngine now uses, so the guard's stock ceiling
+        // AND its OPP/snap table are both clamped to what this device actually accepts.
+        // On Odin/RP6 (proven full-kernel write path) the writable ceiling == the
+        // kernel top, so behavior is unregressed — the guard still reaches max.
+        //
+        // Actuate against caps.bigPolicyId, NOT the local `bigPolicy` above: on 2-cluster
+        // devices (little+big — AYANEO, Odin 3, RP6) they're the same policy, but on a
+        // 3+ cluster device TdpCaps.from's bigPolicyId is the gold/big policy (second
+        // highest top OPP) while the local `bigPolicy` here is the prime policy (highest)
+        // — mixing the two would pair the wrong cluster's write id with this ceiling/OPP
+        // table. caps.bigPolicyId is the exact node AutoTdpEngine/AutoTdpService cap
+        // (Tunables.cpuMaxFreq(caps.bigPolicyId)), so mirroring it here keeps the guard
+        // and AutoTDP capping the identical node.
+        val caps = io.github.mayusi.calibratesoc.data.autotdp.TdpCaps.from(report)
+        val actuatedPolicy = report.cpuPolicies.firstOrNull { it.policyId == caps.bigPolicyId }
+            ?: bigPolicy
+        val stockCeilingKhz = caps.bigClusterWritableMaxKhz.takeIf { it > 0 }
+            ?: (actuatedPolicy.availableFreqsKhz.maxOrNull() ?: actuatedPolicy.currentMaxKhz)
         val actuator = ThrottleGuardActuator(
-            bigPolicyId = bigPolicy.policyId,
+            bigPolicyId = caps.bigPolicyId,
             stockCeilingKhz = stockCeilingKhz,
-            // HIGH-2: real device OPP steps for the cap, so the guard never writes a
-            // value the kernel will silently clamp (its activeCapKhz belief == reality),
-            // and the shared 40% hard floor below is snapped to a real OPP.
-            availableFreqsKhz = bigPolicy.availableFreqsKhz,
+            // HIGH-2 + AYANEO fix: writable-bounded OPP steps for the cap (never the raw
+            // kernel table), so the guard never writes a value the kernel will silently
+            // clamp OR the vendor overlay will reject, and the shared 40% hard floor
+            // below is snapped to a real, WRITABLE OPP.
+            availableFreqsKhz = caps.bigClusterOppStepsKhz,
         )
 
         // CRITICAL-1: publish the resolved report so EVERY exit path (stopDaemon /

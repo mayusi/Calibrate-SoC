@@ -20,8 +20,30 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityReport
  *                         scaling_max_freq.
  *
  * [bigClusterOppStepsKhz] — Available OPP steps for the big policy, sorted
- *                           ascending. The engine steps through these when
- *                           clamping or relaxing the cap.
+ *                           ascending, CLAMPED to the effective WRITABLE ceiling
+ *                           (see [bigClusterWritableMaxKhz]). The engine steps
+ *                           through these when clamping or relaxing the cap; its
+ *                           top is therefore the highest OPP the device will
+ *                           actually ACCEPT, never a kernel OPP the vendor write
+ *                           path silently rejects. Because every cap-target and
+ *                           the 40% hard floor are derived from this list's top,
+ *                           clamping here makes the whole engine writable-bounded
+ *                           at a single point.
+ *
+ * [bigClusterWritableMaxKhz] — The highest big-policy OPP that is actually
+ *                           writable/accepted on THIS device's effective write
+ *                           path, distinct from the full kernel OPP table top.
+ *                           On a fully-kernel-writable device (root / PServer /
+ *                           chmod-direct) this EQUALS the kernel OPP top — the
+ *                           step table is unclamped and the engine still reaches
+ *                           max (Odin 3 / RP6 unregressed). On a constrained
+ *                           vendor path (AYANEO vendor binder, or any tier with
+ *                           no proven full-kernel write) it is the STOCK
+ *                           scaling_max_freq the vendor set — the overlay clamps
+ *                           / rejects anything above it, so the engine must never
+ *                           target above this (targeting above is what crashed
+ *                           `com.ayaneo.gamewindow` via the rejected-write storm).
+ *                           Sourced honestly from the device, never hardcoded.
  *
  * [gpuMinLevel]         — Adreno max_pwrlevel lower bound (fastest level
  *                         supported). Lower index = higher GPU performance.
@@ -63,6 +85,16 @@ data class TdpCaps(
     val primeCoreIndices: List<Int>,
     val bigPolicyId: Int,
     val bigClusterOppStepsKhz: List<Int>,
+    /**
+     * The highest big-policy OPP actually WRITABLE on this device's effective
+     * write path (see the class KDoc). Equals the kernel OPP top on
+     * fully-kernel-writable devices (root / PServer / chmod-direct); equals the
+     * stock scaling_max_freq on constrained vendor paths (AYANEO binder, etc.).
+     * [bigClusterOppStepsKhz] is clamped to this value. Defaulted (0 → "no
+     * clamp known") so existing test fixtures that build TdpCaps directly keep
+     * compiling; [from] always sets a real value.
+     */
+    val bigClusterWritableMaxKhz: Int = 0,
     val gpuMinLevel: Int?,
     val gpuMaxLevel: Int?,
     val minOnlineCores: Int,
@@ -135,7 +167,127 @@ data class TdpCaps(
             }
 
             val bigPolicyId = bigPolicy?.policyId ?: 0
-            val bigClusterOppSteps = bigPolicy?.availableFreqsKhz?.sorted() ?: emptyList()
+            val bigClusterOppFull = bigPolicy?.availableFreqsKhz?.sorted() ?: emptyList()
+
+            // ── Effective WRITABLE ceiling (the AYANEO crash fix) ──────────────
+            // The FULL kernel OPP table top is NOT necessarily writable. Some
+            // vendor write paths (AYANEO's `gamewindow` overlay) clamp/reject any
+            // scaling_max_freq above the STOCK ceiling the vendor set; targeting
+            // above it never moves the node AND the rejected-write storm crashes
+            // the vendor app. So the cap-target step table must top out at the
+            // highest OPP this device will actually ACCEPT.
+            //
+            // A cluster's max node is fully kernel-writable — writable ceiling ==
+            // kernel OPP top, so NO clamp — exactly when we hold a proven
+            // full-kernel sysfs write path:
+            //   • ROOT (Magisk / KernelSU), or
+            //   • PServer root runner live (Odin 3 / RP6 — write anything), or
+            //   • sysfs chmod-666 direct (unlock script grants app-UID writes).
+            // On any of those, Odin/RP6 stay UNREGRESSED: they still reach max.
+            //
+            // Otherwise (AYANEO vendor binder, vendor-settings, NoopWriter, or any
+            // tier without a proven full-kernel write) the honest writable ceiling
+            // is the STOCK scaling_max_freq (bigPolicy.currentMaxKhz) — the vendor
+            // overlay accepts nothing above it. Sourced from the device, never
+            // hardcoded.
+            val fullKernelWritable =
+                report.privilege == io.github.mayusi.calibratesoc.data.capability.PrivilegeTier.ROOT ||
+                    report.pserverSysfsLive ||
+                    report.sysfsDirectlyWritable
+
+            // ── Is the CPU-freq CAP-DOWN lever itself writable? (the SHIP-BLOCKER) ──
+            // Distinct from "is there ANY live write path". The AYANEO vendor overlay
+            // (com.ayaneo.gamewindow) ACCEPTS a scaling_max_freq write ONLY at the stock
+            // ceiling (a no-op); ANY sub-stock value is REJECTED (readback snaps back to
+            // stock — live-proven on the AYANEO Pocket DS). So on that path the CPU cap
+            // can never step DOWN: it is a DEAD lever for power reduction. If we keep a
+            // full sub-stock OPP step table there, `stepCapDown` always finds a lower
+            // index → reports changed=true → `applyTightenLever` returns on Lever.CAP
+            // FIRST every tick and NEVER falls through to the GPU lever that DOES actuate
+            // on AYANEO (AyaneoVendorWriter → com_set_performance_gpu → kgsl-3d0 devfreq,
+            // readable+verified). Net: nothing actuates.
+            //
+            // Model this HONESTLY as a capability of the cap lever, NOT as a blunt
+            // `!fullKernelWritable`. They only COINCIDE today because AYANEO is the sole
+            // constrained live tier and its CPU cap happens to be a no-op:
+            //   • fully-kernel-writable (ROOT / PServer live / chmod-direct) → the cap
+            //     writes a real sub-stock range → cap-down is a LIVE lever → KEEP the full
+            //     writable table (Odin 3 / RP6 / ROOT step CPU down normally — UNREGRESSED).
+            //   • AYANEO vendor-binder live with NO full-kernel path → the cap can only be
+            //     written at stock → cap-down is a NO-OP → DEAD lever.
+            // FUTURE: if a constrained device ever exposes a REAL writable sub-stock CPU
+            // range through its vendor path, flip this to `true` for that path (e.g. gate on
+            // a probed "vendor accepts sub-stock scaling_max" signal) so it keeps its cap
+            // granularity. Do NOT let the AYANEO coincidence harden into an unlabeled
+            // `!fullKernelWritable` — the concept is "can the CPU cap step down", not
+            // "is the kernel writable".
+            val cpuCapLeverWritable = when {
+                fullKernelWritable -> true
+                // Known dead-CPU-cap path: AYANEO vendor binder is the live tier but its
+                // scaling_max_freq write is a stock-only no-op.
+                report.ayaneoBinderLive -> false
+                // Any other tier: default to writable (unchanged behaviour for every
+                // non-AYANEO device — they keep their full step table exactly as before).
+                else -> true
+            }
+
+            val kernelTopKhz = bigClusterOppFull.lastOrNull() ?: 0
+            // The stock ceiling the vendor set for the big policy (scaling_max_freq).
+            // Fall back to the kernel top when it's missing/absurd so we never
+            // under-clamp to zero and strand the engine at the bottom OPP.
+            val stockCeilingKhz = (bigPolicy?.currentMaxKhz ?: 0)
+                .takeIf { it > 0 }
+                ?: kernelTopKhz
+
+            val writableMaxKhz = when {
+                bigClusterOppFull.isEmpty() -> 0
+                fullKernelWritable -> kernelTopKhz
+                // Constrained path: clamp to the stock ceiling, but never above the
+                // real kernel top (a bogus stock read can't invent OPPs).
+                else -> minOf(stockCeilingKhz, kernelTopKhz)
+            }
+
+            // Clamp the CAP-TARGET step table to the writable ceiling. Every
+            // downstream consumer (stepCapDown's steps.lastIndex, the 40% hard
+            // floor off steps.last(), enforceInvariants, the seed, the budget
+            // fraction) derives its top-of-range from THIS list, so clamping here
+            // makes the entire engine writable-bounded at one point — no tick can
+            // ever target above what the device accepts. Guarantee ≥1 step: if the
+            // ceiling somehow lands below the lowest OPP, keep the single lowest
+            // step so the controller still has a valid (degenerate) table.
+            val bigClusterOppClamped = if (writableMaxKhz <= 0) {
+                bigClusterOppFull
+            } else {
+                bigClusterOppFull.filter { it <= writableMaxKhz }
+                    .ifEmpty { bigClusterOppFull.take(1) }
+            }
+
+            // ── DEAD-CPU-CAP COLLAPSE (the SHIP-BLOCKER fix) ───────────────────────
+            // When CPU cap-DOWN is a NO-OP lever on this write path ([cpuCapLeverWritable]
+            // == false, i.e. the AYANEO vendor-binder path today), collapse the cap-target
+            // step table to a SINGLE entry at the STOCK ceiling. With one step,
+            // `stepCapDown` finds no lower index → returns changed=false →
+            // `applyTightenLever` does NOT return on Lever.CAP and its EXISTING loop falls
+            // through SAME-TICK to the next lever (GPU_DEVFREQ etc.) that DOES actuate on
+            // AYANEO. No engine or write-loop change: the lever fallthrough already does
+            // the work. The single value is the STOCK ceiling — a real reported OPP and a
+            // harmless no-op write — so enforceInvariants / OPP-snap / the 40% hard floor /
+            // MM-1 / MM-2 all still behave (cap stays == stock = no CPU-power contribution,
+            // exactly what we want; the GPU lever drives). ≥1-step guarantee preserved.
+            // NOTE: fully-kernel-writable devices (ROOT / PServer / chmod) have
+            // cpuCapLeverWritable == true → they KEEP the full clamped table and step CPU
+            // down normally (Odin 3 / RP6 UNREGRESSED).
+            val bigClusterOppSteps = if (!cpuCapLeverWritable && bigClusterOppClamped.isNotEmpty()) {
+                // stockCeilingKhz is a real OPP the device reports; snap to the highest
+                // retained step ≤ it (the clamp already tops out at the writable ceiling,
+                // so this is normally the clamped table's own last entry) to guarantee the
+                // collapsed value is a genuine member of the OPP table for MM-2/OPP-snap.
+                val stockStep = bigClusterOppClamped.lastOrNull { it <= stockCeilingKhz }
+                    ?: bigClusterOppClamped.last()
+                listOf(stockStep)
+            } else {
+                bigClusterOppClamped
+            }
 
             // ── GPU power levels ───────────────────────────────────────────────
             // Adreno: lower index = higher performance (0 = max perf).
@@ -187,10 +339,15 @@ data class TdpCaps(
             // On a 2-core device (exotic) we still keep 1 core beyond cpu0.
             val minOnlineCores = maxOf(2, totalOnlineCores / 2)
 
+            // The reported writable ceiling: the top of the clamped step table on a
+            // real table, else the raw writable ceiling (0 when no table at all).
+            val reportedWritableMaxKhz = bigClusterOppSteps.lastOrNull() ?: writableMaxKhz
+
             return TdpCaps(
                 primeCoreIndices = primeCoreIndices,
                 bigPolicyId = bigPolicyId,
                 bigClusterOppStepsKhz = bigClusterOppSteps,
+                bigClusterWritableMaxKhz = reportedWritableMaxKhz,
                 gpuMinLevel = gpuMinLevel,
                 gpuMaxLevel = gpuMaxLevel,
                 minOnlineCores = minOnlineCores,

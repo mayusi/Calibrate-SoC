@@ -1,3 +1,15 @@
+## [0.3.5-alpha] — 2026-07-02
+
+AutoTDP now actually tunes AYANEO — and can't crash its system UI anymore.
+
+### Fixed — AYANEO AutoTDP works for real
+- **AutoTDP now drives your AYANEO's power live.** On AYANEO (Pocket DS and siblings) the vendor service refuses any CPU-frequency cap below the stock ceiling, so AutoTDP was silently stuck — it kept trying a write the system rejected and nothing ever changed. It now recognizes that the CPU-frequency cap isn't a usable lever on AYANEO and drives the **GPU** (and governor/fan) instead — the levers AYANEO *does* honor. Verified on a Pocket DS: engaging a goal mode now steps the GPU clock down through its whole range live, restores cleanly on stop, and CPU/GPU return to exact stock.
+- **No more crashing AYANEO's system UI.** The old stuck-write behavior hammered the AYANEO performance overlay with rejected writes and could crash it (com.ayaneo.gamewindow / AYAWindow). That storm is gone entirely — the overlay stays healthy across a full tuning session.
+- **Adaptive governor is reachable now.** The Adaptive tab's Start button previously fell back to the legacy path and never actually engaged the adaptive coordinator; and a charging-triggered auto-start could override it. Adaptive now truly turns on from its own button, stays the single owner of the loop while active, and its persisted on/off state no longer drifts out of sync.
+
+### Note
+- On AYANEO, AutoTDP tunes via GPU + governor + fan (the CPU-frequency cap is a no-op there and is skipped). Odin, Retroid, and rooted devices are unchanged and still cap the CPU cluster directly. A future update will add AYANEO's own TDP profile control for CPU-side tuning.
+
 ## [0.3.4-alpha] — 2026-07-01
 
 Better AYANEO support and an accessibility fix.

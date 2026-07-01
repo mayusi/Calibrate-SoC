@@ -366,6 +366,132 @@ class AdaptiveViewModelTest {
         assertThat(n.wPerformance).isWithin(1e-4f).of(0f)
         assertThat(n.wBattery + n.wStability + n.wThermalHeadroom).isWithin(1e-4f).of(1f)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  UNIT 5 (ADAPTIVE MODE) — engage-path wiring (the "unreachable" bug fix)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    //  These lock in that engaging Adaptive actually produces a NON-NULL adaptive
+    //  config (so AutoTdpProfileConfig.adaptive != null → the AdaptiveCoordinator
+    //  branch runs), that the charging/idle trigger cannot override an active
+    //  Adaptive session, and that the persisted flag reconciles with run-state.
+
+    @Test
+    fun `engaging Adaptive builds a config carrying the effective setpoints`() {
+        // The engage path snapshots the NORMALIZED effective intent into the carrier.
+        val intent = AdaptivePreset.PERFORMANCE.intent
+        val config = AdaptiveEngageLogic.buildRunConfig(
+            intent = intent,
+            gpuOcTier = GpuOcTier.WITHIN_VENDOR,
+            beyondStockConsent = false,
+            storedVerdictRecord = null,
+        )
+
+        // config.adaptive != null on the service side is exactly this carrier being built —
+        // the weights + tier survive so the coordinator can resolve setpoints from them.
+        assertThat(config.wPerformance).isWithin(1e-4f).of(intent.wPerformance)
+        assertThat(config.wBattery).isWithin(1e-4f).of(intent.wBattery)
+        assertThat(config.wStability).isWithin(1e-4f).of(intent.wStability)
+        assertThat(config.wThermalHeadroom).isWithin(1e-4f).of(intent.wThermalHeadroom)
+        assertThat(config.gpuOcTierOrdinal).isEqualTo(GpuOcTier.WITHIN_VENDOR.ordinal)
+        assertThat(config.beyondStockConsent).isFalse()
+    }
+
+    @Test
+    fun `engage config strips the device fingerprint from the stored verdict record`() {
+        // Prefs store "<fingerprint>|<verdict>"; the carrier must hold just the bare verdict.
+        val stored = "google/pixel7/panther:13/TQ3A|Accepted:1100000000"
+        val config = AdaptiveEngageLogic.buildRunConfig(
+            intent = AdaptivePreset.BALANCED.intent,
+            gpuOcTier = GpuOcTier.BEYOND_STOCK,
+            beyondStockConsent = true,
+            storedVerdictRecord = stored,
+        )
+        assertThat(config.probeVerdictRecord).isEqualTo("Accepted:1100000000")
+    }
+
+    @Test
+    fun `engage config verdict is null when never probed`() {
+        val config = AdaptiveEngageLogic.buildRunConfig(
+            intent = AdaptivePreset.BALANCED.intent,
+            gpuOcTier = GpuOcTier.OFF,
+            beyondStockConsent = false,
+            storedVerdictRecord = null,
+        )
+        assertThat(config.probeVerdictRecord).isNull()
+    }
+
+    @Test
+    fun `charging trigger is suppressed while Adaptive is active`() {
+        // manual OFF, but Adaptive active → the legacy EFFICIENCY trigger must not fire.
+        assertThat(
+            AdaptiveEngageLogic.shouldSuppressLegacyTrigger(
+                manuallyOn = false,
+                adaptiveActive = true,
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun `charging trigger still fires when Adaptive is NOT active and manual is off`() {
+        // Neither owner is driving the daemon → the legacy trigger must remain live
+        // (this is the "don't break legacy goal-mode + charging trigger" guarantee).
+        assertThat(
+            AdaptiveEngageLogic.shouldSuppressLegacyTrigger(
+                manuallyOn = false,
+                adaptiveActive = false,
+            ),
+        ).isFalse()
+    }
+
+    @Test
+    fun `manual precedence still suppresses the trigger independently of Adaptive`() {
+        assertThat(
+            AdaptiveEngageLogic.shouldSuppressLegacyTrigger(
+                manuallyOn = true,
+                adaptiveActive = false,
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun `stale Adaptive flag is cleared when persisted-active but daemon not running`() {
+        // Fresh process: the persisted flag outlived the dead daemon → must reconcile to false.
+        assertThat(
+            AdaptiveEngageLogic.shouldClearStaleActiveFlag(
+                persistedActive = true,
+                daemonRunning = false,
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun `Adaptive flag is NOT cleared when daemon is actually running`() {
+        // Active flag + running daemon = an honest live Adaptive session → keep it.
+        assertThat(
+            AdaptiveEngageLogic.shouldClearStaleActiveFlag(
+                persistedActive = true,
+                daemonRunning = true,
+            ),
+        ).isFalse()
+    }
+
+    @Test
+    fun `Adaptive flag is never fabricated true when persisted false`() {
+        // A running daemon with a false flag is a legacy/goal session — Adaptive must not claim it.
+        assertThat(
+            AdaptiveEngageLogic.shouldClearStaleActiveFlag(
+                persistedActive = false,
+                daemonRunning = true,
+            ),
+        ).isFalse()
+        assertThat(
+            AdaptiveEngageLogic.shouldClearStaleActiveFlag(
+                persistedActive = false,
+                daemonRunning = false,
+            ),
+        ).isFalse()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

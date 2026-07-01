@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -50,6 +51,24 @@ class AdaptiveViewModel @Inject constructor(
     private val prefs: AdaptivePrefs,
     private val controller: AutoTdpController,
 ) : ViewModel() {
+
+    init {
+        // ── Stale-flag reconciliation ─────────────────────────────────────────
+        // The persisted [adaptiveModeActive] flag survives process death, but the
+        // daemon does NOT. On a fresh process the daemon is IDLE/STOPPED, so a
+        // persisted `true` would be a LIE — the toggle would claim Adaptive is
+        // driving the daemon when nothing is running. Reconcile once at construction:
+        // if the flag claims active but the daemon is not RUNNING, clear it so the
+        // toggle reflects reality. We never flip it the other way (a running daemon
+        // with a false flag is a legacy/goal session, which Adaptive must not claim).
+        viewModelScope.launch {
+            val persistedActive = prefs.adaptiveModeActive.first()
+            val daemonRunning = controller.state.value.status == AutoTdpStatus.RUNNING
+            if (AdaptiveEngageLogic.shouldClearStaleActiveFlag(persistedActive, daemonRunning)) {
+                prefs.setAdaptiveModeActive(false)
+            }
+        }
+    }
 
     // ── Preset ────────────────────────────────────────────────────────────────
 
@@ -217,21 +236,13 @@ class AdaptiveViewModel @Inject constructor(
      * daemon side); the verdict record is the cached probe string (fingerprint stripped — the
      * daemon re-probes per session anyway, so the cache is only a hint here).
      */
-    private fun buildAdaptiveRunConfig(): AdaptiveRunConfig {
-        val intent = effectiveIntent.value
-        // The prefs store the verdict as "<fingerprint>|<verdict>"; strip the fingerprint so
-        // the carrier holds just the bare verdict form the coordinator parses.
-        val verdictRecord = beyondStockProbeVerdict.value?.substringAfterLast('|')
-        return AdaptiveRunConfig(
-            wPerformance = intent.wPerformance,
-            wBattery = intent.wBattery,
-            wStability = intent.wStability,
-            wThermalHeadroom = intent.wThermalHeadroom,
-            gpuOcTierOrdinal = gpuOcTier.value.ordinal,
+    private fun buildAdaptiveRunConfig(): AdaptiveRunConfig =
+        AdaptiveEngageLogic.buildRunConfig(
+            intent = effectiveIntent.value,
+            gpuOcTier = gpuOcTier.value,
             beyondStockConsent = beyondStockConsent.value,
-            probeVerdictRecord = verdictRecord,
+            storedVerdictRecord = beyondStockProbeVerdict.value,
         )
-    }
 
     // ── Live readout (from AutoTdpController run-state) ───────────────────────
 
@@ -302,4 +313,65 @@ class AdaptiveViewModel @Inject constructor(
         effectiveIntent,
     ) { active, _ -> active }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Pure engage logic — no Android / Hilt / DataStore, so it is directly unit-testable
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * UNIT 5 (ADAPTIVE MODE) — the pure, side-effect-free heart of the Adaptive engage path.
+ *
+ * Extracted so the wiring that turns Adaptive ON (and keeps its persisted flag honest) can
+ * be unit-tested without a real [AutoTdpController], DataStore, or Android runtime:
+ *  - [buildRunConfig]           — snapshots the VM state into the round-trip-safe
+ *                                 [AdaptiveRunConfig] the controller hands to the daemon.
+ *                                 A NON-NULL config is what makes `AutoTdpProfileConfig
+ *                                 .adaptive != null` on the service side → the ADAPTIVE
+ *                                 (AdaptiveCoordinator) branch instead of the legacy path.
+ *  - [shouldClearStaleActiveFlag] — reconciles the persisted active flag with real run-state
+ *                                 so a process restart cannot leave the toggle claiming
+ *                                 "active" while no daemon is running.
+ */
+internal object AdaptiveEngageLogic {
+
+    /**
+     * Build the [AdaptiveRunConfig] carrier from a snapshot of the VM state. The [intent]
+     * is the NORMALIZED effective intent; the OC tier + consent are the user's choices; the
+     * [storedVerdictRecord] is the prefs' `"<fingerprint>|<verdict>"` string — the fingerprint
+     * is stripped here so the carrier holds just the bare verdict the coordinator parses.
+     */
+    fun buildRunConfig(
+        intent: AdaptiveIntent,
+        gpuOcTier: GpuOcTier,
+        beyondStockConsent: Boolean,
+        storedVerdictRecord: String?,
+    ): AdaptiveRunConfig = AdaptiveRunConfig(
+        wPerformance = intent.wPerformance,
+        wBattery = intent.wBattery,
+        wStability = intent.wStability,
+        wThermalHeadroom = intent.wThermalHeadroom,
+        gpuOcTierOrdinal = gpuOcTier.ordinal,
+        beyondStockConsent = beyondStockConsent,
+        probeVerdictRecord = storedVerdictRecord?.substringAfterLast('|'),
+    )
+
+    /**
+     * True when the persisted Adaptive-active flag must be cleared because it no longer
+     * reflects reality: the flag claims active but the daemon is NOT running (typically a
+     * fresh process where the persisted flag outlived the dead daemon). Never true the other
+     * way — a running daemon with a false flag is a legacy/goal session Adaptive must not claim.
+     */
+    fun shouldClearStaleActiveFlag(persistedActive: Boolean, daemonRunning: Boolean): Boolean =
+        persistedActive && !daemonRunning
+
+    /**
+     * True when the legacy charging/idle trigger must be SUPPRESSED — i.e. it must not
+     * start the EFFICIENCY floor nor stop the running session. Suppressed when the user
+     * manually turned AutoTDP on ([manuallyOn]) OR when Adaptive is the active mode
+     * ([adaptiveActive]): in both cases another owner drives the daemon and the trigger
+     * must not fight it. This is the trigger-awareness half of Adaptive mode exclusion.
+     */
+    fun shouldSuppressLegacyTrigger(manuallyOn: Boolean, adaptiveActive: Boolean): Boolean =
+        manuallyOn || adaptiveActive
 }

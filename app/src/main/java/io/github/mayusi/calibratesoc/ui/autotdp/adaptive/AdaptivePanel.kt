@@ -51,6 +51,8 @@ import io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptiveIntent
 import io.github.mayusi.calibratesoc.data.autotdp.adaptive.AdaptivePreset
 import io.github.mayusi.calibratesoc.data.autotdp.adaptive.GpuOcTier
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
+import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.SectionHeader
 import io.github.mayusi.calibratesoc.ui.components.StatusPill
@@ -146,6 +148,15 @@ fun AdaptivePanel(
                     color = ColorSubtext,
                     modifier = Modifier.padding(horizontal = 2.dp),
                 )
+
+                // ── Engage control — THE control that actually turns Adaptive on ──
+                // Calls onSetAdaptiveActive(true) → AdaptiveViewModel.setAdaptiveActive(true)
+                // → AutoTdpController.start(adaptiveConfig) so the daemon runs the ADAPTIVE
+                // branch (config.adaptive != null → AdaptiveCoordinator). Toggling off stops it.
+                AdaptiveEngageButton(
+                    active = adaptiveModeActive,
+                    onSetActive = onSetAdaptiveActive,
+                )
             }
         }
 
@@ -179,6 +190,38 @@ fun AdaptivePanel(
             beyondStockVerdict = beyondStockVerdict,
         )
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Engage control (START / STOP Adaptive)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The single control that actually engages / disengages Adaptive mode.
+ *
+ * When [active] is false it renders a prominent "Start Adaptive" primary button that
+ * calls `onSetActive(true)`; the VM then builds the resolved AdaptiveRunConfig from the
+ * current preset / weights / OC tier and hands it to the controller, so the daemon takes
+ * the ADAPTIVE (unified-governor) branch. When [active] is true it renders a "Stop
+ * Adaptive" secondary button that calls `onSetActive(false)` to stop the daemon and revert.
+ *
+ * This is the fix for the "Adaptive is unreachable from the UI" bug: previously the panel
+ * received `onSetAdaptiveActive` but never invoked it, so `config.adaptive` was always null
+ * and the coordinator branch was never taken.
+ */
+@Composable
+private fun AdaptiveEngageButton(
+    active: Boolean,
+    onSetActive: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ArsenalButton(
+        label = if (active) "Stop Adaptive" else "Start Adaptive",
+        onClick = { onSetActive(!active) },
+        style = if (active) ArsenalButtonStyle.Secondary else ArsenalButtonStyle.Primary,
+        accent = if (active) ColorActive else AccentBar.Emerald,
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

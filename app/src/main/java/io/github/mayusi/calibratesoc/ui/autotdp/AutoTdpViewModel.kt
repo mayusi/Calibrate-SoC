@@ -38,6 +38,8 @@ import io.github.mayusi.calibratesoc.data.script.AdvancedPermissionsScript
 import io.github.mayusi.calibratesoc.data.script.AynScriptDeployer
 import io.github.mayusi.calibratesoc.data.tunables.Tunables
 import io.github.mayusi.calibratesoc.data.tunables.writer.WriterRegistry
+import io.github.mayusi.calibratesoc.ui.autotdp.adaptive.AdaptiveEngageLogic
+import io.github.mayusi.calibratesoc.ui.autotdp.adaptive.AdaptivePrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -100,6 +102,11 @@ class AutoTdpViewModel @Inject constructor(
     private val efficiencyAdvisor: EfficiencyAdvisor,
     private val undervoltCapabilityProbe: UndervoltCapabilityProbe,
     private val writerRegistry: WriterRegistry,
+    // UNIT 5 (ADAPTIVE MODE) — shared @Singleton store also read by AdaptiveViewModel.
+    // Read here for MODE EXCLUSION: while Adaptive is the active mode it is the SINGLE
+    // source of truth for the daemon, so the legacy charging/idle trigger must not fight
+    // it; and turning a legacy/goal mode ON must clear the Adaptive-active flag.
+    private val adaptivePrefs: AdaptivePrefs,
 ) : ViewModel() {
 
     // ── Exposed state ─────────────────────────────────────────────────────────
@@ -247,6 +254,16 @@ class AutoTdpViewModel @Inject constructor(
     val manuallyOn: StateFlow<Boolean> = _manuallyOn.asStateFlow()
 
     /**
+     * UNIT 5 (ADAPTIVE MODE) — mirror of the persisted Adaptive-active flag, read on the
+     * VM's scope so [applyTriggerSignal] can consult it synchronously. When true, Adaptive
+     * is the active mode and OWNS the daemon: the legacy charging/idle trigger must neither
+     * start the EFFICIENCY floor nor stop the running Adaptive session. Defaults to the
+     * persisted value; kept live so a start/stop of Adaptive updates trigger behaviour.
+     */
+    private val adaptiveModeActive: StateFlow<Boolean> = adaptivePrefs.adaptiveModeActive
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
      * True while the async capability refresh triggered by the START button
      * is in flight. Prevents double-taps and drives the "Starting…" button label.
      */
@@ -304,6 +321,16 @@ class AutoTdpViewModel @Inject constructor(
         // Subscribe to trigger signals and apply them when manual is OFF.
         idleChargeTrigger.requestedProfile
             .onEach { requested -> applyTriggerSignal(requested) }
+            .launchIn(viewModelScope)
+
+        // UNIT 5 (ADAPTIVE MODE) — when Adaptive takes over as the active mode, it OWNS the
+        // daemon (via its own AdaptiveViewModel.setAdaptiveActive → controller.start). Drop
+        // the legacy manual-precedence flag so (a) the hero honestly no longer claims the
+        // manual daemon is running, and (b) the manual latch cannot linger and mislead. The
+        // daemon itself is untouched here — Adaptive already started it. Mutual exclusion is
+        // symmetric with setManualEnabled clearing the Adaptive flag on the legacy side.
+        adaptiveModeActive
+            .onEach { active -> if (active) _manuallyOn.value = false }
             .launchIn(viewModelScope)
 
         // Keep a rolling latest telemetry pointer (used by EfficiencyCurveSweep
@@ -417,6 +444,16 @@ class AutoTdpViewModel @Inject constructor(
             _startError.value = null
             controller.stop()
             return
+        }
+
+        // UNIT 5 (ADAPTIVE MODE) — mutual exclusion: engaging the legacy hero / goal-mode
+        // path makes it the active driver, so Adaptive must yield. Clear the persisted
+        // Adaptive-active flag (the subsequent controller.start below replaces whatever the
+        // daemon was running with the legacy/goal config). This keeps the three modes —
+        // Adaptive vs Goal Modes vs Manual — mutually exclusive: only the one just engaged
+        // drives the daemon. Harmless when Adaptive was already off.
+        if (adaptiveModeActive.value) {
+            viewModelScope.launch { adaptivePrefs.setAdaptiveModeActive(false) }
         }
 
         // Fast path: report already cached.
@@ -691,8 +728,19 @@ class AutoTdpViewModel @Inject constructor(
      * the trigger is silenced.
      */
     private fun applyTriggerSignal(requestedConfig: AutoTdpProfileConfig?) {
-        // Manual ON wins: ignore trigger until user turns off.
-        if (_manuallyOn.value) return
+        // Trigger suppression: another owner is driving the daemon, so the legacy
+        // charging/idle trigger must not fight it. Suppressed when the user manually turned
+        // AutoTDP on (manual precedence) OR when Adaptive is the active mode — in the latter
+        // case starting the EFFICIENCY floor would replace the AdaptiveCoordinator session,
+        // and stopping on trigger-inactive would kill a user-engaged Adaptive session. This is
+        // the trigger-awareness half of Adaptive/legacy mutual exclusion.
+        if (AdaptiveEngageLogic.shouldSuppressLegacyTrigger(
+                manuallyOn = _manuallyOn.value,
+                adaptiveActive = adaptiveModeActive.value,
+            )
+        ) {
+            return
+        }
 
         val currentStatus = controller.state.value.status
         if (requestedConfig != null) {
