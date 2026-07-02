@@ -152,6 +152,18 @@ class TuneViewModel @Inject constructor(
         viewModelScope.launch { capabilityProbe.refresh() }
     }
 
+    /**
+     * Bust both writer caches and re-probe capability. Wired to
+     * [io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh] so the
+     * Tune PRIVILEGE-TIER pill + the reactive preset badges reflect an out-of-app
+     * `pm grant` / Shizuku / vendor unlock within ~2 s (poll) and instantly on
+     * return-to-app (ON_RESUME) — no kill/relaunch. Cheap + idempotent; the
+     * re-probe drives [presets] to recompute against the device's live state.
+     */
+    fun fullRefresh() {
+        viewModelScope.launch { capabilityProbe.fullRefresh() }
+    }
+
     fun setEdit(policyId: Int, edit: PolicyEdit) {
         _pending.value = _pending.value.toMutableMap().apply { put(policyId, edit) }
     }

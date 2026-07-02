@@ -1,3 +1,12 @@
+## [0.3.7-alpha] — 2026-07-02
+
+Granting live-tuning access now lights up the app right away — no reopen.
+
+### Fixed — access grants reflect instantly
+- **Grant live-tuning access and the app reacts within about 2 seconds — no more killing and reopening.** When you granted `WRITE_SECURE_SETTINGS` over adb (or via Shizuku, root, or a vendor unlock) while Calibrate SoC was still on screen, the privilege tier could stay stuck on the old value — sometimes until you fully closed and relaunched the app. The Dashboard, Tune, and Settings screens now re-check your access automatically the moment you return to the app and again every couple of seconds while a screen is open, so the tier badge flips on its own the instant the grant lands. The re-check pauses completely while the app is in the background, so it costs nothing on battery.
+- **New "Re-check access" button in Settings**, right next to the "grant WRITE_SECURE_SETTINGS via adb" instructions, for an immediate on-demand confirmation.
+- Under the hood, every "your access may have changed" path now busts both live-write caches (PServer and the AYANEO vendor binder) through one shared code path, so no screen can accidentally re-read a stale one.
+
 ## [0.3.6-alpha] — 2026-07-02
 
 AutoTDP now tunes the CPU on AYANEO too — through the vendor's own performance modes.

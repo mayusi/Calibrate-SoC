@@ -57,6 +57,7 @@ import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.ZoneTemp
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.profiles.ProfileStore
+import io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.intelligence.IntelligencePanelCard
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
@@ -100,6 +101,11 @@ fun DashboardScreen(
     val recommendation by viewModel.recommendation.collectAsStateWithLifecycle()
     val profileStore by viewModel.profileStore.collectAsStateWithLifecycle()
     val recommendApplyResult by viewModel.recommendApplyResult.collectAsStateWithLifecycle()
+
+    // Keep the tier badge live when the user grants WRITE_SECURE_SETTINGS (or
+    // Shizuku/root/vendor) out of band: re-probe on ON_RESUME + every ~2 s while
+    // STARTED, so the badge flips within ~2 s without a kill/relaunch.
+    CapabilityAutoRefresh { viewModel.fullRefresh() }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(recommendApplyResult) {

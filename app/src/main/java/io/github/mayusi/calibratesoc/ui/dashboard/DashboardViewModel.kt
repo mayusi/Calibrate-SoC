@@ -59,7 +59,7 @@ import javax.inject.Inject
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
-    capabilityProbe: CapabilityProbe,
+    private val capabilityProbe: CapabilityProbe,
     monitorService: MonitorService,
     tuneHistoryStore: TuneHistoryStore,
     private val batteryChargeReader: BatteryChargeReader,
@@ -70,6 +70,17 @@ class DashboardViewModel @Inject constructor(
 ) : ViewModel() {
 
     val capability: StateFlow<CapabilityReport?> = capabilityProbe.report
+
+    /**
+     * Bust both writer caches and re-probe capability. Wired to
+     * [io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh] so the
+     * Dashboard tier reflects an out-of-app `pm grant` / Shizuku / vendor unlock
+     * within ~2 s (poll) and instantly on return-to-app (ON_RESUME) — no
+     * kill/relaunch. Cheap + idempotent.
+     */
+    fun fullRefresh() {
+        viewModelScope.launch { capabilityProbe.fullRefresh() }
+    }
 
     /**
      * Live AutoTDP daemon state. The Dashboard shows a strip when the

@@ -210,7 +210,25 @@ class SettingsViewModel @Inject constructor(
 
     fun refresh() {
         _accessibilityGranted.value = checkAccessibilityGranted()
-        viewModelScope.launch { capabilityProbe.refresh() }
+        // Route through fullRefresh so re-entering Settings (LaunchedEffect on
+        // screen enter) also busts the writer caches — a `pm grant` performed
+        // while the app was merely backgrounded would otherwise re-read a stale
+        // transactable cache and keep the tier frozen.
+        viewModelScope.launch { capabilityProbe.fullRefresh() }
+    }
+
+    /**
+     * Bust both writer caches and re-probe capability. Wired to
+     * [io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh] AND the
+     * "Re-check access" button next to the WRITE_SECURE_SETTINGS explainer, so
+     * the PRIVILEGE-TIER panel reflects an out-of-app `pm grant` / Shizuku /
+     * vendor unlock within ~2 s (poll), instantly on return-to-app (ON_RESUME),
+     * and on demand (button) — no kill/relaunch. Cheap + idempotent. Also
+     * re-reads the Accessibility grant so the per-app auto-switch pill is fresh.
+     */
+    fun fullRefresh() {
+        _accessibilityGranted.value = checkAccessibilityGranted()
+        viewModelScope.launch { capabilityProbe.fullRefresh() }
     }
 
     /**

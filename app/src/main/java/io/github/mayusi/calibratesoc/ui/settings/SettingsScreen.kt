@@ -78,6 +78,7 @@ import io.github.mayusi.calibratesoc.data.update.UpdateInfo
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.AlertCard
 import io.github.mayusi.calibratesoc.ui.components.AlertType
+import io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
@@ -130,6 +131,13 @@ fun SettingsScreen(
     var pendingFactoryConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
+
+    // Keep the PRIVILEGE-TIER panel live when the user grants WRITE_SECURE_SETTINGS
+    // (or Shizuku/root/vendor) out of band while Settings is open: re-probe on
+    // ON_RESUME + every ~2 s while STARTED, so the tier flips within ~2 s without a
+    // kill/relaunch. This is the exact spot users land on after reading the
+    // "grant WRITE_SECURE_SETTINGS via adb" copy below.
+    CapabilityAutoRefresh { viewModel.fullRefresh() }
 
     // Full-screen What's New overlay — shown when the user taps the
     // What's New row OR the post-update banner's "See what's new" button.
@@ -345,6 +353,18 @@ fun SettingsScreen(
                 StatusPill(text = tierChip, accent = tierAccent)
                 Spacer(Modifier.height(Spacing.dense))
                 Text(tierExplainer, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(Spacing.dense))
+                // After granting WRITE_SECURE_SETTINGS via adb (or Shizuku/root/
+                // vendor) with the app still open, the panel already self-refreshes
+                // on ON_RESUME + every ~2 s while visible (CapabilityAutoRefresh).
+                // This button is the explicit on-demand re-probe for users who want
+                // an immediate confirmation without waiting for the poll tick.
+                ArsenalButton(
+                    label = "Re-check access",
+                    onClick = { viewModel.fullRefresh() },
+                    style = ArsenalButtonStyle.Secondary,
+                    accent = AccentBar.Neutral,
+                )
             }
         }
 

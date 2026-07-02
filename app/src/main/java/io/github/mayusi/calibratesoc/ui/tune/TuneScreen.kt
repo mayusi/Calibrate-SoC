@@ -64,6 +64,7 @@ import io.github.mayusi.calibratesoc.data.vendor.OdinIntents
 import io.github.mayusi.calibratesoc.ui.components.AccentBar
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButton
 import io.github.mayusi.calibratesoc.ui.components.ArsenalButtonStyle
+import io.github.mayusi.calibratesoc.ui.capability.CapabilityAutoRefresh
 import io.github.mayusi.calibratesoc.ui.components.ArsenalPanel
 import io.github.mayusi.calibratesoc.ui.components.PanelAccentEdge
 import io.github.mayusi.calibratesoc.ui.components.SectionHeader
@@ -106,6 +107,12 @@ fun TuneScreen(
     val lastBootDeploy by viewModel.lastBootDeploy.collectAsStateWithLifecycle()
     val latestTelemetry by viewModel.latestTelemetry.collectAsStateWithLifecycle()
     val context = LocalContext.current
+
+    // Keep the PRIVILEGE-TIER pill live when the user grants WRITE_SECURE_SETTINGS
+    // (or Shizuku/root/vendor) out of band: re-probe on ON_RESUME + every ~2 s
+    // while STARTED, so the tier flips within ~2 s without a kill/relaunch. Placed
+    // before the report==null gate so it also drives the initial probe to settle.
+    CapabilityAutoRefresh { viewModel.fullRefresh() }
 
     var pendingFirstOcConfirm by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingUnknownDeviceConfirm by remember { mutableStateOf<Pair<Preset, () -> Unit>?>(null) }

@@ -55,6 +55,31 @@ class CapabilityProbe @Inject constructor(
     private val _report = MutableStateFlow<CapabilityReport?>(null)
     val report: StateFlow<CapabilityReport?> = _report.asStateFlow()
 
+    /**
+     * Bust EVERY writer-side capability cache, then [refresh].
+     *
+     * This is the single, forget-proof entry point for "the world may have
+     * changed underneath us" — e.g. the user ran `pm grant …
+     * WRITE_SECURE_SETTINGS`, granted Shizuku, added the PServer whitelist, or
+     * force-stopped the AYANEO gamewindow — WITHOUT the app going through a
+     * kill/relaunch. Both live-write probes memoise their transactability for
+     * the session, so a plain [refresh] would re-read those stale caches and the
+     * tier would stay frozen until process restart.
+     *
+     * Every caller that reacts to an out-of-app privilege change (MainActivity
+     * onResume, the per-screen ON_RESUME + foreground poll, the Settings
+     * "Re-check access" button, AdvancedUnlock refresh) MUST route through here
+     * rather than re-implementing the invalidate sequence, so no site can forget
+     * a cache. Cheap + idempotent: a binder null-check + one transact at most per
+     * writer; a package-presence short-circuit (no IPC) on devices that lack the
+     * respective vendor surface.
+     */
+    suspend fun fullRefresh(): CapabilityReport {
+        pServerWriter.invalidateTransactableCache()
+        ayaneoBinderClient.invalidateAvailabilityCache()
+        return refresh()
+    }
+
     suspend fun refresh(): CapabilityReport = withContext(Dispatchers.IO) {
         val (device, rawSoc) = socDetector.detect()
         val soc = upgradeFamilyByPathPresence(rawSoc)

@@ -11,6 +11,28 @@ Nothing yet.
 
 ---
 
+## [0.3.7-alpha] — 2026-07-02
+
+Out-of-band live-tuning grants now reflect in the app within ~2 s without a
+kill/relaunch.
+
+### Fixed
+- **Access grants reflect within ~2 s, no reopen.** Granting `WRITE_SECURE_SETTINGS`
+  via adb (or Shizuku / root / vendor binder) while the app stayed foregrounded fired
+  no lifecycle transition and no permission-change broadcast, so the pull-only
+  `CapabilityProbe.refresh()` never re-ran and the privilege tier stayed stale until
+  the process was killed. The Dashboard, Tune, and Settings screens now re-probe on
+  `ON_RESUME` and via a 2 s foreground poll scoped to `repeatOnLifecycle(STARTED)` —
+  the poll suspends when backgrounded, so it never drains battery. New shared
+  `CapabilityAutoRefresh` composable + `CapabilityProbe.fullRefresh()` (busts BOTH the
+  PServer transactable cache and the AYANEO vendor-binder availability cache before
+  re-probing, in one forget-proof place).
+- Added a **"Re-check access"** button in Settings next to the WRITE_SECURE_SETTINGS
+  explainer for an explicit on-demand re-probe.
+- `AdvancedUnlockViewModel.refresh()` now busts the AYANEO cache too (was PServer-only).
+
+---
+
 ## [0.1.32-alpha] — 2026-06-16
 
 Adversarial-audit hardening pass over the new AYANEO + fan-curve surface, plus a

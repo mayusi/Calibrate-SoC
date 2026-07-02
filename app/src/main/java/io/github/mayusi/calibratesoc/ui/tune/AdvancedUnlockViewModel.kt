@@ -206,14 +206,15 @@ class AdvancedUnlockViewModel @Inject constructor(
      * the WriterRegistry sees the updated result.
      */
     fun refresh() {
-        // FIX 2: invalidate stale cache before re-probing so a cached-false from
-        // app-launch-before-whitelist doesn't persist across a Refresh tap.
-        pServerWriter.invalidateTransactableCache()
         _grants.value = script.grantsCurrentlyHeld()
-        // Re-probe capability (includes pServerWriter.isTransactable()) so the
-        // Tune screen's PServer-LIVE indicator lights up without a full app restart.
+        // FIX 2 (0.3.7): route through capabilityProbe.fullRefresh() so BOTH the
+        // PServer transactable cache AND the AYANEO vendor-binder availability
+        // cache are busted before re-probing — a cached-false from
+        // app-launch-before-whitelist (or a stale AYANEO `true`) doesn't persist
+        // across a Refresh tap. Re-probe includes pServerWriter.isTransactable()
+        // so the Tune screen's PServer-LIVE indicator lights up without a restart.
         viewModelScope.launch {
-            capabilityProbe.refresh()
+            capabilityProbe.fullRefresh()
         }
     }
 }

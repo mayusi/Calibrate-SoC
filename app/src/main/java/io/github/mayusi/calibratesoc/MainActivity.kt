@@ -22,8 +22,6 @@ import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurveController
 import io.github.mayusi.calibratesoc.data.prefs.UserPrefs
-import io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
-import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoBinderClient
 import io.github.mayusi.calibratesoc.ui.CalibrateSocApp
 import io.github.mayusi.calibratesoc.ui.setup.OnboardingScreen
 import io.github.mayusi.calibratesoc.ui.theme.CalibrateSocTheme
@@ -45,8 +43,6 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     @Inject lateinit var refreshRateController: RefreshRateController
     @Inject lateinit var userPrefs: UserPrefs
-    @Inject lateinit var pServerWriter: PServerWriter
-    @Inject lateinit var ayaneoBinderClient: AyaneoBinderClient
     @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var fanCurveController: FanCurveController
 
@@ -119,19 +115,16 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         lifecycleScope.launch { applyPreferredRefreshRate() }
-        // FIX 2: invalidate the PServer transactable cache on every resume so
-        // that returning from Odin Settings (where the user ran the unlock
-        // script) re-probes PServer and lights up PServer-LIVE automatically.
-        // The invalidation + re-probe is cheap: one binder null-check + one
-        // transact("true") at most; no-op on non-AYN devices (binder() returns null).
+        // FIX 2: on every resume, bust BOTH live-write caches and re-probe so that
+        // returning from Odin/vendor Settings (where the user ran the unlock script
+        // or `pm grant`ed WRITE_SECURE_SETTINGS) re-probes and lights up the live
+        // tier automatically — no kill/relaunch. Routed through
+        // [CapabilityProbe.fullRefresh] so the PServer + AYANEO cache invalidations
+        // live in one place and no caller can forget one. Cheap: a binder null-check
+        // + one transact at most per writer, package-presence short-circuit (no IPC)
+        // on devices lacking that vendor surface.
         lifecycleScope.launch {
-            pServerWriter.invalidateTransactableCache()
-            // CRITICAL-1: bust the AYANEO vendor-binder availability cache on resume too,
-            // mirroring the PServer bust, so returning to the app after gamewindow was
-            // force-stopped/restarted re-probes the binder instead of trusting a stale
-            // `true`. Cheap: a package-presence short-circuit on non-AYANEO devices.
-            ayaneoBinderClient.invalidateAvailabilityCache()
-            val report = capabilityProbe.refresh()
+            val report = capabilityProbe.fullRefresh()
             // 0.3.6: self-heal a AYANEO device left parked at a non-stock vendor perf mode
             // by a prior session that was force-killed/crashed before its revert could run.
             // No-op when AutoTDP is actively running or the device is already at stock.
