@@ -88,4 +88,33 @@ class AyaneoCommandsTest {
         assertThat(AyaneoCommands.reset(0))
             .isEqualTo("calibrate:msg_type_performance:com_set_performance_reset:0")
     }
+
+    // ── Performance-MODE ordinal (the durable AYANEO CPU-side lever) ─────────────
+
+    @Test
+    fun `setPerformanceMode builds the exact bare-integer payload for every valid ordinal`() {
+        for (mode in 0..4) {
+            assertThat(AyaneoCommands.setPerformanceMode(mode))
+                .isEqualTo("calibrate:msg_type_performance:com_set_performance_mode:$mode")
+        }
+    }
+
+    @Test
+    fun `setPerformanceMode clamps below 0 up to 0`() {
+        assertThat(AyaneoCommands.setPerformanceMode(-3))
+            .isEqualTo("calibrate:msg_type_performance:com_set_performance_mode:0")
+    }
+
+    @Test
+    fun `setPerformanceMode clamps above 4 down to 4`() {
+        assertThat(AyaneoCommands.setPerformanceMode(9))
+            .isEqualTo("calibrate:msg_type_performance:com_set_performance_mode:4")
+    }
+
+    @Test
+    fun `performance-mode constants pin the 0 to 4 range and stock mode 1`() {
+        assertThat(AyaneoCommands.PERF_MODE_MIN).isEqualTo(0)
+        assertThat(AyaneoCommands.PERF_MODE_MAX).isEqualTo(4)
+        assertThat(AyaneoCommands.PERF_MODE_STOCK).isEqualTo(1)
+    }
 }

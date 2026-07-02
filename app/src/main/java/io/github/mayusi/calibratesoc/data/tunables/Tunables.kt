@@ -82,6 +82,19 @@ object Tunables {
         target = action,
     )
 
+    /**
+     * The AYANEO vendor PERFORMANCE-MODE ordinal lever (0..4). PATHLESS/abstract — the
+     * [TunableId.target] is a stable synthetic LABEL, never a sysfs path, so it is never
+     * run through the sysfs-path regex classifiers. Driven by [AyaneoVendorWriter] via the
+     * `com_set_performance_mode:<int>` binder token; verified by reading the vendor conf
+     * file's `currentMode`. There is exactly ONE such tunable (a device has one active
+     * mode), so a constant label is correct and gives snapshot/revert a stable identity.
+     */
+    fun ayaPerformanceMode() = TunableId(
+        kind = TunableKind.AYANEO_PERF_MODE,
+        target = "ayaneo_performance_mode",
+    )
+
     // --- Helpers for the UI layer -------------------------------------
 
     /**
@@ -111,6 +124,15 @@ object Tunables {
         report: CapabilityReport,
         shizukuProbedWritable: Boolean? = null,
     ): String? {
+        if (id.kind == TunableKind.AYANEO_PERF_MODE) {
+            // The AYANEO PERF-MODE lever is reachable exactly when the vendor binder is
+            // live (WriterRegistry routes it to AyaneoVendorWriter only then, else NoopWriter).
+            // Like the vendor Settings key, there is no per-tier "denial reason" to surface
+            // here — liveness is decided entirely by WriterRegistry.isLiveWritable, which
+            // returns false (NoopWriter) on every non-AYANEO tier. Return null (no denial):
+            // callers must NOT infer liveness from this null (same honesty caveat as below).
+            return null
+        }
         if (id.kind == TunableKind.SETTINGS_SYSTEM || id.kind == TunableKind.VENDOR_INTENT) {
             // The Settings ROW is always writable (given WRITE_SECURE_SETTINGS) — so
             // there is no DENIAL to report here. HONESTY CAVEAT: a successful key

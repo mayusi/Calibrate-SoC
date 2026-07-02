@@ -108,6 +108,22 @@ data class TdpCaps(
     val gpuRootPath: String? = null,
     val uclampAvailable: Boolean = false,
     val fanModeAvailable: Boolean = false,
+    /**
+     * True when this device exposes the AYANEO vendor PERFORMANCE-MODE ordinal lever
+     * (0..4) as the durable CPU-side power lever — i.e. the AYANEO binder is live AND we
+     * hold NO full-kernel write path (`ayaneoBinderLive && !fullKernelWritable`). On such a
+     * device the raw per-policy `scaling_max_freq` cap is a stock-only no-op (the 0.3.5
+     * fix already collapses the CAP table there), so the engine drives the MODE ladder for
+     * CPU-side tightening INSTEAD of Lever.CAP; the MODE atomically sets CPU caps +
+     * governor + GPU max + fan through the honored vendor path so the change STICKS.
+     *
+     * FALSE on ROOT / PServer-live / chmod-direct (they cap the CPU cluster directly and
+     * never touch a mode) and on every non-AYANEO device — so Odin / RP6 / rooted behaviour
+     * is UNCHANGED. Defaulted false so existing test fixtures that build TdpCaps directly
+     * keep compiling; [from] always derives a real value. Kept in TdpCaps so the engine
+     * stays capability-agnostic (mirrors the 0.3.5 cpuCap-lever collapse living here).
+     */
+    val supportsPerfMode: Boolean = false,
 ) {
     companion object {
 
@@ -230,6 +246,17 @@ data class TdpCaps(
                 // non-AYANEO device — they keep their full step table exactly as before).
                 else -> true
             }
+
+            // ── AYANEO PERFORMANCE-MODE lever availability ────────────────────────
+            // The durable CPU-side lever on AYANEO: live vendor binder AND no full-kernel
+            // write path. On this exact tier the raw CPU cap is a stock-only no-op (the
+            // cpuCapLeverWritable collapse above), so the engine drives the MODE ladder for
+            // CPU-side power instead of Lever.CAP. Derived from ayaneoBinderLive &&
+            // !fullKernelWritable — the SAME shape as cpuCapLeverWritable's AYANEO arm, so
+            // the two always agree today (perf-mode is the replacement for the dead cap on
+            // precisely the tier where the cap collapsed). ROOT / PServer / chmod / non-AYANEO
+            // → false → they cap the CPU cluster directly, UNREGRESSED.
+            val supportsPerfMode = report.ayaneoBinderLive && !fullKernelWritable
 
             val kernelTopKhz = bigClusterOppFull.lastOrNull() ?: 0
             // The stock ceiling the vendor set for the big policy (scaling_max_freq).
@@ -358,6 +385,7 @@ data class TdpCaps(
                 gpuRootPath = gpuRootPath,
                 uclampAvailable = uclampAvailable,
                 fanModeAvailable = fanModeAvailable,
+                supportsPerfMode = supportsPerfMode,
             )
         }
     }

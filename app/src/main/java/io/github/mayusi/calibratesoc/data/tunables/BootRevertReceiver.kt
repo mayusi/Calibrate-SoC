@@ -12,6 +12,7 @@ import androidx.core.content.getSystemService
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.mayusi.calibratesoc.MainActivity
 import io.github.mayusi.calibratesoc.R
+import io.github.mayusi.calibratesoc.data.autotdp.AyaneoStockReconciler
 import io.github.mayusi.calibratesoc.data.boot.BootApplyMode
 import io.github.mayusi.calibratesoc.data.boot.resolveBootApplyMode
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
@@ -70,6 +71,15 @@ class BootRevertReceiver : BroadcastReceiver() {
     @Inject lateinit var profileApplier: ProfileApplier
     @Inject lateinit var pServerWriter: io.github.mayusi.calibratesoc.data.tunables.writer.PServerWriter
 
+    /**
+     * 0.3.6: the AYANEO vendor performance-mode conf file lives on the userdata volume
+     * (`/storage/emulated/0/.aya/...`), so a non-stock mode a killed AutoTDP session left
+     * parked SURVIVES a reboot too — this is not just an in-process-death hazard. AutoTDP
+     * never runs a daemon at boot (only per-profile applyOnBoot reapply, a different
+     * mechanism), so it is always safe to reconcile here.
+     */
+    @Inject lateinit var ayaneoStockReconciler: AyaneoStockReconciler
+
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val pending = goAsync()
@@ -104,6 +114,12 @@ class BootRevertReceiver : BroadcastReceiver() {
                             "Journal retained for next boot retry.",
                     )
                 }
+
+                // 0.3.6: AYANEO parked-mode self-heal — see AyaneoStockReconciler. Runs
+                // AFTER the journal revert above so a normal journaled revert (if any
+                // entry existed) gets first crack; this is the backstop for the empty- or
+                // stale-ledger case the journal revert cannot fix by itself.
+                ayaneoStockReconciler.reconcile(report)
 
                 // Step 2: Determine the strongest honest write tier.
                 val mode = resolveBootApplyMode(report)

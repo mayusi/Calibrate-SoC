@@ -53,6 +53,21 @@ data class TdpState(
     val gpuDevfreqMaxHz: Long? = null,
     val uclampTopAppMin: Int? = null,
     val fanMode: Int? = null,
+    /**
+     * AYANEO vendor PERFORMANCE-MODE ordinal (0..4), or null = don't touch. This is the
+     * durable CPU-side lever on AYANEO (see [TdpCaps.supportsPerfMode]): a mode atomically
+     * sets CPU caps + governor + GPU max + fan through the vendor's honored root path so it
+     * STICKS, unlike a raw scaling_max_freq cap. Monotonic by POWER (0=save … 4=streaming);
+     * a tighten steps the ordinal DOWN, a loosen steps it UP toward stock (mode 1).
+     *
+     * Used ONLY on the AYANEO PERF-MODE path — every other device leaves it null and caps
+     * the CPU cluster directly via [bigClusterCapKhz] (Odin / RP6 / root UNCHANGED). Written
+     * via the pathless [Tunables.ayaPerformanceMode] tunable, which routes to
+     * AyaneoVendorWriter → `com_set_performance_mode:<int>`. When set, the daemon emits the
+     * MODE write; because the AYANEO PERF-MODE ladders never also carry a GPU lever, a mode
+     * write can never land AFTER a GPU write in the same apply (which would clobber GPU).
+     */
+    val ayaPerfMode: Int? = null,
 ) {
     companion object {
         /**

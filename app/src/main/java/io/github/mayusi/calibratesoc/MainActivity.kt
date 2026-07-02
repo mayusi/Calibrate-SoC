@@ -17,6 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.mayusi.calibratesoc.ui.theme.AccentColor
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
+import io.github.mayusi.calibratesoc.data.autotdp.AyaneoStockReconciler
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.display.RefreshRateController
 import io.github.mayusi.calibratesoc.data.fancurve.FanCurveController
@@ -48,6 +49,11 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var ayaneoBinderClient: AyaneoBinderClient
     @Inject lateinit var capabilityProbe: CapabilityProbe
     @Inject lateinit var fanCurveController: FanCurveController
+
+    /** 0.3.6: AYANEO parked-mode self-heal — see [AyaneoStockReconciler]. Re-checked on
+     *  every resume (in addition to the process-start check in CalibrateSocApplication) so
+     *  returning to the app after backgrounding also self-heals, not just cold launches. */
+    @Inject lateinit var ayaneoStockReconciler: AyaneoStockReconciler
 
     @OptIn(ExperimentalComposeUiApi::class) // testTagsAsResourceId (uiautomator a11y fix)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,7 +131,11 @@ class MainActivity : ComponentActivity() {
             // force-stopped/restarted re-probes the binder instead of trusting a stale
             // `true`. Cheap: a package-presence short-circuit on non-AYANEO devices.
             ayaneoBinderClient.invalidateAvailabilityCache()
-            capabilityProbe.refresh()
+            val report = capabilityProbe.refresh()
+            // 0.3.6: self-heal a AYANEO device left parked at a non-stock vendor perf mode
+            // by a prior session that was force-killed/crashed before its revert could run.
+            // No-op when AutoTDP is actively running or the device is already at stock.
+            ayaneoStockReconciler.reconcile(report)
         }
     }
 

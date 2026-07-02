@@ -63,6 +63,32 @@ object TdpStateTransition {
     ): List<WriteOp> {
         val ops = mutableListOf<WriteOp>()
 
+        // ── 0. AYANEO PERFORMANCE-MODE ordinal — ALWAYS FIRST (precedence LAW) ──────
+        // A vendor MODE atomically sets CPU caps + governor + GPU max + fan. Selecting a
+        // mode OVERWRITES the active mode's bundled GPU max; a later com_set_performance_gpu
+        // override then rides on top. So the emit ORDER must be MODE-FIRST — never a mode
+        // AFTER a GPU write in the same apply (that clobbers the GPU override back to the
+        // bundle). Emitting it at step 0, ahead of every GPU op below, makes that ordering
+        // hazard STRUCTURALLY impossible regardless of which other fields changed. (On the
+        // AYANEO perf-mode path the engine drives ONLY this field for CPU-side power and
+        // does not also emit a GPU devfreq write, so in practice a mode is the lone op — but
+        // this ordering is the belt-and-braces guarantee.) The write routes through the
+        // pathless ayaPerformanceMode() tunable → AyaneoVendorWriter → the binder token, and
+        // is snapshotted + reverted on stop like every other write (revert re-writes stock
+        // mode 1). Skipped whenever the field didn't change (null→null on non-AYANEO).
+        if (to.ayaPerfMode != from.ayaPerfMode) {
+            to.ayaPerfMode?.let { mode ->
+                ops += WriteOp(
+                    id = Tunables.ayaPerformanceMode(),
+                    value = mode.toString(),
+                    description = "AYANEO performance mode → $mode",
+                )
+            }
+            // to.ayaPerfMode == null means "remove the mode override": the TunableWriter
+            // snapshot recorded stock mode 1 on the first write, so revertAll() on stop
+            // restores it. Nothing explicit needed here (mirrors the cap-removal path).
+        }
+
         // ── 1. Park cores newly added to parkedPrimeCores ─────────────────────
         val toAddParked = to.parkedPrimeCores - from.parkedPrimeCores
         // Highest index first — mirrors engine's park order

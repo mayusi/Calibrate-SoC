@@ -405,6 +405,66 @@ class TdpCapsWritableCeilingTest {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  0.3.6 — AYANEO PERFORMANCE-MODE lever availability (supportsPerfMode)
+    // ═════════════════════════════════════════════════════════════════════════════
+    // supportsPerfMode == ayaneoBinderLive && !fullKernelWritable — the exact tier where
+    // the raw CPU cap is a dead no-op, so the engine drives the vendor MODE ladder instead.
+
+    @Test
+    fun `supportsPerfMode true on AYANEO vendor-binder tier (binder live, no full-kernel write)`() {
+        val caps = TdpCaps.from(
+            reportWith(
+                policies = listOf(
+                    policy(0, listOf(384_000, 1_555_200), onlineCores = listOf(0, 1, 2, 3)),
+                    policy(4, ayaneoFullOpp, onlineCores = listOf(4, 5, 6, 7), stockMaxKhz = ayaneoStockCeilingKhz),
+                ),
+                ayaneoBinderLive = true,
+            ),
+        )
+        assertThat(caps.supportsPerfMode).isTrue()
+    }
+
+    @Test
+    fun `supportsPerfMode false on ROOT PServer and chmod-direct (fullKernelWritable wins)`() {
+        val root = TdpCaps.from(
+            reportWith(
+                policies = listOf(policy(4, ayaneoFullOpp, onlineCores = listOf(4, 5, 6, 7))),
+                privilege = PrivilegeTier.ROOT,
+                // Even if a stray AYANEO binder were live, a full-kernel write path wins → false.
+                ayaneoBinderLive = true,
+            ),
+        )
+        val pserver = TdpCaps.from(
+            reportWith(
+                policies = listOf(policy(4, ayaneoFullOpp, onlineCores = listOf(4, 5, 6, 7))),
+                pserverSysfsLive = true,
+                ayaneoBinderLive = true,
+            ),
+        )
+        val chmod = TdpCaps.from(
+            reportWith(
+                policies = listOf(policy(4, ayaneoFullOpp, onlineCores = listOf(4, 5, 6, 7))),
+                sysfsDirectlyWritable = true,
+                ayaneoBinderLive = true,
+            ),
+        )
+        assertThat(root.supportsPerfMode).isFalse()
+        assertThat(pserver.supportsPerfMode).isFalse()
+        assertThat(chmod.supportsPerfMode).isFalse()
+    }
+
+    @Test
+    fun `supportsPerfMode false on a non-AYANEO device with no binder`() {
+        val caps = TdpCaps.from(
+            reportWith(
+                policies = listOf(policy(4, ayaneoFullOpp, onlineCores = listOf(4, 5, 6, 7))),
+                ayaneoBinderLive = false,
+            ),
+        )
+        assertThat(caps.supportsPerfMode).isFalse()
+    }
+
     // ─── Engine-loop fallthrough: the tighten reaches the WORKING GPU lever ──────────
 
     /** The AYANEO GPU sysfs root the daemon writes devfreq through. */
@@ -433,9 +493,13 @@ class TdpCapsWritableCeilingTest {
     )
 
     @Test
-    fun `AYANEO tighten falls through the dead cap lever to a real GPU devfreq write`() {
-        // A full AYANEO report WITH a probed GPU devfreq OPP table, so the GPU_DEVFREQ lever
-        // is a real actuator (the one AyaneoVendorWriter routes via com_set_performance_gpu).
+    fun `AYANEO tighten falls through the dead cap lever to the durable PERF_MODE lever`() {
+        // 0.3.6 SUPERSEDES the 0.3.5 GPU-devfreq fallthrough: on the AYANEO vendor-binder
+        // tier the engine now drives the durable PERFORMANCE-MODE lever in place of BOTH the
+        // dead CPU cap AND the GPU levers (the vendor MODE sets CPU+gov+GPU+fan atomically, so
+        // it OWNS the GPU — emitting a separate GPU write would risk clobber). This test keeps
+        // the 0.3.5 anti-regression INTENT (AYANEO still actuates something LIVE, the dead CPU
+        // cap contributes nothing) but updates the mechanism: the working lever is now the MODE.
         val gpuStepsHz = listOf(
             220_000_000L, 350_000_000L, 490_000_000L, 605_000_000L, 700_000_000L, 840_000_000L,
         )
@@ -458,16 +522,19 @@ class TdpCapsWritableCeilingTest {
         )
         val caps = TdpCaps.from(report)
 
-        // Precondition: the CPU cap table is collapsed (dead lever), and the GPU devfreq
-        // envelope IS present (the working lever).
+        // Precondition: the CPU cap table is collapsed (dead lever), the GPU devfreq envelope
+        // IS present (so a GPU write WOULD actuate if selected — proving MODE suppresses it by
+        // design, not by absence), and the PERF-MODE lever is available.
         assertThat(caps.bigClusterOppStepsKhz).hasSize(1)
         assertThat(caps.gpuDevfreqStepsHz).isNotEmpty()
+        assertThat(caps.supportsPerfMode).isTrue()
 
-        // Replay the daemon's own decide → delta loop under a sustained tighten. If the fix
-        // works, the cap lever goes quiet (changed=false on the single-step table) and the
-        // tighten falls through to GPU_DEVFREQ, so a GPU devfreq-max write op is emitted.
+        // Replay the daemon's own decide → delta loop under a sustained tighten. The cap lever
+        // is quiet (single-step table) and the GPU lever is dropped from the ladder, so the
+        // tighten rides the PERF_MODE lever → a com_set_performance_mode write op is emitted.
         val gpuMaxTarget = Tunables.gpuMaxFreq(ayaneoGpuRoot).target
         val capTarget = Tunables.cpuMaxFreq(caps.bigPolicyId).target
+        val modeTarget = Tunables.ayaPerformanceMode().target
 
         var state = ControllerState.INITIAL
         var current = TdpState.STOCK
@@ -498,13 +565,14 @@ class TdpCapsWritableCeilingTest {
             state = d.controllerState
         }
 
-        // The WORKING lever fired: at least one GPU devfreq-max write was emitted.
-        assertThat(allOps.map { it.id.target }).contains(gpuMaxTarget)
-        // The final GPU devfreq max actually moved DOWN off the ceiling (real actuation).
-        assertThat(current.gpuDevfreqMaxHz).isNotNull()
-        assertThat(current.gpuDevfreqMaxHz!!).isLessThan(gpuStepsHz.last())
-        // The dead CPU cap lever contributed NOTHING: no sub-stock CPU cap write was emitted
-        // (a cap op would only appear if the cap moved off stock — it can't on one step).
+        // The WORKING lever fired: at least one PERF-MODE write was emitted, and the mode
+        // stepped DOWN off stock (real actuation of the durable lever).
+        assertThat(allOps.map { it.id.target }).contains(modeTarget)
+        assertThat(current.ayaPerfMode).isEqualTo(0)
+        // The MODE owns CPU+GPU: NO separate GPU devfreq write and NO sub-stock CPU cap write
+        // was emitted (so a mode can never land after a GPU write in the same apply → no clobber).
+        assertThat(allOps.none { it.id.target == gpuMaxTarget }).isTrue()
+        assertThat(current.gpuDevfreqMaxHz).isNull()
         assertThat(allOps.none { it.id.target == capTarget }).isTrue()
     }
 }

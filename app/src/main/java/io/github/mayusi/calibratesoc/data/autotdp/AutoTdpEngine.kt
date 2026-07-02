@@ -5,6 +5,7 @@ import io.github.mayusi.calibratesoc.data.monitor.Telemetry
 import io.github.mayusi.calibratesoc.data.monitor.batteryDrawMilliW
 import io.github.mayusi.calibratesoc.data.monitor.hasTrueLoadData
 import io.github.mayusi.calibratesoc.data.thermal.CapFloor
+import io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoCommands
 
 /**
  * The Smart-AutoTDP decision brain — a GOAL-GATED UTILIZATION-BAND CONTROLLER with
@@ -644,7 +645,9 @@ object AutoTdpEngine {
         goal: GoalProfile,
         activeLever: Lever?,
     ): Triple<TdpState, String, Lever> {
-        val order = goal.loosenLeverOrder
+        // AYANEO perf-mode tier: CAP + GPU levers collapse to the single PERF_MODE lever
+        // (see effectiveLeverOrder). Non-perf-mode devices keep their goal order unchanged.
+        val order = effectiveLeverOrder(goal.loosenLeverOrder, caps)
         // Resume the active lever if it can still move; else walk priority order.
         val ordered = if (activeLever != null && activeLever in order) {
             listOf(activeLever) + order.filter { it != activeLever }
@@ -652,6 +655,19 @@ object AutoTdpEngine {
 
         for (lever in ordered) {
             when (lever) {
+                Lever.PERF_MODE -> {
+                    // AYANEO durable CPU-side lever: step the vendor mode ordinal UP one
+                    // notch toward more power. Selected only on the perf-mode tier; clears
+                    // to null (stock) when it lands on mode 1; saturates at mode 4.
+                    val stepped = stepPerfModeUp(current)
+                    if (stepped.changed) {
+                        return Triple(
+                            current.copy(ayaPerfMode = stepped.mode),
+                            "perf mode → ${stepped.mode ?: AyaneoCommands.PERF_MODE_STOCK} (loosen)",
+                            Lever.PERF_MODE,
+                        )
+                    }
+                }
                 Lever.GPU_FLOOR -> {
                     // Loosen GPU = make it more permissive (lower level index toward min).
                     val min = caps.gpuMinLevel
@@ -806,7 +822,10 @@ object AutoTdpEngine {
         goal: GoalProfile,
         activeLever: Lever?,
     ): Triple<TdpState, String, Lever> {
-        val order = goal.tightenLeverOrder
+        // On the AYANEO perf-mode tier the CPU cap + GPU levers are replaced by the single
+        // durable PERF_MODE lever (see effectiveLeverOrder); every other device keeps its
+        // goal order unchanged.
+        val order = effectiveLeverOrder(goal.tightenLeverOrder, caps)
         val ordered = if (activeLever != null && activeLever in order) {
             listOf(activeLever) + order.filter { it != activeLever }
         } else order
@@ -826,6 +845,19 @@ object AutoTdpEngine {
                             current.copy(bigClusterCapKhz = stepped.cap),
                             "big cap → ${stepped.cap?.div(1000)} MHz",
                             Lever.CAP,
+                        )
+                    }
+                }
+                Lever.PERF_MODE -> {
+                    // AYANEO durable CPU-side lever: step the vendor mode ordinal DOWN one
+                    // notch toward min-power (save). Selected only on the perf-mode tier
+                    // (effectiveLeverOrder injects it there); saturates at mode 0.
+                    val stepped = stepPerfModeDown(current)
+                    if (stepped.changed) {
+                        return Triple(
+                            current.copy(ayaPerfMode = stepped.mode),
+                            "perf mode → ${stepped.mode ?: AyaneoCommands.PERF_MODE_STOCK} (tighten)",
+                            Lever.PERF_MODE,
                         )
                     }
                 }
@@ -1370,6 +1402,84 @@ object AutoTdpEngine {
         // the min's home so max stays strictly above min — bounds invariant).
         val nextIdx = (curIdx - 1).coerceAtLeast(1)
         return if (nextIdx < curIdx) DevfreqStep(steps[nextIdx], true) else DevfreqStep(currentMax, false)
+    }
+
+    // ── AYANEO PERFORMANCE-MODE ordinal stepping (0..4, monotonic by POWER) ──────────
+    //
+    // The durable CPU-side lever on the AYANEO vendor-binder tier ([TdpCaps.supportsPerfMode]).
+    // The ordinal is monotonic by POWER: 0=save < 1=balanced(STOCK) < 2=game < 3=firepower <
+    // 4=streaming. A mode atomically sets CPU caps + governor + GPU + fan through the honored
+    // vendor path, so it STICKS where a raw scaling_max_freq cap is walked back.
+    //
+    // MODEL — null ⟺ "no override" ⟺ device sits at STOCK (mode 1). We track an override only
+    // when it DIFFERS from stock: the EFFECTIVE ordinal is `ayaPerfMode ?: PERF_MODE_STOCK`.
+    // A step recomputes the effective ordinal; if the result lands exactly on STOCK we store
+    // null (clear the override — never hold a redundant stock override, mirroring how the CAP
+    // and devfreq-max levers clear to null at their stock end). This keeps the null≡stock
+    // invariant clean and makes revert-to-stock a null target (the writer snapshots + restores
+    // mode 1). TIGHTEN steps the ordinal DOWN (toward 0), LOOSEN steps it UP (toward 4).
+
+    private data class PerfModeStep(val mode: Int?, val changed: Boolean)
+
+    /**
+     * Tighten the AYANEO performance mode ONE ordinal DOWN toward min-power (0). The
+     * effective mode is `current.ayaPerfMode ?: PERF_MODE_STOCK`. Returns changed=false when
+     * already at [AyaneoCommands.PERF_MODE_MIN] (nothing lower to tighten). Stores null when
+     * the new ordinal equals STOCK (no redundant stock override held).
+     */
+    private fun stepPerfModeDown(current: TdpState): PerfModeStep {
+        val effective = current.ayaPerfMode ?: AyaneoCommands.PERF_MODE_STOCK
+        if (effective <= AyaneoCommands.PERF_MODE_MIN) return PerfModeStep(current.ayaPerfMode, false)
+        val next = effective - 1
+        return PerfModeStep(if (next == AyaneoCommands.PERF_MODE_STOCK) null else next, true)
+    }
+
+    /**
+     * Loosen the AYANEO performance mode ONE ordinal UP toward max-power (4). The effective
+     * mode is `current.ayaPerfMode ?: PERF_MODE_STOCK`. Returns changed=false when already at
+     * [AyaneoCommands.PERF_MODE_MAX]. Stores null when the new ordinal equals STOCK (e.g.
+     * loosening back up from mode 0 → 1 clears the override to stock).
+     */
+    private fun stepPerfModeUp(current: TdpState): PerfModeStep {
+        val effective = current.ayaPerfMode ?: AyaneoCommands.PERF_MODE_STOCK
+        if (effective >= AyaneoCommands.PERF_MODE_MAX) return PerfModeStep(current.ayaPerfMode, false)
+        val next = effective + 1
+        return PerfModeStep(if (next == AyaneoCommands.PERF_MODE_STOCK) null else next, true)
+    }
+
+    /**
+     * The per-goal lever order remapped for the AYANEO PERFORMANCE-MODE tier. On that tier
+     * the raw CPU cap is a dead no-op (0.3.5 collapse) AND the vendor MODE owns the GPU
+     * bundle, so we substitute a single coarse lever — [Lever.PERF_MODE] — IN PLACE OF BOTH
+     * [Lever.CAP] and [Lever.GPU_DEVFREQ]. Substituting at CAP's slot (and dropping the now-
+     * redundant GPU_DEVFREQ, and its coarse sibling GPU_FLOOR which the mode also owns) keeps
+     * the goal's priority intent while guaranteeing the engine never emits a GPU write on this
+     * path — so a mode can never land AFTER a GPU write in the same apply (no clobber). The
+     * remaining non-CPU/GPU levers (MIN_FREQ_FLOOR / PARK / UNPARK / UCLAMP) are left in place
+     * but self-skip on AYANEO (their nodes aren't bindable → CapabilityDenied → the daemon
+     * skips them and keeps running, per the 0.3.5 survival fix). On every non-perf-mode device
+     * the order is returned UNCHANGED (Odin / RP6 / root keep CAP + GPU_DEVFREQ exactly).
+     */
+    private fun effectiveLeverOrder(order: List<Lever>, caps: TdpCaps): List<Lever> {
+        if (!caps.supportsPerfMode) return order
+        val remapped = ArrayList<Lever>(order.size)
+        for (lever in order) {
+            when (lever) {
+                // Replace the (dead) CPU cap with the durable MODE lever, preserving its slot.
+                Lever.CAP -> if (Lever.PERF_MODE !in remapped) remapped += Lever.PERF_MODE
+                // The MODE bundle owns GPU (devfreq max + pwrlevel) — drop the GPU levers so
+                // we never emit a GPU write that a subsequent mode could clobber. If CAP was
+                // absent from this goal's order (it never is today, but be defensive), fold
+                // PERF_MODE in at the GPU slot instead so the mode lever still exists.
+                Lever.GPU_DEVFREQ, Lever.GPU_FLOOR ->
+                    if (Lever.PERF_MODE !in remapped) remapped += Lever.PERF_MODE
+                else -> remapped += lever
+            }
+        }
+        // Guarantee the MODE lever is present even for a hypothetical goal order without
+        // CAP/GPU (defensive; every curated goal contains CAP today).
+        if (Lever.PERF_MODE !in remapped) remapped.add(0, Lever.PERF_MODE)
+        return remapped
     }
 
     // ── Invariant enforcement (final gate before emitting any state) ─────────────

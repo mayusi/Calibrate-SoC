@@ -38,7 +38,10 @@ class SettingsKeyWriter @Inject constructor(
             TunableKind.SETTINGS_SYSTEM -> runCatching {
                 Settings.System.getString(context.contentResolver, id.target)
             }.getOrNull()
-            TunableKind.VENDOR_INTENT, TunableKind.SYSFS -> null
+            // VENDOR_INTENT / SYSFS aren't Settings keys; AYANEO_PERF_MODE is a pathless
+            // vendor-binder lever the registry only ever routes to AyaneoVendorWriter — it
+            // never reaches here. All read back as null (nothing this writer can read).
+            TunableKind.VENDOR_INTENT, TunableKind.SYSFS, TunableKind.AYANEO_PERF_MODE -> null
         }
     }
 
@@ -69,6 +72,11 @@ class SettingsKeyWriter @Inject constructor(
                 TunableKind.SYSFS -> WriteResult.CapabilityDenied(
                     id = id,
                     reason = "SettingsKeyWriter does not handle SYSFS.",
+                )
+                TunableKind.AYANEO_PERF_MODE -> WriteResult.CapabilityDenied(
+                    id = id,
+                    reason = "SettingsKeyWriter does not handle the AYANEO performance-mode " +
+                        "lever (driven via the vendor binder by AyaneoVendorWriter).",
                 )
             }
         }

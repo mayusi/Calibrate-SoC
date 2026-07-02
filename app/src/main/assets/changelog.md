@@ -1,3 +1,12 @@
+## [0.3.6-alpha] — 2026-07-02
+
+AutoTDP now tunes the CPU on AYANEO too — through the vendor's own performance modes.
+
+### Added — AYANEO CPU-side tuning
+- **AutoTDP now moves your AYANEO's CPU, not just the GPU.** AYANEO's system quietly walks back any raw CPU-frequency cap, so 0.3.5 tuned the GPU only. This release drives AYANEO's own **performance mode** (save / balanced / game / firepower / streaming) — the single control the device actually honors — which sets the CPU clocks, governor, GPU, and fan together in one atomic, sticky change. When a goal mode wants more or less CPU power, it steps that mode up or down; on stop it returns your device to the stock **balanced** mode. Verified on a Pocket DS.
+- On AYANEO the performance mode now owns the CPU/GPU together (so the two never fight); Odin, Retroid, and rooted devices are completely unchanged and still cap the CPU cluster directly.
+- **Your AYANEO can no longer get stuck in a low-power mode.** If AutoTDP is force-closed or crashes mid-session, the device could previously stay parked at its lowest performance mode with nothing to bring it back. The app now checks and restores the stock mode automatically the next time it opens, resumes, or the device reboots — without ever interrupting an active AutoTDP session.
+
 ## [0.3.5-alpha] — 2026-07-02
 
 AutoTDP now actually tunes AYANEO — and can't crash its system UI anymore.

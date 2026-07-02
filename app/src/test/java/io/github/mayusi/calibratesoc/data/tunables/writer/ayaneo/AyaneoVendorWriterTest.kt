@@ -379,4 +379,233 @@ class AyaneoVendorWriterTest {
         // policy7 currentMaxKhz = 3_187_200 in the fixture.
         assertThat(readback).isEqualTo("3187200")
     }
+
+    // ── 9. PERFORMANCE-MODE lever: command mapping + sysfs-tuple readback verify ──
+
+    /** Seed the fake filesystem's 2 cap nodes so [AyaneoVendorWriter.readCurrentAyaneoMode]
+     *  reads back exactly [mode] (per the ground-truth table). GPU is deliberately NOT
+     *  seeded/keyed-on — the matcher is CPU-cluster-cap-only (see readCurrentAyaneoMode KDoc
+     *  for why: the vendor GPU governor + our own GPU lever move the GPU node independently
+     *  of the CPU-cluster mode, so it is not a reliable mode indicator). */
+    private fun seedMode(fs: FakeFileSystem, mode: Int) {
+        val (cap3, cap7) = when (mode) {
+            0 -> 614_400L to 595_200L
+            1 -> 1_785_600L to 1_593_600L
+            2 -> 1_536_000L to 1_132_800L
+            3 -> 2_803_200L to 1_593_600L
+            4 -> 2_803_200L to 3_360_000L
+            else -> error("unknown mode $mode")
+        }
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, cap3.toString())
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, cap7.toString())
+    }
+
+    @Test
+    fun `perf mode maps to com_set_performance_mode and verifies via the sysfs tuple`() = runTest {
+        val sent = mutableListOf<String>()
+        val fs = FakeFileSystem()
+        val id = Tunables.ayaPerformanceMode()
+        val binder = mockk<AyaneoBinderClient>()
+        val slot = slot<String>()
+        coEvery { binder.isAvailable() } returns true
+        coEvery { binder.sendCommand(capture(slot)) } coAnswers {
+            // Simulate the vendor overlay actuating the tuple nodes to the requested mode.
+            val mode = slot.captured.substringAfterLast(":").toInt()
+            seedMode(fs, mode)
+            sent.add(slot.captured); true
+        }
+        val writer = writerWith(binder, fs)
+
+        val result = writer.write(id, "3")
+
+        // EXACT bare-integer payload.
+        assertThat(sent.single())
+            .isEqualTo("calibrate:msg_type_performance:com_set_performance_mode:3")
+        // Verified via the sysfs tuple reading back mode 3 → Applied.
+        assertThat(result).isInstanceOf(WriteResult.Success::class.java)
+        assertThat((result as WriteResult.Success).newValue).isEqualTo("3")
+        assertThat(result.verified).isTrue()
+    }
+
+    @Test
+    fun `perf mode value is clamped to 0 to 4 in the emitted command`() = runTest {
+        val sent = mutableListOf<String>()
+        val fs = FakeFileSystem()
+        val binder = acceptingBinder(sent)
+        val writer = writerWith(binder, fs)
+        // Seed a tuple so the readback path doesn't null out (verify unaffected here).
+        seedMode(fs, 4)
+
+        writer.write(Tunables.ayaPerformanceMode(), "9")
+
+        assertThat(sent.single())
+            .isEqualTo("calibrate:msg_type_performance:com_set_performance_mode:4")
+    }
+
+    @Test
+    fun `perf mode sysfs tuple that did not move yields Rejected`() = runTest {
+        val fs = FakeFileSystem()
+        // Tuple stays at stock mode 1 — the overlay did not take the requested mode 0.
+        seedMode(fs, 1)
+        val binder = mockk<AyaneoBinderClient>()
+        coEvery { binder.isAvailable() } returns true
+        coEvery { binder.sendCommand(any()) } returns true
+        val writer = writerWith(binder, fs)
+
+        val result = writer.write(Tunables.ayaPerformanceMode(), "0")
+
+        assertThat(result).isInstanceOf(WriteResult.Rejected::class.java)
+        assertThat((result as WriteResult.Rejected).message).contains("mode 1")
+    }
+
+    @Test
+    fun `perf mode with an unreadable sysfs tuple is Success but verified=false`() = runTest {
+        // No tuple nodes seeded → readback null → accept-but-unverified (never faked verified).
+        val fs = FakeFileSystem()
+        val binder = mockk<AyaneoBinderClient>()
+        coEvery { binder.isAvailable() } returns true
+        coEvery { binder.sendCommand(any()) } returns true
+        val writer = writerWith(binder, fs)
+
+        val result = writer.write(Tunables.ayaPerformanceMode(), "2")
+
+        assertThat(result).isInstanceOf(WriteResult.Success::class.java)
+        assertThat((result as WriteResult.Success).newValue).isEqualTo("2")
+        assertThat(result.verified).isFalse()
+    }
+
+    @Test
+    fun `perf mode binder rejecting the send yields Failed (transient)`() = runTest {
+        val fs = FakeFileSystem()
+        seedMode(fs, 1)
+        val binder = mockk<AyaneoBinderClient>()
+        coEvery { binder.isAvailable() } returns true
+        coEvery { binder.sendCommand(any()) } returns false
+        val writer = writerWith(binder, fs)
+
+        val result = writer.write(Tunables.ayaPerformanceMode(), "3")
+
+        assertThat(result).isInstanceOf(WriteResult.Failed::class.java)
+    }
+
+    @Test
+    fun `perf mode read() returns stock mode 1 as the revert snapshot baseline`() = runTest {
+        // Even when the sysfs tuple currently reads a NON-stock mode, read() (the snapshot
+        // seed) returns stock mode 1 so revertAll restores factory state, not the pre-engage
+        // mode. This is the constraint: revert targets mode 1, never 0 or a stray mode.
+        val fs = FakeFileSystem()
+        seedMode(fs, 4)
+        val binder = mockk<AyaneoBinderClient>(relaxed = true)
+        val writer = writerWith(binder, fs)
+
+        assertThat(writer.read(Tunables.ayaPerformanceMode())).isEqualTo("1")
+    }
+
+    @Test
+    fun `perf mode canWrite is true when binder available, PerformanceMode is not Unsupported`() = runTest {
+        val binder = mockk<AyaneoBinderClient>()
+        coEvery { binder.isAvailable() } returns true
+        val writer = writerWith(binder)
+
+        assertThat(writer.canWrite(Tunables.ayaPerformanceMode())).isTrue()
+    }
+
+    // ── 10. readCurrentAyaneoMode: the tuple matcher itself ──────────────────────
+
+    @Test
+    fun `readCurrentAyaneoMode maps each of the 5 known tuples to its mode`() {
+        for (mode in 0..4) {
+            val fs = FakeFileSystem()
+            seedMode(fs, mode)
+            assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fs)).isEqualTo(mode)
+        }
+    }
+
+    @Test
+    fun `readCurrentAyaneoMode disambiguates modes 3 and 4 which share policy3`() {
+        // Both modes 3 & 4 have cap3=2803200 — must use policy7 to tell them apart.
+        val fsMode3 = FakeFileSystem()
+        seed(fsMode3, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "2803200")
+        seed(fsMode3, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "1593600")
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fsMode3)).isEqualTo(3)
+
+        val fsMode4 = FakeFileSystem()
+        seed(fsMode4, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "2803200")
+        seed(fsMode4, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "3360000")
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fsMode4)).isEqualTo(4)
+    }
+
+    @Test
+    fun `readCurrentAyaneoMode disambiguates modes 1 and 3 which share policy7`() {
+        // Both modes 1 & 3 have cap7=1593600 — must use policy3 to tell them apart.
+        val fsMode1 = FakeFileSystem()
+        seed(fsMode1, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "1785600")
+        seed(fsMode1, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "1593600")
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fsMode1)).isEqualTo(1)
+
+        val fsMode3 = FakeFileSystem()
+        seed(fsMode3, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "2803200")
+        seed(fsMode3, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "1593600")
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fsMode3)).isEqualTo(3)
+    }
+
+    @Test
+    fun `readCurrentAyaneoMode returns null for an unrecognized cap pair`() {
+        val fs = FakeFileSystem()
+        // Mid-transition / garbage values that don't match any known mode row.
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "999999")
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "888888")
+
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fs)).isNull()
+    }
+
+    @Test
+    fun `readCurrentAyaneoMode returns null when either cap node is unreadable`() {
+        // Only policy3 seeded — policy7 missing.
+        val fs = FakeFileSystem()
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "1785600")
+
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fs)).isNull()
+    }
+
+    // ── 11. LIVE REGRESSION: GPU must NOT be part of the mode signature ──────────
+
+    @Test
+    fun `readCurrentAyaneoMode returns mode 0 even when GPU reads 680MHz (live regression)`() {
+        // Device-verified regression (kill-parked Pocket DS, mode 0): policy3=614400 and
+        // policy7=595200 are exactly mode-0-correct, but the GPU devfreq max_freq node reads
+        // 680000000 (mode 1/2/3's nominal value) instead of mode 0's nominal 220000000 — the
+        // vendor GPU governor idles/varies the node independently of the CPU-cluster mode.
+        // The OLD 3-node tuple matched nothing here and returned null, which made the
+        // AyaneoStockReconciler skip self-heal and left the device stuck at mode 0. The
+        // caps-only matcher must return 0 regardless of what the GPU node reads.
+        val fs = FakeFileSystem()
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, "614400")
+        seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, "595200")
+        // GPU node intentionally seeded to a NON-mode-0 value (or left unseeded — either way
+        // must not affect the result, since GPU is no longer read by the matcher at all).
+        seed(fs, "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq", "680000000")
+
+        assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fs)).isEqualTo(0)
+    }
+
+    @Test
+    fun `readCurrentAyaneoMode ignores GPU entirely for all 5 modes`() {
+        // Seed every mode's CPU caps but with a deliberately WRONG/irrelevant GPU value —
+        // the matcher must still resolve the correct mode from caps alone.
+        val capsByMode = mapOf(
+            0 to (614_400L to 595_200L),
+            1 to (1_785_600L to 1_593_600L),
+            2 to (1_536_000L to 1_132_800L),
+            3 to (2_803_200L to 1_593_600L),
+            4 to (2_803_200L to 3_360_000L),
+        )
+        for ((mode, caps) in capsByMode) {
+            val fs = FakeFileSystem()
+            seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY3_MAX, caps.first.toString())
+            seed(fs, AyaneoVendorWriter.PERF_MODE_POLICY7_MAX, caps.second.toString())
+            seed(fs, "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq", "999999999") // garbage GPU
+            assertThat(AyaneoVendorWriter.readCurrentAyaneoMode(fs)).isEqualTo(mode)
+        }
+    }
 }

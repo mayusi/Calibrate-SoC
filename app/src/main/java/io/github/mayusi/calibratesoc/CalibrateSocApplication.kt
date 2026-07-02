@@ -2,6 +2,7 @@ package io.github.mayusi.calibratesoc
 
 import android.app.Application
 import dagger.hilt.android.HiltAndroidApp
+import io.github.mayusi.calibratesoc.data.autotdp.AyaneoStockReconciler
 import io.github.mayusi.calibratesoc.data.baseline.FactoryBaselineRecorder
 import io.github.mayusi.calibratesoc.data.capability.CapabilityProbe
 import io.github.mayusi.calibratesoc.data.devicedb.DeviceAdapterRegistry
@@ -33,6 +34,16 @@ class CalibrateSocApplication : Application() {
     @Inject lateinit var autoUpdateChecker: AutoUpdateChecker
     @Inject lateinit var remoteContentRepository: RemoteContentRepository
 
+    /**
+     * 0.3.6 — SHIP-BLOCKER FIX: self-heals a AYANEO device left parked at a non-stock
+     * vendor performance mode after AutoTDP's process was force-killed/crashed with no
+     * orderly revert. See [AyaneoStockReconciler] for the full hazard + safety contract.
+     * Wired here (process onCreate) rather than only in MainActivity.onResume because
+     * this is the ONE hook that fires on every possible process re-entry — cold launch,
+     * a notification tap, a boot-triggered service — not just an Activity resume.
+     */
+    @Inject lateinit var ayaneoStockReconciler: AyaneoStockReconciler
+
     /** Detached scope — capture runs in parallel with the rest of
      *  startup. Worst case the user opens Tune before capture
      *  finishes, in which case `ensureCaptured` is idempotent
@@ -53,6 +64,10 @@ class CalibrateSocApplication : Application() {
             val report = capabilityProbe.refresh()
             val adapter = deviceAdapterRegistry.lookup(report.device.knownHandheldKey)
             factoryBaselineRecorder.ensureCaptured(report, adapter)
+            // 0.3.6: reconcile AFTER the report resolves so the AYANEO gate
+            // (ayaneoBinderLive / fullKernelWritable) reflects THIS process's real probe,
+            // not a stale/absent one. Best-effort + self-contained; never blocks/throws.
+            ayaneoStockReconciler.reconcile(report)
         }
         // Best-effort auto-update check — fire-and-forget, never blocks startup.
         // Runs on IO, swallows all errors, and only proceeds if the user opted in

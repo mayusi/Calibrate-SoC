@@ -33,6 +33,17 @@ enum class Lever {
     GPU_DEVFREQ,
     /** uclamp.min/max perf-hint on the top app (park's XOR sibling). WAVE 2. */
     UCLAMP,
+
+    /**
+     * AYANEO vendor PERFORMANCE-MODE ordinal (0..4) — the durable CPU-side lever on the
+     * AYANEO vendor-binder tier ([TdpCaps.supportsPerfMode]). Steps the mode ordinal DOWN
+     * to tighten / UP to loosen; a mode atomically sets CPU caps + governor + GPU + fan
+     * through the honored vendor path, so it STICKS where a raw CPU cap is walked back.
+     * On the AYANEO PERF-MODE path this REPLACES [CAP] (dead there) AND owns GPU, so
+     * [GPU_DEVFREQ] is dropped from that path's ladders — this is the sole coarse lever.
+     * Never selected on any non-AYANEO / non-perf-mode device.
+     */
+    PERF_MODE,
 }
 
 /**

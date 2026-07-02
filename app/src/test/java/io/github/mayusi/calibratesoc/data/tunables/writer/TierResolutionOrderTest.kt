@@ -388,6 +388,83 @@ class TierResolutionOrderTest {
         assertThat(rung).isEqualTo(AutoTdpRung.SCRIPT)
     }
 
+    // ── AYANEO PERFORMANCE-MODE lever routing ──────────────────────────────────
+
+    /**
+     * A minimal AYANEO report with configurable binder liveness + tier flags, for the
+     * pathless PERF-MODE routing tests.
+     */
+    private fun ayaneoReport(
+        ayaneoBinderLive: Boolean,
+        privilege: PrivilegeTier = PrivilegeTier.NONE,
+        pserverSysfsLive: Boolean = false,
+        sysfsDirectlyWritable: Boolean = false,
+    ) = CapabilityReport(
+        device = DeviceIdentity(
+            manufacturer = "AYANEO", brand = "AYANEO", model = "Pocket DS",
+            device = "PocketDS", hardware = "kalama",
+            androidVersion = "13", sdkInt = 33, knownHandheldKey = "ayaneo_pocket_ds",
+        ),
+        soc = SoCIdentity("QTI", "SG8275", GpuFamily.ADRENO),
+        privilege = privilege,
+        rootKind = if (privilege == PrivilegeTier.ROOT) RootKind.MAGISK else RootKind.NONE,
+        shizuku = ShizukuStatus(false, false, false, null),
+        cpuPolicies = emptyList(),
+        gpu = null,
+        thermalZones = emptyList(),
+        fan = null,
+        vendorApps = VendorAppPresence(false, false, ayaSpace = true, retroidGameAssistant = false),
+        sysfsDirectlyWritable = sysfsDirectlyWritable,
+        pserverSysfsLive = pserverSysfsLive,
+        ayaneoBinderLive = ayaneoBinderLive,
+    )
+
+    private val PERF_MODE = Tunables.ayaPerformanceMode()
+
+    @Test
+    fun `AYANEO_PERF_MODE routes to AyaneoVendorWriter when the binder is live`() {
+        val ayaneo = mockk<io.github.mayusi.calibratesoc.data.tunables.writer.ayaneo.AyaneoVendorWriter>(relaxed = true)
+        val registry = WriterRegistry(
+            mockk<RootWriter>(relaxed = true),
+            mockk<ShizukuWriter>(relaxed = true),
+            mockk<SettingsKeyWriter>(relaxed = true),
+            mockk<PServerWriter>(relaxed = true).also {
+                every { it.binder() } returns null
+                every { it.transactableNow() } returns false
+            },
+            NoopWriter(mockk(relaxed = true)),
+            UnlockedFileWriter(),
+            mockk<ShizukuNodeCache>().also { every { it.isCachedWritable(any()) } returns false },
+            ayaneo,
+        )
+        val writer = registry.writerFor(PERF_MODE, ayaneoReport(ayaneoBinderLive = true))
+        assertThat(writer).isSameInstanceAs(ayaneo)
+        assertThat(registry.isLiveWritable(PERF_MODE, ayaneoReport(ayaneoBinderLive = true))).isTrue()
+    }
+
+    @Test
+    fun `AYANEO_PERF_MODE routes to NoopWriter when the binder is NOT live`() {
+        val registry = makeRegistry()
+        val writer = registry.writerFor(PERF_MODE, ayaneoReport(ayaneoBinderLive = false))
+        assertThat(writer).isInstanceOf(NoopWriter::class.java)
+        assertThat(registry.isLiveWritable(PERF_MODE, ayaneoReport(ayaneoBinderLive = false))).isFalse()
+    }
+
+    @Test
+    fun `AYANEO_PERF_MODE never routes live on ROOT or PServer devices (Odin RP6 root never use it)`() {
+        val registry = makeRegistry()
+        // ROOT device: no AYANEO binder → NoopWriter (root caps the CPU directly, never a mode).
+        assertThat(registry.writerFor(PERF_MODE, ayaneoReport(ayaneoBinderLive = false, privilege = PrivilegeTier.ROOT)))
+            .isInstanceOf(NoopWriter::class.java)
+        // PServer-live device with no AYANEO binder → NoopWriter (PServer caps directly).
+        assertThat(
+            registry.writerFor(
+                PERF_MODE,
+                ayaneoReport(ayaneoBinderLive = false, pserverSysfsLive = true),
+            ),
+        ).isInstanceOf(NoopWriter::class.java)
+    }
+
     // ── Write-verify probe simulation tests ───────────────────────────────────
 
     /**

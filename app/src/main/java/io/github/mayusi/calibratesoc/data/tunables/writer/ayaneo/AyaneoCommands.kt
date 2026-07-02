@@ -124,6 +124,41 @@ object AyaneoCommands {
     fun reset(modeInt: Int): String =
         wrap("com_set_performance_reset:$modeInt")
 
+    // ── Performance-MODE ordinal (the durable CPU-side lever on AYANEO) ────────────
+
+    /** Lowest performance-mode ordinal (min power / "save"). */
+    const val PERF_MODE_MIN = 0
+
+    /** Highest performance-mode ordinal (max power / "streaming"). */
+    const val PERF_MODE_MAX = 4
+
+    /**
+     * The STOCK/factory performance mode (mode 1 = "balanced"). Live-observed as the
+     * device's default `currentMode` on a stock Pocket DS; the revert target so the device
+     * returns to factory state (mirrors how the GPU lever reverts to its stock ceiling).
+     */
+    const val PERF_MODE_STOCK = 1
+
+    /**
+     * Select a vendor PERFORMANCE MODE by its integer ordinal [mode] (0..4, monotonic by
+     * POWER: 0=save … 4=streaming). This is the ONLY durable CPU-side lever on AYANEO — the
+     * vendor `PerformanceManager` reconfigures the CPU cluster caps + governor + GPU max +
+     * fan ATOMICALLY through the same honored root path the vendor UI uses, so the change
+     * STICKS (unlike a raw per-policy `scaling_max_freq` write, which the perf-HAL/gsset
+     * daemon walks back).
+     *
+     * Payload: `…:com_set_performance_mode:<int>` — a BARE integer the server parses with
+     * `Integer.parseInt`. [mode] is CLAMPED to [PERF_MODE_MIN]..[PERF_MODE_MAX] defensively
+     * so a caller can never emit an out-of-range ordinal the vendor server would reject.
+     *
+     * PRECEDENCE NOTE (owned by [AyaneoVendorWriter] / the daemon): a MODE overwrites the
+     * active mode's bundled GPU max. A later `com_set_performance_gpu:<Hz>` overrides just
+     * the GPU on top of the active mode. So the emit ORDER is ALWAYS mode-first — never a
+     * mode AFTER a GPU write in the same apply (that would clobber the GPU override).
+     */
+    fun setPerformanceMode(mode: Int): String =
+        wrap("com_set_performance_mode:${mode.coerceIn(PERF_MODE_MIN, PERF_MODE_MAX)}")
+
     /**
      * Map a Linux cpufreq governor name to the AYANEO scheduler token.
      *

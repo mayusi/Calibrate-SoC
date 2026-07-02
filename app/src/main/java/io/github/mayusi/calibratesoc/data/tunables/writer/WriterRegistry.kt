@@ -91,6 +91,16 @@ class WriterRegistry @Inject constructor(
                 }
             }
             TunableKind.VENDOR_INTENT -> settings
+            // AYANEO PERFORMANCE-MODE ordinal lever (0..4): a PATHLESS/abstract tunable that
+            // ONLY exists on AYANEO — the durable CPU-side lever driven via the vendor binder's
+            // `com_set_performance_mode` token. Route to AyaneoVendorWriter when a REAL bind
+            // round-trip confirmed the service is live (ayaneoBinderLive); otherwise NoopWriter
+            // so isLiveWritable honestly reports it not-live on every non-AYANEO / non-binder
+            // device (Odin / RP6 / root NEVER route here — they cap the CPU cluster directly and
+            // never emit this tunable). There is no path regex here (a mode is abstract), so the
+            // gate is purely ayaneoBinderLive.
+            TunableKind.AYANEO_PERF_MODE ->
+                if (report.ayaneoBinderLive) ayaneo else noop
             TunableKind.SYSFS -> {
                 // PSERVER-LIVE is the STRONGEST sysfs tier on ANY device that has it
                 // (cross-vendor: AYN Odin + Retroid Pocket 6 both confirmed). PServer runs

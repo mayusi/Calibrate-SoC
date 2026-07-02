@@ -65,6 +65,17 @@ class AyaneoVendorWriter @Inject constructor(
 ) : SysfsWriter {
 
     override suspend fun read(id: TunableId): String? = withContext(Dispatchers.IO) {
+        // PERF-MODE lever: the snapshot baseline MUST be the STOCK mode (1 = balanced), so
+        // TunableWriter.revertAll re-writes mode 1 on stop and the device returns to FACTORY
+        // state — matching how the GPU lever reverts to its stock ceiling (constraint: revert
+        // targets mode 1, never mode 0, regardless of the pre-engage mode). We deliberately
+        // do NOT return the live currentMode here: if the user happened to engage from a
+        // non-stock mode, restoring THAT would leave a non-factory state. Stock is the honest
+        // "off" for a lever we own for the session. (The live currentMode is still read at
+        // WRITE time for readback-VERIFY below — this read() only seeds the revert snapshot.)
+        if (id.kind == TunableKind.AYANEO_PERF_MODE) {
+            return@withContext AyaneoCommands.PERF_MODE_STOCK.toString()
+        }
         if (id.kind != TunableKind.SYSFS) return@withContext null
         // Primary: direct sysfs read (GPU max_freq + fan pwm are app-readable — verified
         // live). Fallback: when a CPU policy node is EACCES to the app UID, recover the
@@ -145,6 +156,70 @@ class AyaneoVendorWriter @Inject constructor(
                 // else accept-unverified. The token, not the raw value, is the intent.
                 verifyKind = VerifyKind.None,
             )
+
+            is Mapping.PerformanceMode -> writePerformanceMode(id, value)
+        }
+    }
+
+    /**
+     * Drive the durable AYANEO PERFORMANCE-MODE lever: send `com_set_performance_mode:<int>`,
+     * then VERIFY by reading back the live sysfs CPU-cluster-cap PAIR (policy3/policy7
+     * scaling_max_freq) via [readCurrentAyaneoMode] — there is NO `com_get_performance_mode`
+     * binder token, and the vendor conf file that used to serve as the readback is NOT
+     * app-readable (confirmed live: `-rw-rw---- u0_a143:media_rw` → `EACCES` for our uid).
+     * These sysfs nodes ARE app-readable (the same ones the app already reads for its HUD),
+     * so they are the honest readback source. GPU devfreq max_freq is deliberately NOT part
+     * of the signature — see [readCurrentAyaneoMode] KDoc for the live regression this fixed.
+     *
+     *  - value not an int / out-of-range     → clamped by [AyaneoCommands.setPerformanceMode]
+     *  - binder send failed                  → [WriteResult.Failed] (transient; AutoTDP retries)
+     *  - send ok, pair mode == intent          → [WriteResult.Success] (Applied, verified)
+     *  - send ok, pair mode differs            → [WriteResult.Rejected] (overlay didn't take it)
+     *  - send ok, pair UNREADABLE/unrecognized  → [WriteResult.Success] verified=false (accept-but-warn)
+     */
+    private suspend fun writePerformanceMode(id: TunableId, value: String): WriteResult {
+        val intended = value.trim().toIntOrNull()
+            ?.coerceIn(AyaneoCommands.PERF_MODE_MIN, AyaneoCommands.PERF_MODE_MAX)
+            ?: AyaneoCommands.PERF_MODE_STOCK
+        val command = AyaneoCommands.setPerformanceMode(intended)
+        if (BuildConfig.DEBUG) Log.i(TAG, "write(): PERF_MODE ← $intended  cmd='$command'")
+
+        // Snapshot the pre-write mode from the live sysfs tuple (best-effort). The revert
+        // snapshot itself is seeded by read() = stock; this `previous` only annotates the
+        // WriteResult so the daemon's HUD/logging can show what the mode was before.
+        val previous = readCurrentAyaneoMode(fs)?.toString()
+
+        val accepted = runCatching { binder.sendCommand(command) }.getOrElse { t ->
+            Log.w(TAG, "write(): PERF_MODE binder.sendCommand threw ${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
+        if (!accepted) {
+            return WriteResult.Failed(
+                id,
+                IllegalStateException("AYANEO binder did not accept '$command'"),
+            )
+        }
+
+        // Readback-verify via the CPU-cluster-cap pair (policy3 + policy7, app-readable).
+        // GPU max_freq is deliberately excluded — see readCurrentAyaneoMode KDoc.
+        val readbackMode = readCurrentAyaneoMode(fs)
+        if (readbackMode == null) {
+            Log.w(TAG, "write(): PERF_MODE UNVERIFIED — sysfs cap pair unreadable/unrecognized; binder accepted '$command'")
+            return WriteResult.Success(id, previousValue = previous, newValue = intended.toString(), verified = false)
+        }
+        return if (readbackMode == intended) {
+            if (BuildConfig.DEBUG) Log.i(TAG, "write(): PERF_MODE VERIFIED cap pair mode=$readbackMode")
+            WriteResult.Success(id, previousValue = previous, newValue = readbackMode.toString())
+        } else {
+            Log.w(TAG, "write(): PERF_MODE READBACK MISMATCH intended=$intended cap pair mode=$readbackMode")
+            WriteResult.Rejected(
+                id = id,
+                errno = null,
+                message = "AYANEO binder accepted com_set_performance_mode:$intended but the " +
+                    "sysfs cap pair reads back mode $readbackMode. The overlay may have rejected the mode.",
+                readbackValue = readbackMode.toLong(),
+                previousValue = previous?.toLongOrNull(),
+            )
         }
     }
 
@@ -223,6 +298,12 @@ class AyaneoVendorWriter @Inject constructor(
         data class CpuGovernor(val policyId: Int) : Mapping
         data object GpuMaxFreq : Mapping
         data class FanMode(val token: String) : Mapping
+
+        /**
+         * The AYANEO PERFORMANCE-MODE ordinal lever (0..4) → `com_set_performance_mode:<int>`.
+         * Pathless/abstract — matched by [TunableId.kind], never by a sysfs-path regex.
+         */
+        data object PerformanceMode : Mapping
         data class Unsupported(val why: String) : Mapping
     }
 
@@ -236,6 +317,11 @@ class AyaneoVendorWriter @Inject constructor(
      * AYANEO topology we've seen: policy0/policy3/policy7).
      */
     private fun classify(id: TunableId): Mapping {
+        // PERF-MODE is a PATHLESS/abstract lever matched by kind, BEFORE the sysfs-only
+        // guard below (its target is a synthetic label, not a `/sys/...` path).
+        if (id.kind == TunableKind.AYANEO_PERF_MODE) {
+            return Mapping.PerformanceMode
+        }
         if (id.kind != TunableKind.SYSFS) {
             return Mapping.Unsupported("not a sysfs tunable")
         }
@@ -313,6 +399,78 @@ class AyaneoVendorWriter @Inject constructor(
         // hwmon pwm fan node (the readable fan-verification signal).
         private val PWM_RE =
             Regex("/sys/devices/platform/soc/soc:pwm-fan/hwmon/hwmon\\d+/pwm\\d+")
+
+        /**
+         * The 2 app-readable sysfs nodes that together uniquely identify the AYANEO vendor
+         * PERFORMANCE-MODE ordinal (0..4). The vendor conf file
+         * (`/storage/emulated/0/.aya/aya_performance_mode.config_v10.conf`) that used to
+         * serve as the readback is NOT app-readable — confirmed live:
+         * `-rw-rw---- u0_a143(gamewindow):media_rw` → `MediaProvider: Permission denied` for
+         * our untrusted_app uid (not media_rw, no storage permission). These 2 nodes ARE
+         * app-readable (the same ones the app already reads for its HUD/telemetry), so they
+         * are the honest readback source for [readCurrentAyaneoMode].
+         *
+         * GPU `devfreq/max_freq` is DELIBERATELY NOT part of the signature (see
+         * [readCurrentAyaneoMode] KDoc) — live device evidence (2026-07, mode 0, kill-parked
+         * Pocket DS) showed the GPU node reading 680000000 instead of the ground-truth-table's
+         * 220000000, which made the old 3-node tuple match nothing and return null.
+         */
+        const val PERF_MODE_POLICY3_MAX =
+            "/sys/devices/system/cpu/cpufreq/policy3/scaling_max_freq"
+        const val PERF_MODE_POLICY7_MAX =
+            "/sys/devices/system/cpu/cpufreq/policy7/scaling_max_freq"
+
+        /**
+         * Read the live AYANEO vendor PERFORMANCE-MODE ordinal (0..4) from the app-readable
+         * CPU-cluster-cap PAIR — policy3 `scaling_max_freq` + policy7 `scaling_max_freq` —
+         * instead of the unreadable vendor conf file. Ground-truth table decompiled from
+         * `PerformanceManager` on the Pocket DS (kalama):
+         *
+         *  | Mode | policy3    | policy7   |
+         *  |------|------------|-----------|
+         *  | 0    | 614400     | 595200    |
+         *  | 1    | 1785600    | 1593600   |
+         *  | 2    | 1536000    | 1132800   |
+         *  | 3    | 2803200    | 1593600   |
+         *  | 4    | 2803200    | 3360000   |
+         *
+         * GPU `devfreq/max_freq` is DELIBERATELY EXCLUDED from this signature. It is NOT a
+         * reliable mode indicator: the vendor GPU governor idles/varies the node independently
+         * of the CPU-cluster mode, and CalibrateSoC's own GPU lever moves the same node when
+         * engaged — so the GPU value can (and, confirmed live, does) disagree with the mode's
+         * nominal ground-truth GPU cap while the CPU caps are still exactly mode-correct. LIVE
+         * REGRESSION (device-verified, kill-parked Pocket DS at mode 0): policy3=614400,
+         * policy7=595200 (both mode-0-correct) but GPU read 680000000 (mode-1/2/3's nominal
+         * value, NOT mode 0's 220000000) — the old 3-node tuple matched nothing, returned
+         * null, and [io.github.mayusi.calibratesoc.data.autotdp.AyaneoStockReconciler] skipped
+         * self-heal, leaving the device stuck. The CPU cluster caps are governor-held and
+         * deterministic — the (cap3, cap7) PAIR alone is verified unique across all 5 modes
+         * (cap3 alone collapses modes 3 & 4, both 2803200 — cap7 disambiguates; cap7 alone
+         * collapses modes 1 & 3, both 1593600 — cap3 disambiguates), so dropping GPU loses no
+         * matching precision while fixing the false-null regression.
+         *
+         * Returns null when the pair doesn't match any known mode (e.g. mid-transition) or
+         * when either node is unreadable — never a faked/guessed mode.
+         *
+         * Shared by [AyaneoVendorWriter] (write-verify + revert-snapshot annotation) and
+         * [io.github.mayusi.calibratesoc.data.autotdp.AyaneoStockReconciler] (read-first
+         * stock check) — ONE implementation, reusing the same [FileSystem.readSysfsString]
+         * abstraction the rest of this writer uses so it is testable with a fake filesystem.
+         */
+        fun readCurrentAyaneoMode(fs: FileSystem): Int? {
+            val cap3 = fs.readSysfsString(PERF_MODE_POLICY3_MAX.toPath())?.trim()?.toLongOrNull()
+                ?: return null
+            val cap7 = fs.readSysfsString(PERF_MODE_POLICY7_MAX.toPath())?.trim()?.toLongOrNull()
+                ?: return null
+            return when {
+                cap3 == 614_400L && cap7 == 595_200L -> 0
+                cap3 == 1_785_600L && cap7 == 1_593_600L -> 1
+                cap3 == 1_536_000L && cap7 == 1_132_800L -> 2
+                cap3 == 2_803_200L && cap7 == 1_593_600L -> 3
+                cap3 == 2_803_200L && cap7 == 3_360_000L -> 4
+                else -> null
+            }
+        }
 
         /**
          * OPP-snap tolerance as a FRACTION of the intended value. The kernel's OPP table
