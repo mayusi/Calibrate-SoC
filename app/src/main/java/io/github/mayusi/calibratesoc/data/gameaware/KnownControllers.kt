@@ -42,6 +42,19 @@ package io.github.mayusi.calibratesoc.data.gameaware
  *
  * The list is deliberately EXTENSIBLE — new controller packages are a one-line
  * addition to [EXACT] or [PREFIXES].
+ *
+ * ## Complemented by a GENERIC identity heuristic (this list is the FAST PATH)
+ *
+ * As of 0.3.9 this name list is no longer the ONLY way signal (a) fires. It is the FAST
+ * PATH — an instant, allocation-free lookup for controllers we already recognise, with no
+ * Binder call. [io.github.mayusi.calibratesoc.data.autotdp.InterferenceGuard.decide] also
+ * ORs in a caller-resolved GENERIC heuristic (`genericController`): a LIST-UNKNOWN foreground
+ * app that holds `WRITE_SECURE_SETTINGS` AND is not a game AND is not user-tuned AND is not
+ * us is treated as an external controller too (surfaced honestly as EXTERNAL_CONTROLLER).
+ * So ANY app that is actually controlling performance backs AutoTDP off — not just the ones
+ * named here. Keeping a package IN this list is still worthwhile: it fires INSTANTLY without
+ * the PackageManager permission call, and it also catches a controller that happens NOT to
+ * hold WSS (e.g. a root tuner that writes sysfs directly). The two mechanisms are additive.
  */
 object KnownControllers {
 

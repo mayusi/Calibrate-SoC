@@ -11,6 +11,54 @@ Nothing yet.
 
 ---
 
+## [0.3.9-alpha] — 2026-07-03
+
+The non-interference back-off is now GENERIC — AutoTDP stands down for ANY app that
+is actually controlling performance, not just the hard-coded `KnownControllers` list.
+
+### Added — generic controller detection (signal (a'))
+- **`InterferenceGuard.decide` gained a `genericController` input** that, when true,
+  suspends with a new `SuspendReason.EXTERNAL_CONTROLLER` ("another performance app
+  appears to be in control"). Signal (a) is now
+  `KnownControllers.isController(pkg) || genericController` — the name list stays as
+  the instant, no-Binder FAST PATH; the generic heuristic catches everything else.
+- **The heuristic is precise and cannot over-fire.** `AutoTdpService` resolves
+  `genericController` as: the foreground app **holds `WRITE_SECURE_SETTINGS`** AND is
+  **actively contending** (the sysfs-contention detector currently sees our clock writes
+  being overwritten) AND is **not a game** (signal (d)'s job) AND has **no user bundle**
+  AND is **not our own package**. The active-contention guard is the false-positive
+  killer: `WRITE_SECURE_SETTINGS` is a privileged runtime permission a normal
+  game/browser/launcher never holds — but an **automation app (Tasker / MacroDroid)**
+  the user adb-granted WSS to for button-mapping holds it too, without fighting for the
+  clocks. Requiring *active contention* (not merely holding WSS) means such an app
+  foregrounded does NOT suspend the tune — only an unknown app that BOTH holds WSS AND
+  is really driving the SoC trips it. (Known controllers on the `KnownControllers`
+  fast-path still suspend without needing contention.) Deliberately narrow: **no**
+  foreground-service or system-app signals feed it (both far too broad, would over-fire).
+- **The WSS check is memoised per package per session** in a new
+  `secureSettingsControllerCache` (cleared at session start, exactly like
+  `gameClassCache`), so the PackageManager permission Binder call runs at most once
+  per foreground package. Resume hysteresis (2-tick, from 0.3.8) still applies, so a
+  transient WSS-app foreground blip cannot thrash the tune.
+
+### Not changed — governor-contention tracking (deliberately skipped)
+- Widening the sysfs-contention catch-all (signal (b)) to also track `scaling_governor`
+  was **evaluated and skipped**: the AutoTDP per-tick apply path **never writes the CPU
+  governor**. `TdpState.governorOverrides` is always `emptyMap()` in the tuning path —
+  it is only ever populated in test fixtures; the governor is written only by the manual
+  Tune screen and the one-shot AutoTDP setup script, neither of which is the daemon's
+  apply loop. Contention can only be detected on a node WE write, so a governor mismatch
+  is not "contention on our write" and there is nothing to track. The Part-1 identity
+  heuristic plus the existing node-contention detector cover this case instead.
+
+### Notes
+- Residual gap (honest): a LIST-UNKNOWN controller that does **not** hold WSS and drives
+  performance purely through a vendor binder or a node we never write is still only
+  caught if it happens to contend on a node we do write (signal (b)). Adding it to
+  `KnownControllers` remains the belt-and-braces catch for that shape.
+
+---
+
 ## [0.3.8-alpha] — 2026-07-03
 
 AutoTDP now stands down when another app is driving performance — it reverts to

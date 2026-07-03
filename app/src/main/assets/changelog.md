@@ -1,3 +1,14 @@
+## [0.3.9-alpha] — 2026-07-03
+
+AutoTDP now steps aside for ANY app that's running your performance — not just the ones we recognise by name.
+
+### Improved — backs off for any performance app, not just a known list
+- **AutoTDP now stands down for any tuner or runtime that's actually controlling performance**, even one it's never seen before. Previously it only backed off for a built-in list (your game runtime, Winlator, a couple of named tools); now it also recognises a foreground app by how it behaves — specifically, one that holds the special system-tuning permission (`WRITE_SECURE_SETTINGS`) that ordinary games, browsers, and launchers never have. When such an app is on screen, AutoTDP reverts to stock and pauses, then resumes on its own once it's gone. When this happens the screen shows "Suspended — another performance app appears to be in control."
+- **Carefully tuned so it never triggers on normal apps.** An unknown app is only treated as "in control" when it holds that tuning permission AND is *actually* overriding your clocks right then AND isn't a game (games are handled separately) AND isn't one you've set up a profile for AND isn't Calibrate SoC itself. Requiring it to actually be changing your clocks — not just holding the permission — means an automation app like Tasker that you granted the permission to for button-mapping won't pause your tune just by being on screen. The known-app list still works too, as an instant shortcut — the two work together.
+
+### Same safety as always
+- Purely additive. AutoTDP's temperature and battery cut-offs are unchanged, and backing off only ever means returning your device to stock clocks.
+
 ## [0.3.8-alpha] — 2026-07-03
 
 Calibrate SoC now steps aside when another app is running the show — it hands the SoC back to stock and stops fighting.

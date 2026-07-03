@@ -19,10 +19,15 @@ import javax.inject.Singleton
  * Modelled on [io.github.mayusi.calibratesoc.data.boost.BoostArbiter]'s @Singleton shape:
  * a tiny injectable holder whose core logic is a pure function.
  *
- * ## The four back-off signals (ANY true ⇒ suspend)
+ * ## The back-off signals (ANY true ⇒ suspend)
  *
- *  - (a) [SuspendReason.KNOWN_CONTROLLER] — a known external controller (Nova/GameNative,
- *        Winlator, a tuner) is foreground. See [KnownControllers].
+ *  - (a) [SuspendReason.KNOWN_CONTROLLER] — a KNOWN external controller (Nova/GameNative,
+ *        Winlator, a named tuner) is foreground. See [KnownControllers]. This is the fast
+ *        path: an instant name lookup, no Binder call, for controllers we already recognise.
+ *  - (a') [SuspendReason.EXTERNAL_CONTROLLER] — a LIST-UNKNOWN app that is nonetheless very
+ *        likely a performance controller BY BEHAVIOUR: the caller resolves a single generic
+ *        identity heuristic ([genericController]) and passes it in. This makes signal (a)
+ *        catch tuners we never hard-coded, WITHOUT a name list — see the safety note below.
  *  - (b) [SuspendReason.SYSFS_CONTENTION] — something external keeps overwriting our clock
  *        writes (the moving-target readback detector in the service feeds this).
  *  - (c) [SuspendReason.MANUAL_PAUSE] — the user flipped the "Pause tuning" toggle (e.g.
@@ -32,13 +37,26 @@ import javax.inject.Singleton
  *        created a CalibrateSoC bundle/profile for it. We never flag a game the user
  *        explicitly wants us to tune.
  *
+ * ## Why (a') can't over-fire (the generic identity heuristic)
+ *
+ * [genericController] is resolved by [AutoTdpService] and is TRUE only when the foreground
+ * app holds `WRITE_SECURE_SETTINGS` — a signature/privileged runtime permission almost
+ * nothing holds by accident — AND it is not a game (that is signal (d)'s job), AND the user
+ * has not created a bundle for it (they want it tuned), AND it is not our own package. That
+ * AND-chain means a false positive would require a FOREGROUND app that holds WSS, is not a
+ * game, and is not one the user set up — i.e. almost certainly another tuner. The heuristic
+ * is deliberately NARROW: no foreground-service-declaration or system-app signals feed it
+ * (both are far too broad — music/download apps declare FG services, and the system-app
+ * population is huge — and would over-fire). Signal (a) is therefore
+ * `KnownControllers.isController(pkg) || genericController`.
+ *
  * ## Honesty
  *
  * When suspended, [decide] returns WHICH signal fired first (priority order below) so the
  * HUD can say "Suspended — Nova is controlling performance" instead of silently doing
- * nothing. Priority: manual pause (user's explicit will) → known controller → sysfs
- * contention → untuned game. This ordering is presentation-only; the suspend decision is
- * a plain OR and any single true signal suspends.
+ * nothing. Priority: manual pause (user's explicit will) → known controller → external
+ * (list-unknown) controller → sysfs contention → untuned game. This ordering is
+ * presentation-only; the suspend decision is a plain OR and any single true signal suspends.
  *
  * ## Safety
  *
@@ -59,6 +77,14 @@ class InterferenceGuard @Inject constructor() {
 
         /** (a) A known external controller (Nova/GameNative, Winlator, a tuner) is foreground. */
         KNOWN_CONTROLLER("another performance app is controlling the SoC"),
+
+        /**
+         * (a') A LIST-UNKNOWN app that is very likely a performance controller by BEHAVIOUR
+         * (holds WRITE_SECURE_SETTINGS, is not a game, is not user-tuned, is not us) is
+         * foreground. Same suspend as [KNOWN_CONTROLLER] but honestly labelled as detected-
+         * by-behaviour rather than by name.
+         */
+        EXTERNAL_CONTROLLER("another performance app appears to be in control"),
 
         /** (b) Something external keeps overwriting our clock writes. */
         SYSFS_CONTENTION("another app is overriding the clocks"),
@@ -97,6 +123,12 @@ class InterferenceGuard @Inject constructor() {
      * @param externalDriveActive  signal (b): the service's moving-target readback detector has
      *                             concluded an external driver is overwriting our writes.
      * @param manuallyPaused       signal (c): the LIVE value of the manual "Pause tuning" toggle.
+     * @param genericController    signal (a'): the caller's generic identity heuristic has
+     *                             concluded [foregroundPackage] is a LIST-UNKNOWN performance
+     *                             controller by BEHAVIOUR (holds WRITE_SECURE_SETTINGS AND is
+     *                             not a game AND is not user-tuned AND is not us). Already fully
+     *                             guarded by the caller — this class just ORs it into signal (a).
+     *                             See the class-level "Why (a') can't over-fire" note.
      */
     fun decide(
         foregroundPackage: String?,
@@ -104,14 +136,19 @@ class InterferenceGuard @Inject constructor() {
         isGameForPkg: Boolean,
         externalDriveActive: Boolean,
         manuallyPaused: Boolean,
+        genericController: Boolean = false,
     ): Verdict {
         // Priority order = HUD-presentation order. The suspend flag itself is a pure OR;
         // the reason we surface is the highest-priority signal that fired.
         val reason: SuspendReason? = when {
             // (c) the user's explicit will wins the label.
             manuallyPaused -> SuspendReason.MANUAL_PAUSE
-            // (a) a known external controller is foreground.
+            // (a) a KNOWN external controller is foreground — instant name lookup, no Binder.
             KnownControllers.isController(foregroundPackage) -> SuspendReason.KNOWN_CONTROLLER
+            // (a') a LIST-UNKNOWN app that behaves like a controller (caller-guarded WSS
+            // heuristic). ORed into signal (a) so ANY controlling app backs us off, not just
+            // the hard-coded ones — but honestly labelled as detected-by-behaviour.
+            genericController -> SuspendReason.EXTERNAL_CONTROLLER
             // (b) an external driver is overwriting our writes.
             externalDriveActive -> SuspendReason.SYSFS_CONTENTION
             // (d) an untuned foreground game (a game with NO user bundle).

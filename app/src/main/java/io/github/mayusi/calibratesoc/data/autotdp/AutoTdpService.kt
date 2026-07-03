@@ -276,6 +276,15 @@ class AutoTdpService : Service() {
     private val gameClassCache = HashMap<String, Boolean>()
 
     /**
+     * NON-INTERFERENCE BACK-OFF (signal (a') — GENERIC controller identity) — memoised
+     * "does this package hold WRITE_SECURE_SETTINGS?" verdicts, so the per-tick guard never
+     * repeats the (cheap but non-free) PackageManager permission Binder call for the same
+     * foreground package. Keyed by package name; value = holds WSS. Cleared per session start,
+     * exactly like [gameClassCache].
+     */
+    private val secureSettingsControllerCache = HashMap<String, Boolean>()
+
+    /**
      * UNIT 1: the lightweight per-session stats accumulator. Built fresh at daemon start,
      * fed once per tick, converted to a [SessionOutcome] at session end. @Volatile because
      * the session-end write may run on a different coroutine than the tick loop.
@@ -460,6 +469,8 @@ class AutoTdpService : Service() {
         sessionStats = SessionStatsAccumulator()
         // NON-INTERFERENCE BACK-OFF — fresh game-classification cache per session.
         gameClassCache.clear()
+        // NON-INTERFERENCE BACK-OFF (signal (a')) — fresh WSS-controller cache per session.
+        secureSettingsControllerCache.clear()
 
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -938,15 +949,39 @@ class AutoTdpService : Service() {
                 //  - isGame: KnownGames hit OR ApplicationInfo.CATEGORY_GAME (cached lookup).
                 //  - externalDriveActive: last tick's sysfs-contention verdict (signal (b)).
                 //  - manuallyPausedLive: the LIVE pause toggle (hot flag, not snapshotted).
+                //  - genericController (signal a'): make signal (a) GENERIC — any LIST-UNKNOWN
+                //    app that BEHAVES like a perf controller backs us off too, not just the
+                //    hard-coded KnownControllers. The precise behavioural tell is holding
+                //    WRITE_SECURE_SETTINGS (a normal game/browser/launcher never does; a tuner
+                //    must). AND-guarded so it CANNOT over-fire: require a foreground package that
+                //    (1) holds WSS, (2) is NOT one the user tunes with us (they want it tuned),
+                //    (3) is NOT a game (that's signal (d)'s domain), (4) is NOT our own package
+                //    (never flag ourselves), AND (5) is ACTUALLY CONTENDING — the sysfs-contention
+                //    detector currently sees our clock writes being overwritten. Guard (5) is the
+                //    false-positive killer: holding WSS is necessary but NOT sufficient. An
+                //    automation app (Tasker/MacroDroid) the user adb-granted WSS for button-mapping
+                //    holds WSS too, but isn't fighting us for the clocks — so merely having it in
+                //    the foreground must NOT suspend the tune. Requiring active contention means
+                //    only an unknown app that BOTH holds WSS AND is really driving the SoC trips
+                //    this. NO foreground-service / system-app signals (too broad). The WSS call is
+                //    memoised per package per session. (Confirmed controllers on the
+                //    KnownControllers fast-path still suspend WITHOUT needing contention.)
                 val fgPkg = window.lastOrNull()?.foregroundPackage
                 val hasUserBundle = fgPkg != null && fgPkg in userBundlePackages
                 val isGame = isForegroundGame(fgPkg)
+                val genericController = fgPkg != null &&
+                    fgPkg != packageName &&
+                    !hasUserBundle &&
+                    !isGame &&
+                    externalDriveActive &&
+                    holdsWriteSecureSettings(fgPkg)
                 val backOff = interferenceGuard.decide(
                     foregroundPackage = fgPkg,
                     hasUserBundleForPkg = hasUserBundle,
                     isGameForPkg = isGame,
                     externalDriveActive = externalDriveActive,
                     manuallyPaused = manuallyPausedLive,
+                    genericController = genericController,
                 )
                 // Resume hysteresis: engage suspend immediately, but only RESUME after the
                 // signals stay clear for INTERFERENCE_RESUME_CLEAR_TICKS consecutive ticks, so a
@@ -2086,6 +2121,35 @@ class AutoTdpService : Service() {
         }.getOrDefault(false)
         gameClassCache[p] = isGame
         return isGame
+    }
+
+    /**
+     * NON-INTERFERENCE BACK-OFF (signal (a') — GENERIC controller identity) — true when [pkg]
+     * holds `WRITE_SECURE_SETTINGS`. This is the PRECISE behavioural signal that makes signal
+     * (a) generic: a normal game / browser / launcher NEVER holds this signature/privileged
+     * runtime permission by accident, whereas a performance tuner (which must poke system
+     * settings to own the clocks) does. A single cheap PackageManager Binder call — the SAME
+     * shape as the self-check in [resolveForegroundPackage] but querying [pkg] rather than our
+     * own [packageName]. Memoised in [secureSettingsControllerCache] so it runs at most once
+     * per package per session (mirrors [isForegroundGame]). Best-effort: our own package, a
+     * blank/null package, or a PackageManager miss (uninstalled / NameNotFoundException) all
+     * return false — we never suspend on a guess.
+     *
+     * NOTE: this is ONLY the WSS check. The full generic-controller decision AND-guards it with
+     * "not a game AND not user-tuned AND not us" at the call site (see the guard's decide()
+     * invocation) so it cannot over-fire — WSS alone never suspends.
+     */
+    private fun holdsWriteSecureSettings(pkg: String?): Boolean {
+        val p = pkg?.takeIf { it.isNotBlank() && it != packageName } ?: return false
+        secureSettingsControllerCache[p]?.let { return it }
+        val holds = runCatching {
+            packageManager.checkPermission(
+                android.Manifest.permission.WRITE_SECURE_SETTINGS,
+                p,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
+        secureSettingsControllerCache[p] = holds
+        return holds
     }
 
     /**
