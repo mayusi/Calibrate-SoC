@@ -207,6 +207,19 @@ class UserPrefs @Inject constructor(
         prefs[AUTO_CONFIG_OPT_OUT_KEY] ?: emptySet()
     }
 
+    /**
+     * NON-INTERFERENCE BACK-OFF — the manual "Pause tuning (another app in control)"
+     * toggle (signal (c)). Default false. When the user flips this ON (e.g. right before a
+     * Nova/GameNative session), AutoTDP FULLY SUSPENDS: it drives the SoC back to STOCK
+     * through the normal per-tick apply path and stops tuning, without tearing the daemon
+     * down. It auto-resumes the instant the user flips it OFF (and every other back-off
+     * signal is clear). The daemon reads this LIVE (a hot StateFlow, never session-
+     * snapshotted) so the pause takes effect immediately mid-session.
+     */
+    val autoTdpManuallyPaused: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[AUTOTDP_MANUALLY_PAUSED_KEY] ?: false
+    }
+
     // ── Setters ──────────────────────────────────────────────────────────────
 
     suspend fun setOcAcknowledged(value: Boolean) {
@@ -272,6 +285,11 @@ class UserPrefs @Inject constructor(
 
     suspend fun setIdleChargeTriggerEnabled(value: Boolean) {
         context.dataStore.edit { it[IDLE_CHARGE_TRIGGER_ENABLED_KEY] = value }
+    }
+
+    /** NON-INTERFERENCE BACK-OFF — set the manual "Pause tuning" toggle (signal (c)). */
+    suspend fun setAutoTdpManuallyPaused(value: Boolean) {
+        context.dataStore.edit { it[AUTOTDP_MANUALLY_PAUSED_KEY] = value }
     }
 
     /** Pass null to clear the auto-profile (notify-only mode). */
@@ -347,6 +365,8 @@ class UserPrefs @Inject constructor(
         val DISMISSED_UPDATE_TAG_KEY           = stringPreferencesKey("dismissed_update_tag")
         // ── AutoTDP keys ──────────────────────────────────────────────────────
         val IDLE_CHARGE_TRIGGER_ENABLED_KEY    = booleanPreferencesKey("autotdp_idle_charge_trigger_enabled")
+        // Non-interference back-off: manual "Pause tuning (another app in control)" toggle.
+        val AUTOTDP_MANUALLY_PAUSED_KEY        = booleanPreferencesKey("autotdp_manually_paused")
         // ── Advanced setup gate ────────────────────────────────────────────────
         val ADVANCED_SETUP_SKIPPED_KEY         = booleanPreferencesKey("advanced_setup_skipped")
         // ── Auto-configure known games ─────────────────────────────────────────

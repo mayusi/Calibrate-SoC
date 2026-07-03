@@ -96,7 +96,17 @@ object AdaptivePolicy {
         val gpuBand = GpuBand(low = gpuLow, high = gpuHigh)
 
         // ── GPU floor fraction: more perf → higher minimum clock ────────────────────
-        val gpuFloorFraction = (0.15f + 0.55f * wPerf).coerceIn(0.15f, 0.90f)
+        // v0.3.8 GPU-MAX POLICY: when the user has NOT opted into GPU power-capping
+        // (caps.gpuPowerCapAllowed == false — the default), the GPU must run at its
+        // ceiling. Pin the floor fraction to 1.0 so GpuBandController.floorMaxHz resolves
+        // to the ceiling OPP — even if a tighten were reached (it is gated OFF in the
+        // controller too), there is zero headroom below the ceiling to give away. This is
+        // the belt to the controller's suspenders: no GPU-down pressure is derived at all.
+        val gpuFloorFraction = if (!caps.gpuPowerCapAllowed) {
+            1.0f
+        } else {
+            (0.15f + 0.55f * wPerf).coerceIn(0.15f, 0.90f)
+        }
 
         // ── GPU OC tier: beyond-stock gated by perf AND opt-in AND probe ────────────
         val gpuOcTier = when {

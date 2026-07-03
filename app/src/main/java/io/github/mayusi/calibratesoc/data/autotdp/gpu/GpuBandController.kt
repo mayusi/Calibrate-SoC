@@ -262,6 +262,25 @@ object GpuBandController {
         effectiveCeilHz: Long?,
         nextHint: Int,
     ): Pair<GpuDecision, GpuControllerState> {
+        // ── v0.3.8 GPU-MAX POLICY: GPU is NOT a power lever unless the user opted in ──
+        // On-device testing showed GPU MHz barely affects battery on these handhelds, so
+        // capping the GPU down is pure FPS loss. When the opt-in [TdpCaps.gpuPowerCapAllowed]
+        // is FALSE (the default), the Adaptive GPU governor never steps the GPU DOWN: this
+        // tighten is a HOLD (no actuator change, episode ended) so the GPU stays at ceiling.
+        // The LOOSEN path is untouched — the band controller still raises the GPU when it is
+        // the bottleneck, so any prior cap is loosened back up. Real-heat safety is unchanged:
+        // GpuOcThermalGuard (Unit 3, the UPWARD clamp the coordinator applies) still runs and
+        // the CPU engine's own thermal pre-empt still fires. Opt-in TRUE restores the pre-0.3.8
+        // GPU cap-down behaviour exactly.
+        if (!caps.gpuPowerCapAllowed) {
+            return hold(
+                state = base,
+                nextHint = nextHint,
+                reason = "GPU held high (GPU power-capping off — CPU/TDP is the power lever)",
+                clearEwma = false,
+            )
+        }
+
         // ASYMMETRIC: a thermal/throttle tighten acts THIS tick (FAST); a calm band-only
         // tighten keeps the 2-tick confirm so noisy GPU% can never hunt the clock down.
         val fast = isFastRegime(signals, setpoints)

@@ -131,6 +131,7 @@ fun AutoTdpScreen(
     val sweepProgress by viewModel.sweepProgress.collectAsStateWithLifecycle()
     val kneeKhz by viewModel.kneeKhz.collectAsStateWithLifecycle()
     val idleChargeTriggerEnabled by viewModel.idleChargeTriggerEnabled.collectAsStateWithLifecycle()
+    val manuallyPaused by viewModel.manuallyPaused.collectAsStateWithLifecycle()
     val chargingProfileEnabled by viewModel.chargingProfileEnabled.collectAsStateWithLifecycle()
     val chargingBundle by viewModel.chargingBundle.collectAsStateWithLifecycle()
     val manuallyOn by viewModel.manuallyOn.collectAsStateWithLifecycle()
@@ -162,6 +163,7 @@ fun AutoTdpScreen(
     val adaptiveEffectiveIntent by adaptiveVm.effectiveIntent.collectAsStateWithLifecycle()
     val adaptiveNearestPreset by adaptiveVm.nearestPreset.collectAsStateWithLifecycle()
     val adaptiveGpuOcTier by adaptiveVm.gpuOcTier.collectAsStateWithLifecycle()
+    val adaptiveAllowGpuPowerCap by adaptiveVm.allowGpuPowerCap.collectAsStateWithLifecycle()
     val adaptiveBeyondStockConsent by adaptiveVm.beyondStockConsent.collectAsStateWithLifecycle()
     val adaptiveBeyondStockVerdict by adaptiveVm.beyondStockProbeVerdict.collectAsStateWithLifecycle()
     val adaptiveIsRunning by adaptiveVm.isRunning.collectAsStateWithLifecycle()
@@ -276,6 +278,7 @@ fun AutoTdpScreen(
                     effectiveIntent      = adaptiveEffectiveIntent,
                     nearestPreset        = adaptiveNearestPreset,
                     gpuOcTier            = adaptiveGpuOcTier,
+                    allowGpuPowerCap     = adaptiveAllowGpuPowerCap,
                     beyondStockConsent   = adaptiveBeyondStockConsent,
                     beyondStockVerdict   = adaptiveBeyondStockVerdict,
                     isRunning            = adaptiveIsRunning,
@@ -293,6 +296,7 @@ fun AutoTdpScreen(
                     onEnterCustom        = { adaptiveVm.enterCustom() },
                     onExitToPreset       = { adaptiveVm.exitToPreset() },
                     onSetGpuOcTier       = { adaptiveVm.setGpuOcTier(it) },
+                    onSetAllowGpuPowerCap = { adaptiveVm.setAllowGpuPowerCap(it) },
                     onGrantConsent       = { adaptiveVm.grantBeyondStockConsent() },
                     onSetAdaptiveActive  = { adaptiveVm.setAdaptiveActive(it) },
                 )
@@ -401,8 +405,10 @@ fun AutoTdpScreen(
         item {
             CompanionTogglesArsenalPanel(
                 idleChargeTriggerEnabled = idleChargeTriggerEnabled,
+                manuallyPaused = manuallyPaused,
                 perAppMapCount = perAppMap.size,
                 onIdleChargeToggle = { viewModel.setIdleChargeTriggerEnabled(it) },
+                onManuallyPausedToggle = { viewModel.setManuallyPaused(it) },
                 onOpenPerApp = { showPerAppDialog = true },
                 chargingProfileEnabled = chargingProfileEnabled,
                 chargingBundle = chargingBundle,
@@ -822,9 +828,32 @@ private fun LiveNowArsenalGrid(
 private fun RunningStatePanels(runState: AutoTdpRunState) {
     when (runState.status) {
         AutoTdpStatus.RUNNING -> {
-            // Rich "proof it's working" stack. Owns a 1 s live clock so the
-            // heartbeat ("Xs ago") and pulse animate even between daemon ticks.
-            AutoTdpProofOfEffectPanels(runState = runState)
+            Column {
+                // NON-INTERFERENCE BACK-OFF — when the guard is suspending, surface WHY at the
+                // top so the user SEES that AutoTDP intentionally backed off (daemon still alive
+                // underneath, SoC reverted to stock; it auto-resumes when the other app is gone).
+                runState.interferenceSuspendReason?.let { reason ->
+                    ArsenalPanel(accent = AccentBar.Amber, title = "Tuning suspended") {
+                        Text(
+                            reason,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AccentBar.Amber,
+                        )
+                        Spacer(Modifier.height(Spacing.dense))
+                        Text(
+                            "AutoTDP reverted the SoC to stock and stopped tuning to avoid " +
+                                "fighting another performance app. It resumes automatically when the " +
+                                "other app is gone (or when you turn off Pause tuning).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF999999),
+                        )
+                    }
+                    Spacer(Modifier.height(Spacing.group))
+                }
+                // Rich "proof it's working" stack. Owns a 1 s live clock so the
+                // heartbeat ("Xs ago") and pulse animate even between daemon ticks.
+                AutoTdpProofOfEffectPanels(runState = runState)
+            }
         }
 
         AutoTdpStatus.KILLED_BY_SAFETY -> {
@@ -1921,8 +1950,10 @@ private fun LastScriptArsenalCard(
 @Composable
 private fun CompanionTogglesArsenalPanel(
     idleChargeTriggerEnabled: Boolean,
+    manuallyPaused: Boolean,
     perAppMapCount: Int,
     onIdleChargeToggle: (Boolean) -> Unit,
+    onManuallyPausedToggle: (Boolean) -> Unit,
     onOpenPerApp: () -> Unit,
     // ── Charging auto-profile ─────────────────────────────────────────────────
     chargingProfileEnabled: Boolean,
@@ -1933,6 +1964,55 @@ private fun CompanionTogglesArsenalPanel(
     onChargingRefreshRateSelected: (Float?) -> Unit,
 ) {
     ArsenalPanel(accent = AccentBar.Blue, title = "Companion features") {
+        // ── Pause tuning (non-interference back-off, manual signal (c)) ───────
+        // Prominent: flip this before handing the SoC to another perf app (Nova/
+        // GameNative, Winlator). AutoTDP suspends, reverts to stock, and stops
+        // fighting — then auto-resumes when you flip it back OFF. Takes effect LIVE.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "PAUSE TUNING (ANOTHER APP IN CONTROL)",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    letterSpacing = 0.06.sp,
+                )
+                Text(
+                    "Suspends AutoTDP and reverts to stock so it never fights another " +
+                        "performance app (e.g. Nova/GameNative). Auto-resumes when you turn it off.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF999999),
+                )
+            }
+            Spacer(Modifier.width(Spacing.group))
+            Box(
+                modifier = Modifier
+                    .background(
+                        if (manuallyPaused) AccentBar.Amber.copy(alpha = 0.18f) else Color(0xFF0C0C10),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .border(1.dp, if (manuallyPaused) AccentBar.Amber else Color.White.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                    .clickable { onManuallyPausedToggle(!manuallyPaused) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (manuallyPaused) "PAUSED" else "ACTIVE",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (manuallyPaused) AccentBar.Amber else Color(0xFF888888),
+                    letterSpacing = 0.06.sp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.group))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        Spacer(Modifier.height(Spacing.group))
+
         // ── Idle/charge downclock toggle (existing) ───────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),

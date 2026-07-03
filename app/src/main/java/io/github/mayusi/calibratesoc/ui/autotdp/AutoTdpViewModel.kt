@@ -229,6 +229,15 @@ class AutoTdpViewModel @Inject constructor(
     val idleChargeTriggerEnabled: StateFlow<Boolean> = userPrefs.idleChargeTriggerEnabled
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    // ── Non-interference back-off: manual "Pause tuning" toggle (signal (c)) ────
+    /**
+     * The manual "Pause tuning (another app in control)" toggle. When ON, AutoTDP suspends
+     * (reverts to stock, stops fighting) without tearing the daemon down, and auto-resumes
+     * when flipped OFF. The daemon reads this LIVE, so the pause takes effect mid-session.
+     */
+    val manuallyPaused: StateFlow<Boolean> = userPrefs.autoTdpManuallyPaused
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     // ── Charging auto-profile ─────────────────────────────────────────────────
 
     /** Master opt-in for the charging auto-profile (Component: ChargingTuneTrigger). */
@@ -681,6 +690,17 @@ class AutoTdpViewModel @Inject constructor(
     fun setIdleChargeTriggerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             userPrefs.setIdleChargeTriggerEnabled(enabled)
+        }
+    }
+
+    /**
+     * Non-interference back-off: flip the manual "Pause tuning" toggle (signal (c)). The
+     * daemon picks this up LIVE, so pausing suspends tuning within a tick and un-pausing
+     * auto-resumes it (subject to the other back-off signals being clear).
+     */
+    fun setManuallyPaused(paused: Boolean) {
+        viewModelScope.launch {
+            userPrefs.setAutoTdpManuallyPaused(paused)
         }
     }
 

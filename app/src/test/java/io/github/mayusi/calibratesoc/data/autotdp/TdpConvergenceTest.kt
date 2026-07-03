@@ -153,4 +153,66 @@ class TdpConvergenceTest {
         assertThat(TdpConvergence.classifyReject(stock, stock))
             .isEqualTo(TdpConvergence.RejectKind.HONEST_FAIL)
     }
+
+    // ── isExternalMovingTarget: external-driver contention detector (signal (b)) ──
+
+    @Test
+    fun `first CONVERGE with no prior value is NOT a moving target (benign OPP-snap)`() {
+        // The very first time a node snaps, we have no prior converged value to compare —
+        // this is a one-time OPP-snap, not evidence of an external driver.
+        assertThat(
+            TdpConvergence.isExternalMovingTarget(convergeReadback = 2_400_000L, lastConvergedValue = null),
+        ).isFalse()
+    }
+
+    @Test
+    fun `readback matching last tick's converged value is NOT a moving target (settled snap)`() {
+        // The node settled: the kernel snapped it to the SAME value we converged to last tick.
+        // A settled OPP-snap must never look like contention.
+        assertThat(
+            TdpConvergence.isExternalMovingTarget(convergeReadback = 2_400_000L, lastConvergedValue = 2_400_000L),
+        ).isFalse()
+    }
+
+    @Test
+    fun `readback differing from last tick's converged value IS a moving target (external driver)`() {
+        // The node landed at a value neither we nor last tick's convergence asked for — a
+        // driver we do not control is moving it. This is the moving-target signature.
+        assertThat(
+            TdpConvergence.isExternalMovingTarget(convergeReadback = 2_100_000L, lastConvergedValue = 2_400_000L),
+        ).isTrue()
+    }
+
+    @Test
+    fun `null readback is never a moving target`() {
+        assertThat(
+            TdpConvergence.isExternalMovingTarget(convergeReadback = null, lastConvergedValue = 2_400_000L),
+        ).isFalse()
+    }
+
+    @Test
+    fun `a multi-tick moving sequence keeps reporting moving while a settle sequence stops`() {
+        // External driver: readback keeps landing at NEW values each tick → moving every tick.
+        // (Mirrors the service's per-node streak: 3 consecutive moving ticks trips suspend.)
+        var last: Long? = null
+        val movingReadbacks = listOf(2_400_000L, 2_100_000L, 1_800_000L)
+        val movingVerdicts = movingReadbacks.map { rb ->
+            val moved = TdpConvergence.isExternalMovingTarget(rb, last)
+            last = rb
+            moved
+        }
+        // First tick benign (no prior), then every subsequent tick is a moving target.
+        assertThat(movingVerdicts).containsExactly(false, true, true).inOrder()
+
+        // Settle-once OPP-snap: the kernel snaps to a value and it STAYS there → benign after
+        // the first, never trips the streak.
+        var last2: Long? = null
+        val settleReadbacks = listOf(2_400_000L, 2_400_000L, 2_400_000L)
+        val settleVerdicts = settleReadbacks.map { rb ->
+            val moved = TdpConvergence.isExternalMovingTarget(rb, last2)
+            last2 = rb
+            moved
+        }
+        assertThat(settleVerdicts).containsExactly(false, false, false).inOrder()
+    }
 }

@@ -31,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -123,6 +124,10 @@ fun AdaptivePanel(
     onSetGpuOcTier: (GpuOcTier) -> Unit,
     onGrantConsent: () -> Unit,
     onSetAdaptiveActive: (Boolean) -> Unit,
+    // v0.3.8 GPU-MAX POLICY (opt-in advanced toggle). Defaulted so the existing panel
+    // call-site (owned by another screen) compiles unchanged while the wiring lands.
+    allowGpuPowerCap: Boolean = false,
+    onSetAllowGpuPowerCap: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -177,6 +182,12 @@ fun AdaptivePanel(
             verdict = beyondStockVerdict,
             onSelect = onSetGpuOcTier,
             onGrantConsent = onGrantConsent,
+        )
+
+        // ── 3b. GPU power-saving policy (advanced, opt-in) ────────────────────
+        GpuPowerCapSection(
+            allow = allowGpuPowerCap,
+            onSetAllow = onSetAllowGpuPowerCap,
         )
 
         // ── 4. Live readout ───────────────────────────────────────────────────
@@ -564,6 +575,63 @@ private fun GpuOcTierSection(
                 onSelect(GpuOcTier.WITHIN_VENDOR)
             },
         )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  3b. GPU power-saving policy (v0.3.8 opt-in)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The advanced opt-in that decides whether Calibrate may use the GPU as a
+ * power-saving lever.
+ *
+ * Default OFF (the v0.3.8 policy): the GPU runs high / at its ceiling while tuning
+ * is active and ALL power management flows through the CPU/TDP levers — on these
+ * handhelds GPU MHz barely moves battery, so capping it down was pure FPS loss.
+ * ON restores the old behaviour (GPU cap-down) for thermally-limited users. A heat
+ * guard still backs the GPU off under genuine heat either way.
+ */
+@Composable
+private fun GpuPowerCapSection(
+    allow: Boolean,
+    onSetAllow: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ArsenalPanel(accent = AccentBar.Purple, title = "GPU Power Saving", modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Let Calibrate slow the GPU to save battery",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ColorText,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = if (allow) {
+                        "ON — the GPU may be capped down for power (old behaviour). Use " +
+                            "this only if your device runs hot; on most handhelds it costs " +
+                            "frame-rate for almost no battery gain."
+                    } else {
+                        "OFF (recommended) — the GPU stays at full speed and all power " +
+                            "saving comes from the CPU. Recommended: on these devices GPU " +
+                            "speed barely changes battery, so capping it just loses FPS. A " +
+                            "heat guard still protects the GPU under real heat."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ColorSubtext,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = allow,
+                onCheckedChange = onSetAllow,
+            )
+        }
     }
 }
 

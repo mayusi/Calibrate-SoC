@@ -202,6 +202,30 @@ class AdaptiveViewModel @Inject constructor(
         }
     }
 
+    // ── Allow GPU power-capping (advanced, opt-in) ────────────────────────────
+
+    /**
+     * Whether the user has opted into using the GPU as a power-saving lever.
+     *
+     * Default FALSE — the v0.3.8 policy: the GPU runs high / at its ceiling and all
+     * power management flows through the CPU/TDP levers (GPU MHz barely moves battery
+     * on these handhelds, so capping it down was pure FPS loss). TRUE restores the
+     * pre-0.3.8 GPU cap-down behaviour for thermally-limited users.
+     */
+    val allowGpuPowerCap: StateFlow<Boolean> = prefs.allowGpuPowerCap
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * Toggle the GPU-power-capping opt-in. Persisted immediately. The daemon reads the
+     * pref onto its [io.github.mayusi.calibratesoc.data.autotdp.TdpCaps] at engage so a
+     * change takes effect on the next run (or tick, when the service threads it live).
+     */
+    fun setAllowGpuPowerCap(allow: Boolean) {
+        viewModelScope.launch {
+            prefs.setAllowGpuPowerCap(allow)
+        }
+    }
+
     // ── Adaptive mode active ──────────────────────────────────────────────────
 
     val adaptiveModeActive: StateFlow<Boolean> = prefs.adaptiveModeActive

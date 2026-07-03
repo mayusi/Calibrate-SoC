@@ -41,7 +41,15 @@ class GpuBandControllerTest {
         gpuRootPath = "/sys/class/kgsl/kgsl-3d0",
         uclampAvailable = true,
         fanModeAvailable = true,
+        // These tests exercise the GPU band controller's TIGHTEN mechanics (fast-down,
+        // floor invariant, OPP snapping), so they opt into GPU power-capping. The v0.3.8
+        // DEFAULT (OFF — the tighten path is a HOLD so the GPU stays at ceiling) is covered
+        // by the gpuMaxPolicy_* tests, which use caps.copy(gpuPowerCapAllowed = false).
+        gpuPowerCapAllowed = true,
     )
+
+    /** v0.3.8 default: GPU power-capping OFF (GPU is NOT a power lever). */
+    private val capsGpuMaxOff = caps.copy(gpuPowerCapAllowed = false)
 
     // BALANCED-style adaptive setpoints: GPU band 63-85, soft die 88°C, floor fraction
     // 0.30 → floor target 330 MHz → first OPP ≥ 330 = 414 MHz (the floor-invariant OPP).
@@ -124,6 +132,56 @@ class GpuBandControllerTest {
         d = decide(20, d.second)              // confirm 2 → acts, one OPP down (800 → 720)
         assertThat(d.first.targetGpuDevfreqMaxHz).isEqualTo(720_000_000L)
         assertThat(d.second.lastActedDirection).isEqualTo(Direction.TIGHTEN)
+    }
+
+    // ── v0.3.8 GPU-MAX POLICY : tighten no-ops unless the user opts in ─────────────
+
+    @Test
+    fun gpuMaxPolicyOff_belowLow_holds_neverTightens() {
+        // With gpuPowerCapAllowed = false (the default), a below-low busy% must NOT step the
+        // GPU down: tighten is a HOLD. Even across many confirming ticks nothing actuates.
+        val seeded = GpuControllerState.INITIAL.copy(gpuDevfreqMaxHz = 800_000_000L, gpuEwma = 20.0)
+        var state = seeded
+        repeat(8) {
+            val (decision, next) = GpuBandController.decide(
+                gpuBusyPct = 20, signals = calmSignals, setpoints = setpoints(),
+                state = state, caps = capsGpuMaxOff, effectiveCeilHz = capsGpuMaxOff.gpuDevfreqCeilHz,
+            )
+            // No downward actuation, ever.
+            assertThat(decision.targetGpuDevfreqMaxHz).isNull()
+            assertThat(next.lastActedDirection).isNotEqualTo(Direction.TIGHTEN)
+            state = next
+        }
+    }
+
+    @Test
+    fun gpuMaxPolicyOff_belowLow_holdsEvenUnderHeat() {
+        // The controller's tighten is the BAND power lever, gated OFF by policy — even a
+        // genuine thermal signal does not make GpuBandController step the GPU down (real-heat
+        // safety is GpuOcThermalGuard's job, not the band controller's). Confirms the gate is
+        // unconditional at the top of tighten().
+        val hot = GpuSignals(smoothedDieTempC = 86, dTempSlopeCPerS = 2.5, coolingMaxState = 1)
+        val seeded = GpuControllerState.INITIAL.copy(gpuDevfreqMaxHz = 800_000_000L, gpuEwma = 20.0)
+        val (decision, next) = GpuBandController.decide(
+            gpuBusyPct = 20, signals = hot, setpoints = setpoints(),
+            state = seeded, caps = capsGpuMaxOff, effectiveCeilHz = capsGpuMaxOff.gpuDevfreqCeilHz,
+        )
+        assertThat(decision.targetGpuDevfreqMaxHz).isNull()
+        assertThat(next.lastActedDirection).isNotEqualTo(Direction.TIGHTEN)
+    }
+
+    @Test
+    fun gpuMaxPolicyOff_aboveHigh_stillLoosens() {
+        // LOOSEN (raise the GPU) is untouched by the policy — an above-high busy% still
+        // raises the GPU one OPP even with capping off, so any prior cap gets loosened back up.
+        val seeded = GpuControllerState.INITIAL.copy(gpuDevfreqMaxHz = 525_000_000L, gpuEwma = 95.0)
+        val (decision, next) = GpuBandController.decide(
+            gpuBusyPct = 95, signals = calmSignals, setpoints = setpoints(),
+            state = seeded, caps = capsGpuMaxOff, effectiveCeilHz = capsGpuMaxOff.gpuDevfreqCeilHz,
+        )
+        assertThat(decision.targetGpuDevfreqMaxHz).isNotNull()
+        assertThat(decision.targetGpuDevfreqMaxHz!!).isGreaterThan(525_000_000L)
+        assertThat(next.lastActedDirection).isEqualTo(Direction.LOOSEN)
     }
 
     @Test

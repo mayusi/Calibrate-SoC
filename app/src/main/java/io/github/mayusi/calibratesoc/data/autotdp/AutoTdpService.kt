@@ -115,6 +115,37 @@ class AutoTdpService : Service() {
     @Inject lateinit var learnedGameModel: LearnedGameModel
 
     /**
+     * NON-INTERFERENCE BACK-OFF — the pure OR-decision core. When any of its four signals
+     * fires (known controller foreground, sysfs contention, manual pause, untuned game),
+     * the tick loop forces effectiveTarget = STOCK so AutoTDP reverts through the normal
+     * apply path and stops fighting the other app — auto-resuming when every signal clears.
+     * @Singleton, injected the same way as [arbiter].
+     */
+    @Inject lateinit var interferenceGuard: InterferenceGuard
+
+    /**
+     * NON-INTERFERENCE BACK-OFF — used for signal (c): the manual "Pause tuning" toggle,
+     * read LIVE via a hot collector into [manuallyPausedLive] (never session-snapshotted, so
+     * flipping the pause mid-session takes effect within a tick).
+     */
+    @Inject lateinit var userPrefs: io.github.mayusi.calibratesoc.data.prefs.UserPrefs
+
+    /**
+     * GPU-MAX POLICY (0.3.8): the opt-in "allow GPU power-capping" toggle (default OFF =
+     * GPU runs high, never a power-saving lever). Read LIVE via a hot collector into
+     * [allowGpuPowerCapLive] and applied to [TdpCaps.gpuPowerCapAllowed] each tick, so
+     * flipping it mid-session takes effect without a restart — mirrors [manuallyPausedLive].
+     */
+    @Inject lateinit var adaptivePrefs: io.github.mayusi.calibratesoc.ui.autotdp.adaptive.AdaptivePrefs
+
+    /**
+     * NON-INTERFERENCE BACK-OFF — used for signal (d): resolve whether the user has created a
+     * CalibrateSoC bundle for the foreground package (so a game they explicitly want tuned is
+     * never flagged as an "untuned game"). @Singleton; a cheap DataStore-backed lookup.
+     */
+    @Inject lateinit var perAppEfficiencyMap: PerAppEfficiencyMap
+
+    /**
      * UNIT 4 (RICHER GOAL MODES): the persisted objective setpoints (fps floor / temp
      * ceiling / runtime hours). Snapshotted ONCE at session start into [sessionGoalParams]
      * so the tick loop reads a stable value object with no per-tick DataStore I/O.
@@ -205,6 +236,44 @@ class AutoTdpService : Service() {
      * session neither seeds nor learns (cold start, no fabrication).
      */
     @Volatile private var sessionPackage: String? = null
+
+    /**
+     * NON-INTERFERENCE BACK-OFF (signal (c)) — the LIVE value of the manual "Pause tuning"
+     * toggle. A hot collector ([pauseWatchJob]) keeps this updated from
+     * [UserPrefs.autoTdpManuallyPaused], so the tick loop reads the CURRENT pause state (not
+     * a session snapshot) and a mid-session flip takes effect within a tick. @Volatile: the
+     * collector runs on serviceScope (Main.immediate) while the tick reads it on Dispatchers.IO.
+     */
+    @Volatile private var manuallyPausedLive: Boolean = false
+
+    /** NON-INTERFERENCE BACK-OFF — the hot pause-flag collector job (cancelled on stop). */
+    private var pauseWatchJob: Job? = null
+
+    /**
+     * GPU-MAX POLICY (0.3.8) — LIVE value of the opt-in "allow GPU power-capping" toggle
+     * (default false = GPU pinned high). Applied to [TdpCaps.gpuPowerCapAllowed] each tick.
+     */
+    @Volatile private var allowGpuPowerCapLive: Boolean = false
+
+    /** GPU-MAX POLICY — the hot collector job for [allowGpuPowerCapLive] (cancelled on stop). */
+    private var gpuPolicyWatchJob: Job? = null
+
+    /**
+     * NON-INTERFERENCE BACK-OFF (signal (d)) — snapshot of the user's per-app bundle map,
+     * kept fresh by [perAppWatchJob], so the tick loop can check "does the user have a bundle
+     * for the foreground package?" without per-tick DataStore I/O. Empty until first emission.
+     */
+    @Volatile private var userBundlePackages: Set<String> = emptySet()
+
+    /** NON-INTERFERENCE BACK-OFF — the per-app-map collector job (cancelled on stop). */
+    private var perAppWatchJob: Job? = null
+
+    /**
+     * NON-INTERFERENCE BACK-OFF (signal (d)) — memoised "is this package a game?" verdicts,
+     * so the per-tick guard never repeats the PackageManager CATEGORY_GAME lookup for the same
+     * foreground package. Keyed by package name; value = isGame. Cleared per session start.
+     */
+    private val gameClassCache = HashMap<String, Boolean>()
 
     /**
      * UNIT 1: the lightweight per-session stats accumulator. Built fresh at daemon start,
@@ -355,6 +424,25 @@ class AutoTdpService : Service() {
         // `cat`. Deleted on every stop path (stopDaemon / onDestroy / onTaskRemoved).
         writeActiveMarker()
 
+        // NON-INTERFERENCE BACK-OFF — start the hot collectors that keep the LIVE pause flag
+        // (signal (c)) and the user-bundle set (signal (d)) fresh for the tick loop. Restart-
+        // safe: cancel any prior collectors first so a re-start never leaves duplicates. Both
+        // run on serviceScope; the tick loop reads the @Volatile snapshots they write. Reading
+        // the pause flag this way (not a one-shot snapshot) is what makes a mid-session pause
+        // take effect LIVE.
+        pauseWatchJob?.cancel()
+        pauseWatchJob = serviceScope.launch {
+            userPrefs.autoTdpManuallyPaused.collect { manuallyPausedLive = it }
+        }
+        gpuPolicyWatchJob?.cancel()
+        gpuPolicyWatchJob = serviceScope.launch {
+            adaptivePrefs.allowGpuPowerCap.collect { allowGpuPowerCapLive = it }
+        }
+        perAppWatchJob?.cancel()
+        perAppWatchJob = serviceScope.launch {
+            perAppEfficiencyMap.observeAll().collect { userBundlePackages = it.keys }
+        }
+
         // GUARDRAIL 2: a fresh, single-session revert latch. Reset the session report so
         // a stop before capabilities resolve has nothing stale to revert against.
         sessionReport = null
@@ -370,6 +458,8 @@ class AutoTdpService : Service() {
         // are resolved on the IO thread inside runDaemon.
         sessionPackage = null
         sessionStats = SessionStatsAccumulator()
+        // NON-INTERFERENCE BACK-OFF — fresh game-classification cache per session.
+        gameClassCache.clear()
 
         loopJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
@@ -467,6 +557,9 @@ class AutoTdpService : Service() {
         // onDestroy / onTaskRemoved / the finally) can revert against it. From here on
         // the daemon may write, so from here on a revert is meaningful.
         sessionReport = report
+        // Base device caps (GPU-max policy flag applied PER-TICK below, not here — see
+        // the tick loop's `tickCaps`, so a mid-session toggle of allowGpuPowerCap takes
+        // effect live without a daemon restart, mirroring manuallyPausedLive).
         val caps = TdpCaps.from(report)
         val gpuRootPath = report.gpu?.rootPath
         // RUNTIME-GAP FIX: the CORE LIVE NODE — the big-cluster CAP the daemon actually
@@ -610,6 +703,19 @@ class AutoTdpService : Service() {
         // rest of the tune keeps running. Lives OUTSIDE collect{} so it persists across ticks.
         val rejectStuckTicks = HashMap<String, Int>()
         val stuckNodes = HashSet<String>()
+        // NON-INTERFERENCE BACK-OFF (signal (b)) — external-driver contention detection.
+        // Per node (keyed by the op's sysfs target path):
+        //  - lastConvergedByTarget: the value we converged this node to on the PREVIOUS tick.
+        //    Used to tell a settle-once OPP-snap (readback stops moving) from an EXTERNAL
+        //    driver (readback keeps landing at values WE never wrote — a moving target).
+        //  - externalDriveStreak: consecutive ticks a node's CONVERGE readback was a MOVING
+        //    target. After EXTERNAL_DRIVE_STREAK_TICKS consecutive moving ticks we set
+        //    externalDriveActive = true (mirrors the STUCK_REJECT_TICKS backstop), which feeds
+        //    the interference guard. Reset the instant a node's write LANDS clean (Success).
+        // externalDriveActive is the OR-input to the guard; it clears when no node is moving.
+        val lastConvergedByTarget = HashMap<String, Long>()
+        val externalDriveStreak = HashMap<String, Int>()
+        var externalDriveActive = false
         val decisions = ArrayDeque<DecisionRecord>(MAX_DECISION_HISTORY + 1)
         val thermalKill = ThermalKillEvaluator()   // stateful: tracks consecutive over-threshold samples
         val stockCeilingKhz = caps.bigClusterOppStepsKhz.lastOrNull() // top OPP = stock big ceiling
@@ -629,6 +735,15 @@ class AutoTdpService : Service() {
         // session always begins from a clean state (no stale EWMA leaking across
         // start/stop cycles).
         var controllerState = ControllerState.INITIAL
+
+        // NON-INTERFERENCE BACK-OFF — resume hysteresis. Suspend engages IMMEDIATELY (back
+        // off fast the moment another app takes control), but RESUME requires the signals to
+        // stay clear for [INTERFERENCE_RESUME_CLEAR_TICKS] consecutive ticks, so a 1-tick
+        // foreground-package blip (controller/game flickering in/out of foreground) can't
+        // dump the tune and re-walk it every second. Held per session, outside the loop.
+        var interferenceClearStreak = 0
+        var interferenceLatched = false
+        var lastBackOffWasManual = false
 
         // ── UNIT 5 (ADAPTIVE MODE): per-session adaptive control state ──────────────
         // The resolved setpoints (pure, from the policy) are computed once; the GPU band
@@ -681,6 +796,13 @@ class AutoTdpService : Service() {
                     return@collect
                 }
 
+                // GPU-MAX POLICY (0.3.8): fold the LIVE opt-in flag into caps PER TICK, so a
+                // mid-session toggle of allowGpuPowerCap takes effect immediately (default
+                // false = GPU pinned high, never a power lever) — mirrors manuallyPausedLive.
+                // Only the GPU-lever-gating consumers (decide / composeAdaptiveTick) read the
+                // flag; the base `caps` is fine everywhere else.
+                val tickCaps = caps.copy(gpuPowerCapAllowed = allowGpuPowerCapLive)
+
                 // ── UNIT 2: ADAPTIVE-CADENCE DECIMATION GATE ───────────────────
                 // Honour the engine's nextTickHintMs by skipping the tune/apply work for
                 // samples that arrive sooner than the requested cadence (clamped to the
@@ -727,7 +849,7 @@ class AutoTdpService : Service() {
                 val decision = AutoTdpEngine.decide(
                     window = window.toList(),
                     config = config,
-                    caps = caps,
+                    caps = tickCaps,
                     current = currentState,
                     controllerState = controllerState,
                     goalOverride = effectiveGoalOverride,
@@ -758,7 +880,7 @@ class AutoTdpService : Service() {
                             cpuDecision = decision,
                             sample = sample,
                             setpoints = adaptiveSetpoints,
-                            caps = caps,
+                            caps = tickCaps,
                             effectiveCeilHz = adaptiveEffectiveCeilHz,
                             beyondStockArmed = beyondStockArmed,
                             gpuState = gpuControllerState,
@@ -800,7 +922,67 @@ class AutoTdpService : Service() {
                 // decision exactly as before.
                 val clampedTarget =
                     applyOuterSetpoint(effectiveDecision, currentState, caps, sample)
-                val effectiveTarget = if (inBaselineGrace) currentState else clampedTarget
+                val baseTarget = if (inBaselineGrace) currentState else clampedTarget
+
+                // ── NON-INTERFERENCE BACK-OFF GATE ─────────────────────────────────
+                // Evaluate the 4 back-off signals from inputs resolved here (the guard's
+                // decide() is PURE). When it says suspend, force effectiveTarget = STOCK so the
+                // EXISTING delta → writeWithRetry → convergence path below reverts the SoC to
+                // stock through the same hardened machinery every other target uses. This is the
+                // REPEATABLE suspend: driving STOCK per tick auto-resumes for free the next tick
+                // the guard flips false (NOT the once-only AutoTdpRevert latch, NOT stopDaemon —
+                // those are one-way teardowns). The thermal/battery kills above still fully STOP;
+                // this guard is additive and ORed in, never weakening them.
+                //  - foreground package: the SAME per-tick value the classifier reads.
+                //  - hasUserBundle: don't flag a game the user explicitly created a bundle for.
+                //  - isGame: KnownGames hit OR ApplicationInfo.CATEGORY_GAME (cached lookup).
+                //  - externalDriveActive: last tick's sysfs-contention verdict (signal (b)).
+                //  - manuallyPausedLive: the LIVE pause toggle (hot flag, not snapshotted).
+                val fgPkg = window.lastOrNull()?.foregroundPackage
+                val hasUserBundle = fgPkg != null && fgPkg in userBundlePackages
+                val isGame = isForegroundGame(fgPkg)
+                val backOff = interferenceGuard.decide(
+                    foregroundPackage = fgPkg,
+                    hasUserBundleForPkg = hasUserBundle,
+                    isGameForPkg = isGame,
+                    externalDriveActive = externalDriveActive,
+                    manuallyPaused = manuallyPausedLive,
+                )
+                // Resume hysteresis: engage suspend immediately, but only RESUME after the
+                // signals stay clear for INTERFERENCE_RESUME_CLEAR_TICKS consecutive ticks, so a
+                // momentary controller/game foreground blip can't thrash the tune. EXCEPTION:
+                // a manual pause release resumes instantly (deliberate user action, no debounce).
+                if (backOff.suspend) {
+                    // Some signal is active → suspend now, reset the clear-streak.
+                    interferenceLatched = true
+                    interferenceClearStreak = 0
+                } else if (interferenceLatched) {
+                    // Signals are clear this tick. If the prior latch was a manual pause that the
+                    // user just turned off, release immediately; otherwise debounce the resume.
+                    if (!manuallyPausedLive && interferenceClearStreak == 0 &&
+                        lastBackOffWasManual
+                    ) {
+                        interferenceLatched = false
+                    } else {
+                        interferenceClearStreak++
+                        if (interferenceClearStreak >= INTERFERENCE_RESUME_CLEAR_TICKS) {
+                            interferenceLatched = false
+                            interferenceClearStreak = 0
+                        }
+                    }
+                }
+                lastBackOffWasManual = backOff.suspend && manuallyPausedLive
+                val suspendNow = interferenceLatched
+                val effectiveTarget = if (suspendNow) TdpState.STOCK else baseTarget
+                val interferenceReason: String? =
+                    if (suspendNow) {
+                        backOff.reason?.let { "Suspended — ${it.hudPhrase}" }
+                            // Latched during the resume-debounce (signals just dropped, holding
+                            // stock until the clear-streak completes).
+                            ?: "Suspended — another app is controlling performance"
+                    } else {
+                        null
+                    }
 
                 // ── Apply delta ────────────────────────────────────────────────
                 // BUG E FIX (honest Applied): track at the tick level whether all ops
@@ -821,6 +1003,13 @@ class AutoTdpService : Service() {
                 // Honesty surface (Finding 1): nodes that crossed the stuck threshold THIS tick,
                 // collected for an honest "couldn't apply X" status without stopping the daemon.
                 val newlyStuckDescriptions = mutableListOf<String>()
+                // NON-INTERFERENCE BACK-OFF (signal (b)) — per-node contention verdicts for THIS
+                // tick, reconciled after the op loop. true = the node's CONVERGE readback was a
+                // MOVING target (external driver); false = it converged to the SAME value as last
+                // tick (a settled OPP-snap, benign). A node absent from this map this tick had no
+                // CONVERGE (it either landed clean — handled in the Success branch — or wasn't in
+                // the delta) and its streak decays to 0.
+                val movedThisTick = HashMap<String, Boolean>()
 
                 if (effectiveTarget != currentState) {
                     val ops = TdpStateTransition.delta(
@@ -864,6 +1053,13 @@ class AutoTdpService : Service() {
                                     ) ?: convergedState
                                 }
                                 rejectStuckTicks.remove(op.id.target)
+                                // NON-INTERFERENCE BACK-OFF (signal (b)): a CLEAN landing means no
+                                // external driver is fighting this node — reset its contention
+                                // streak and forget its prior converged value. movedThisTick gets
+                                // an explicit false so the post-loop reconcile decays the streak.
+                                movedThisTick[op.id.target] = false
+                                externalDriveStreak.remove(op.id.target)
+                                lastConvergedByTarget.remove(op.id.target)
                             }
                             is WriteResult.CapabilityDenied -> {
                                 // RUNTIME-GAP FIX: a CapabilityDenied is FATAL only when it
@@ -944,6 +1140,17 @@ class AutoTdpService : Service() {
                                         // the exact value we asked; the loop now settles.
                                         convergedState = converged
                                         rejectStuckTicks.remove(op.id.target)
+                                        // NON-INTERFERENCE BACK-OFF (signal (b)): decide whether this
+                                        // is a settle-once OPP-snap or an EXTERNAL moving target. A
+                                        // moving target = the readback differs from what we converged
+                                        // this node to LAST tick (a value we never wrote). Record the
+                                        // per-node verdict for post-loop streak reconciliation, then
+                                        // remember this readback as the node's prior converged value.
+                                        movedThisTick[op.id.target] = TdpConvergence.isExternalMovingTarget(
+                                            convergeReadback = readback,
+                                            lastConvergedValue = lastConvergedByTarget[op.id.target],
+                                        )
+                                        lastConvergedByTarget[op.id.target] = readback!!
                                         Log.i(
                                             TAG,
                                             "Converged ${op.id.target} to kernel readback $readback " +
@@ -990,6 +1197,29 @@ class AutoTdpService : Service() {
                     //    NEVER claiming an unwritten value as applied (the honesty invariant).
                     currentState = if (allOpsSucceeded) effectiveTarget else convergedState
                 }
+
+                // ── NON-INTERFERENCE BACK-OFF (signal (b)): reconcile external-drive streaks ──
+                // For every freq node we track a contention streak: it climbs while the node's
+                // CONVERGE readback keeps MOVING to values we never wrote (an external driver),
+                // and decays the moment the node lands clean or converges to the SAME value as
+                // last tick (a settled OPP-snap). A node crossing EXTERNAL_DRIVE_STREAK_TICKS
+                // means an external app is overwriting our writes → suspend. A lone OPP-snap can
+                // never trip this (its streak resets to 0 on the very next settled tick). We only
+                // adjust streaks for nodes we OBSERVED this tick (movedThisTick); nodes absent
+                // from the delta this tick keep their streak (no new evidence either way), and a
+                // node that lands clean explicitly resets above.
+                for ((target, moved) in movedThisTick) {
+                    if (moved) {
+                        externalDriveStreak[target] = (externalDriveStreak[target] ?: 0) + 1
+                    } else {
+                        externalDriveStreak.remove(target)
+                    }
+                }
+                // Active when ANY tracked node has sustained a moving target long enough. Purely
+                // derived from the streaks each tick, so it AUTO-CLEARS the moment contention
+                // stops (all streaks reset) — the guard then auto-resumes tuning.
+                externalDriveActive =
+                    externalDriveStreak.values.any { it >= EXTERNAL_DRIVE_STREAK_TICKS }
 
                 // FINDING 1 (honesty surface) — if any node crossed the stuck threshold THIS tick,
                 // record an honest "couldn't apply X" on the run-state's writeFailure WITHOUT
@@ -1136,9 +1366,16 @@ class AutoTdpService : Service() {
                         fpsFloorDegraded = effectiveDecision.fpsFloorDegraded,
                         runtimeProjectionNote =
                             if (config.goal == GoalProfile.TARGET_RUNTIME) runtimeProjectionNote else null,
+                        // NON-INTERFERENCE BACK-OFF: honest HUD surface. Non-null while the guard
+                        // is suspending (daemon still RUNNING underneath, SoC reverted to stock);
+                        // null the instant every back-off signal clears and tuning resumes.
+                        interferenceSuspendReason = interferenceReason,
                     )
                 )
-                updateNotification(status = "Running", detail = displayReason)
+                updateNotification(
+                    status = if (interferenceReason != null) "Suspended" else "Running",
+                    detail = interferenceReason ?: displayReason,
+                )
             }
         } finally {
             // Stop the savings probe if it's still mid-cycle — the session is over.
@@ -1326,6 +1563,13 @@ class AutoTdpService : Service() {
             // UNIT 4: stop the TARGET_RUNTIME 60s outer-budget loop too (no-op if absent).
             runtimeBudgetJob?.cancel()
             runtimeBudgetJob = null
+            // NON-INTERFERENCE BACK-OFF — stop the hot pause/bundle collectors (no-op if absent).
+            pauseWatchJob?.cancel()
+            pauseWatchJob = null
+            gpuPolicyWatchJob?.cancel()
+            gpuPolicyWatchJob = null
+            perAppWatchJob?.cancel()
+            perAppWatchJob = null
             stopSelf()
         }
     }
@@ -1815,6 +2059,36 @@ class AutoTdpService : Service() {
     }
 
     /**
+     * NON-INTERFERENCE BACK-OFF (signal (d)) — true when [pkg] is a game/3D app: a
+     * [io.github.mayusi.calibratesoc.data.gameaware.KnownGames] hit OR its
+     * [android.content.pm.ApplicationInfo.category] is CATEGORY_GAME. Our own package and
+     * null are never games. Memoised in [gameClassCache] so the (relatively expensive)
+     * PackageManager lookup runs at most once per package per session. Best-effort: a
+     * PackageManager miss (uninstalled / restricted) is treated as "not a game" — we never
+     * suspend on a guess.
+     */
+    private fun isForegroundGame(pkg: String?): Boolean {
+        val p = pkg?.takeIf { it.isNotBlank() && it != packageName } ?: return false
+        gameClassCache[p]?.let { return it }
+        val known = io.github.mayusi.calibratesoc.data.gameaware.KnownGames.defaultHintFor(p) != null
+        val isGame = known || runCatching {
+            val info = packageManager.getApplicationInfo(p, 0)
+            @Suppress("DEPRECATION")
+            val category = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                info.category
+            } else {
+                android.content.pm.ApplicationInfo.CATEGORY_UNDEFINED
+            }
+            category == android.content.pm.ApplicationInfo.CATEGORY_GAME ||
+                // Legacy FLAG_IS_GAME (deprecated but still set by some older games).
+                @Suppress("DEPRECATION")
+                (info.flags and android.content.pm.ApplicationInfo.FLAG_IS_GAME) != 0
+        }.getOrDefault(false)
+        gameClassCache[p] = isGame
+        return isGame
+    }
+
+    /**
      * UNIT 1: the lightweight per-session stats accumulator. Fed once per processed tick
      * (a handful of scalar writes — no allocation, no device I/O) and converted to a
      * [SessionOutcome] at session end.
@@ -1961,6 +2235,25 @@ class AutoTdpService : Service() {
          * large enough to ride a brief governor/EBUSY storm that the per-op retry missed.
          */
         private const val STUCK_REJECT_TICKS = 3
+
+        /**
+         * NON-INTERFERENCE BACK-OFF (signal (b)): how many CONSECUTIVE ticks a node's CONVERGE
+         * readback must be a MOVING TARGET (landing at a value neither we nor last tick's
+         * convergence asked for) before we conclude an EXTERNAL DRIVER is overwriting our
+         * writes and suspend AutoTDP. Mirrors [STUCK_REJECT_TICKS]: a lone kernel OPP-snap
+         * settles in one tick (readback stops moving) and never trips this; only a genuine
+         * external driver whose writes keep moving the node across ≥3 ticks does.
+         */
+        private const val EXTERNAL_DRIVE_STREAK_TICKS = 3
+
+        /**
+         * NON-INTERFERENCE BACK-OFF — resume hysteresis. Suspend engages the instant any
+         * signal fires, but resume waits for this many CONSECUTIVE clear ticks so a brief
+         * controller/game foreground blip can't dump the tune and re-walk it. At the ~1 Hz
+         * tick this is ~2 s of "all clear" before AutoTDP re-grabs the SoC. A manual-pause
+         * release bypasses this (deliberate user action).
+         */
+        private const val INTERFERENCE_RESUME_CLEAR_TICKS = 2
 
         /**
          * WAVE 3a: settle time after stopping the other clock owner (Game Boost)

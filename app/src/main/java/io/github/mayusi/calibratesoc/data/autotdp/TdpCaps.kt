@@ -124,6 +124,33 @@ data class TdpCaps(
      * stays capability-agnostic (mirrors the 0.3.5 cpuCap-lever collapse living here).
      */
     val supportsPerfMode: Boolean = false,
+    /**
+     * Whether the engine / Adaptive controller is allowed to cap the GPU clock
+     * DOWN as a power-saving lever.
+     *
+     * **Default FALSE — the v0.3.8+ policy.** On-device testing showed GPU MHz
+     * barely affects battery on these handhelds, so capping the GPU down was pure
+     * FPS loss for ~no power gain. With this false the [AutoTdpEngine]'s
+     * [Lever.GPU_DEVFREQ] / [Lever.GPU_FLOOR] TIGHTEN branches are no-ops (they
+     * report changed=false so the ladder falls through to the CPU/TDP levers),
+     * `enforceInvariants` actively pins the GPU devfreq max / pwrlevel floor back
+     * toward the ceiling, and the Adaptive `GpuBandController.tighten` is a no-op —
+     * so the GPU runs high whenever tuning is active. The LOOSEN / raise-GPU paths
+     * still run in both.
+     *
+     * **TRUE = pre-0.3.8 behaviour restored exactly** — GPU cap-down is a live
+     * lever again (the opt-in advanced escape hatch for thermally-limited users).
+     *
+     * This is a POLICY flag, not a device capability, but it lives here so the
+     * pure engine + Adaptive controller stay capability-agnostic and read it via
+     * the `caps` they already receive — the SAME seam as [cpuCapLeverWritable] /
+     * [supportsPerfMode]. [from] defaults it false (new policy out-of-the-box);
+     * the wiring layer `.copy(gpuPowerCapAllowed = allowGpuPowerCap)` from the
+     * `AdaptivePrefs.allowGpuPowerCap` user pref to honour an explicit opt-in.
+     * Defaulted false so existing test fixtures that build TdpCaps directly keep
+     * compiling AND get the new policy by default.
+     */
+    val gpuPowerCapAllowed: Boolean = false,
 ) {
     companion object {
 
@@ -386,6 +413,11 @@ data class TdpCaps(
                 uclampAvailable = uclampAvailable,
                 fanModeAvailable = fanModeAvailable,
                 supportsPerfMode = supportsPerfMode,
+                // v0.3.8 policy: GPU is NOT a power-saving lever by default — it runs
+                // high/at-ceiling and all power management flows through CPU/TDP. The
+                // wiring layer copies the opt-in AdaptivePrefs.allowGpuPowerCap onto this
+                // derived caps to restore GPU cap-down for thermally-limited users.
+                gpuPowerCapAllowed = false,
             )
         }
     }

@@ -96,6 +96,17 @@ data class AutoTdpRunState(
      * labelled as such — never a guarantee.
      */
     val runtimeProjectionNote: String? = null,
+    /**
+     * NON-INTERFERENCE BACK-OFF — a human-readable explanation of WHY AutoTDP has
+     * suspended its tuning this tick because another app is controlling performance (a
+     * known controller like Nova/GameNative or Winlator is foreground, the user flipped the
+     * manual "Pause tuning" toggle, an external app keeps overriding our clock writes, or an
+     * untuned game is on screen). Null during normal tuning. When non-null the daemon is
+     * still RUNNING underneath (status stays [AutoTdpStatus.RUNNING]) but has driven the SoC
+     * back to STOCK and stopped fighting; it auto-resumes the instant every back-off signal
+     * clears. The HUD renders this as "Suspended — <reason>" so the user SEES the back-off.
+     */
+    val interferenceSuspendReason: String? = null,
 )
 
 /** Lifecycle states for the AutoTDP daemon. */

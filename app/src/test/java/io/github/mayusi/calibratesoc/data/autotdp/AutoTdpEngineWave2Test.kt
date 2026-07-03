@@ -53,10 +53,18 @@ class AutoTdpEngineWave2Test {
         gpuRootPath = "/sys/class/kgsl/kgsl-3d0",
         uclampAvailable = true,
         fanModeAvailable = true,
+        // These fixtures exercise the GPU DOWN-lever MECHANICS (devfreq/pwrlevel stepping
+        // + bounds), so they opt into GPU power-capping. The v0.3.8 DEFAULT (OFF — GPU is
+        // not a power lever) is covered separately by the `gpu-max policy` tests below,
+        // which use capsWave2.copy(gpuPowerCapAllowed = false).
+        gpuPowerCapAllowed = true,
     )
 
     /** Multi-prime variant (cores 5,6,7) for park/uclamp chase tests. */
     private val capsWave2MultiPrime = capsWave2.copy(primeCoreIndices = listOf(5, 6, 7))
+
+    /** v0.3.8 default: GPU power-capping OFF (GPU is NOT a power lever). */
+    private val capsWave2GpuMaxOff = capsWave2.copy(gpuPowerCapAllowed = false)
 
     private val balancedConfig = AutoTdpProfileConfig(AutoTdpProfile.BALANCED) // → BALANCED_SMART
     private val KNOWN_GAME = "org.dolphinemu.dolphinemu"
@@ -433,6 +441,88 @@ class AutoTdpEngineWave2Test {
         // after the devfreq lever engaged.
         assertThat(firstDevfreqTick).isAtLeast(0)
         if (firstParkTick >= 0) assertThat(firstParkTick).isGreaterThan(firstDevfreqTick)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  v0.3.8 GPU-MAX POLICY : GPU is NOT a power lever unless the user opts in
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * With the default policy (gpuPowerCapAllowed = false) a sustained below-band tighten
+     * NEVER steps the GPU devfreq max down: the GPU_DEVFREQ / GPU_FLOOR tighten branches
+     * are no-ops. The GPU stays at ceiling (max == null == stock/ceiling) the whole run.
+     */
+    @Test
+    fun `gpu-max policy off never steps the gpu devfreq down`() {
+        val (_, history) = drive(
+            windowFor = { window(30) },      // GPU well below any band → sustained tighten
+            caps = capsWave2GpuMaxOff,
+            goal = GoalProfile.COOL_QUIET,   // the goal that prefers the GPU devfreq lever
+            ticks = 60,
+        )
+        history.forEach { d ->
+            // Never a GPU-down write: max stays null (== stock/ceiling), floor level never
+            // raised toward the slow end.
+            assertThat(d.target.gpuDevfreqMaxHz).isNull()
+            assertThat(d.target.gpuFloorLevel).isNull()
+        }
+    }
+
+    /**
+     * The tighten ladder is NOT halted by the GPU no-op: with GPU capping off, the same
+     * below-band tighten still moves the CPU/TDP levers (cap / min-floor / park), so power
+     * management continues on the CPU side.
+     */
+    @Test
+    fun `gpu-max policy off still tightens the cpu levers`() {
+        val (last, _) = drive(
+            windowFor = { window(30) },
+            caps = capsWave2GpuMaxOff,
+            goal = GoalProfile.COOL_QUIET,
+            ticks = 60,
+        )
+        // A CPU-side lever must have moved off stock (cap down, or a floor set, or a park).
+        val cpuMoved = last.target.bigClusterCapKhz != TdpState.STOCK.bigClusterCapKhz ||
+            last.target.bigClusterMinKhz != null ||
+            last.target.parkedPrimeCores.isNotEmpty()
+        assertThat(cpuMoved).isTrue()
+    }
+
+    /**
+     * GPU-PIN-HIGH: a session that STARTS with the GPU capped low (e.g. a stale prior
+     * session / seed) is actively raised back toward the ceiling within a tick when the
+     * GPU-max policy is on (capping off). The pin snaps the devfreq max to the top OPP.
+     */
+    @Test
+    fun `gpu-max policy off pins a low gpu back to the ceiling`() {
+        val topOpp = gpuDevfreqSteps.last()
+        // Start with the GPU max pinned LOW (index 1) as if a prior session left it there.
+        val lowStart = TdpState.STOCK.copy(
+            gpuDevfreqMaxHz = gpuDevfreqSteps[1],
+            gpuDevfreqMinHz = gpuDevfreqSteps[0],
+        )
+        // GPU in-band (74) so the band controller HOLDs (neither loosens nor tightens) on
+        // its own — BALANCED_SMART band is 63-85. The pin is what must raise the GPU.
+        val d = AutoTdpEngine.decide(
+            window(74), balancedConfig, capsWave2GpuMaxOff, lowStart,
+        )
+        assertThat(d.target.gpuDevfreqMaxHz).isEqualTo(topOpp)
+    }
+
+    /**
+     * Opt-in (gpuPowerCapAllowed = true) restores the pre-0.3.8 behaviour: the GPU devfreq
+     * lever steps DOWN again under a sustained below-band tighten.
+     */
+    @Test
+    fun `gpu-max policy on restores gpu devfreq down-stepping`() {
+        val (_, history) = drive(
+            windowFor = { window(30) },
+            caps = capsWave2,                // opt-in true
+            goal = GoalProfile.COOL_QUIET,
+            ticks = 60,
+        )
+        val everSteppedDown = history.any { it.target.gpuDevfreqMaxHz != null }
+        assertThat(everSteppedDown).isTrue()
     }
 
     // ════════════════════════════════════════════════════════════════════════════

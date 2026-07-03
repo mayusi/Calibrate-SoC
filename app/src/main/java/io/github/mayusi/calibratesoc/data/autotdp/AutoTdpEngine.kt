@@ -331,6 +331,22 @@ object AutoTdpEngine {
             }
         }
 
+        // ── 3.5 GPU-PIN-HIGH (v0.3.8 policy) ─────────────────────────────────────
+        // When the user has NOT opted into GPU power-capping (caps.gpuPowerCapAllowed
+        // == false — the default), the GPU is not a power lever: it should run high /
+        // at its ceiling whenever tuning is active. The tighten branches above are
+        // already no-ops, but a GPU left low by a prior session, a learned seed, or a
+        // mid-session flag flip would otherwise stay low. So actively raise the GPU
+        // devfreq max / pwrlevel floor back toward the ceiling here. EXEMPT under a
+        // genuine thermal pre-empt (arm 1): that path lowers the GPU for real-heat
+        // SAFETY (the legacy mirror of GpuOcThermalGuard), and safety always wins — we
+        // never pin the GPU back up while the die is genuinely hot.
+        val raw2 = if (!caps.gpuPowerCapAllowed && !signals.thermalPreempt(activeGoal)) {
+            pinGpuHigh(raw, caps)
+        } else {
+            raw
+        }
+
         // ── 4. FAN GOVERNOR (orthogonal to the clock levers) ─────────────────────
         // The fan is driven by THERMAL state per goal, independent of which clock
         // lever moved this tick, and is rate-limited + hysteresis-gated + monotonic
@@ -344,7 +360,7 @@ object AutoTdpEngine {
         // UNIT 2 — ADAPTIVE CADENCE: stamp the re-eval hint for the NEXT tick (warming →
         // 500 ms, calm → 1000 ms). The daemon honours it with a 500 ms floor; the field
         // defaults to null on the no-telemetry early-return path so default behaviour holds.
-        val finalDecision = applyFanGovernor(raw, caps, activeGoal, signals)
+        val finalDecision = applyFanGovernor(raw2, caps, activeGoal, signals)
             .copy(
                 resolvedGoal = activeGoal,
                 nextTickHintMs = nextTickHint(signals, activeGoal),
@@ -852,6 +868,21 @@ object AutoTdpEngine {
                     // AYANEO durable CPU-side lever: step the vendor mode ordinal DOWN one
                     // notch toward min-power (save). Selected only on the perf-mode tier
                     // (effectiveLeverOrder injects it there); saturates at mode 0.
+                    //
+                    // v0.3.8 GPU-MAX POLICY — AYANEO FOLLOW-UP (NOT implemented here):
+                    // On AYANEO the vendor perf-mode BUNDLES a GPU clock per ordinal
+                    // (mode0=220, mode1/2/3=680, mode4=1000 MHz), so stepping the mode DOWN
+                    // to 0 for CPU/TDP power ALSO drops the GPU to 220. Stepping the mode is
+                    // legitimately the CPU/TDP lever (kept as-is), but the new "GPU runs at
+                    // ceiling" policy would need a GPU-MAX OVERRIDE layered AFTER the mode
+                    // (AyaneoCommands.setGpuMaxFreq / setGpuIsFixed) to hold the GPU high
+                    // while the CPU rides a low mode. That override is NOT applied here: the
+                    // AYANEO writer (AyaneoVendorWriter) + AutoTdpService own that write path
+                    // and are being edited by a concurrent agent — implementing it here would
+                    // collide. FOLLOW-UP: add a post-mode setGpuMaxFreq(ceiling) on AYANEO in
+                    // the AutoTdpService/AyaneoWriter so GPU-max policy applies there too,
+                    // instead of the mode's bundled 680. Non-AYANEO devices (Odin/RP6/rooted
+                    // with real devfreq) are fully covered by the engine changes above.
                     val stepped = stepPerfModeDown(current)
                     if (stepped.changed) {
                         return Triple(
@@ -875,27 +906,42 @@ object AutoTdpEngine {
                 }
                 Lever.GPU_DEVFREQ -> {
                     // Tighten GPU devfreq = lower the max toward the floor (less GPU).
-                    val stepped = stepDevfreqMaxDown(current.gpuDevfreqMaxHz, caps)
-                    if (stepped.changed) {
-                        return Triple(
-                            current.copy(gpuDevfreqMaxHz = stepped.freq),
-                            "GPU devfreq max → ${stepped.freq?.div(1_000_000)} MHz",
-                            Lever.GPU_DEVFREQ,
-                        )
+                    // v0.3.8 POLICY: GPU is NOT a power-saving lever unless the user opted
+                    // in (caps.gpuPowerCapAllowed). When false this branch is a NO-OP — it
+                    // returns nothing so the for-loop falls through SAME-TICK to the next
+                    // lever (PARK / UCLAMP → CPU/TDP), exactly like a saturated lever. The
+                    // ladder is never halted; power management just moves to the CPU side.
+                    // (The LOOSEN counterpart still raises the GPU, and enforceInvariants
+                    // pins the GPU devfreq max back toward the ceiling — GPU runs high.)
+                    if (caps.gpuPowerCapAllowed) {
+                        val stepped = stepDevfreqMaxDown(current.gpuDevfreqMaxHz, caps)
+                        if (stepped.changed) {
+                            return Triple(
+                                current.copy(gpuDevfreqMaxHz = stepped.freq),
+                                "GPU devfreq max → ${stepped.freq?.div(1_000_000)} MHz",
+                                Lever.GPU_DEVFREQ,
+                            )
+                        }
                     }
                 }
                 Lever.GPU_FLOOR -> {
                     // Tighten GPU = make it LESS permissive (raise level index toward max).
-                    val max = caps.gpuMaxLevel
-                    val min = caps.gpuMinLevel
-                    if (max != null) {
-                        val curLevel = current.gpuFloorLevel ?: min ?: 0
-                        if (curLevel < max) {
-                            return Triple(
-                                current.copy(gpuFloorLevel = (curLevel + 1).coerceAtMost(max)),
-                                "GPU floor → slower level",
-                                Lever.GPU_FLOOR,
-                            )
+                    // v0.3.8 POLICY: NO-OP unless the user opted into GPU power-capping
+                    // (caps.gpuPowerCapAllowed). When false, fall through to the CPU levers
+                    // (see the GPU_DEVFREQ note above). enforceInvariants pins the pwrlevel
+                    // floor back toward the fastest level so the GPU stays high.
+                    if (caps.gpuPowerCapAllowed) {
+                        val max = caps.gpuMaxLevel
+                        val min = caps.gpuMinLevel
+                        if (max != null) {
+                            val curLevel = current.gpuFloorLevel ?: min ?: 0
+                            if (curLevel < max) {
+                                return Triple(
+                                    current.copy(gpuFloorLevel = (curLevel + 1).coerceAtMost(max)),
+                                    "GPU floor → slower level",
+                                    Lever.GPU_FLOOR,
+                                )
+                            }
                         }
                     }
                 }
@@ -1384,6 +1430,50 @@ object AutoTdpEngine {
             nextIdx >= steps.lastIndex -> DevfreqStep(null, true) // reached top → clear
             else -> DevfreqStep(steps[nextIdx], true)
         }
+    }
+
+    /**
+     * v0.3.8 GPU-PIN-HIGH: when the GPU is not a power lever (opt-in OFF), drive the
+     * GPU devfreq max / pwrlevel floor back toward the CEILING / fastest level in one
+     * shot, so a GPU left low by a prior session, a learned seed, or a mid-session
+     * opt-in flip is raised immediately. Reuses the SAME top-OPP semantics as
+     * [stepDevfreqMaxUp] (a null max == stock == uncapped ceiling; here we snap the max
+     * to the top OPP and clear the min so the whole devfreq window rides at the top).
+     *
+     * PURE. Does NOT touch the GPU when it is already at/above the ceiling (or when no
+     * GPU actuator is discoverable), and NEVER lowers anything (raise-only). Operates on
+     * the decision's [TdpState] target and leaves every other field of the decision
+     * (reason / controllerState / cadence) untouched. Callers gate this on
+     * `!caps.gpuPowerCapAllowed && !thermalPreempt`.
+     */
+    private fun pinGpuHigh(decision: TdpDecision, caps: TdpCaps): TdpDecision {
+        var s = decision.target
+        val before = s
+
+        // ── Devfreq lever (fine): snap the max up to the top OPP, release the min. ──
+        val steps = caps.gpuDevfreqStepsHz
+        if (steps.size >= 2) {
+            val topOpp = steps.last() // the uncapped ceiling OPP
+            val curMax = s.gpuDevfreqMaxHz
+            // Only act when a cap is actually holding the GPU below the ceiling. A null
+            // max already means "don't touch" == stock == ceiling, so leave it alone.
+            if (curMax != null && curMax < topOpp) {
+                // Raise the max to the top OPP and clear the paired min so the whole
+                // window rides at the ceiling.
+                s = s.copy(gpuDevfreqMaxHz = topOpp, gpuDevfreqMinHz = null)
+            }
+        }
+
+        // ── Pwrlevel mirror (coarse devices): lower the floor toward the fastest. ──
+        val min = caps.gpuMinLevel
+        val curLevel = s.gpuFloorLevel
+        if (min != null && curLevel != null && curLevel > min) {
+            // Lower index = faster GPU; drive the floor back to the fastest level.
+            s = s.copy(gpuFloorLevel = min)
+        }
+
+        // Nothing to raise — return the decision untouched (no spurious reason churn).
+        return if (s === before) decision else decision.copy(target = s)
     }
 
     /**

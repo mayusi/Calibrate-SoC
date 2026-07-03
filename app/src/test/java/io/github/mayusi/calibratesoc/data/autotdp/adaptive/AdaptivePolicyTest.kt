@@ -20,6 +20,10 @@ class AdaptivePolicyTest {
 
     // ─── Device fixture (SD8Gen2 / RP6 topology, mirrors AutoTdpGoalWiringTest) ──────
     // Caps are not consulted for the weight-driven outputs; any valid envelope works.
+    // gpuPowerCapAllowed = true here so these per-preset assertions exercise the GPU
+    // floor-fraction FORMULA (the weight mapping under test). With the v0.3.8 default
+    // (gpuPowerCapAllowed = false) the policy pins gpuFloorFraction to 1.0 instead — that
+    // OFF-policy behaviour is covered separately by the gpuMaxPolicy_* tests below.
     private val caps = TdpCaps(
         primeCoreIndices = listOf(7),
         bigPolicyId = 4,
@@ -34,6 +38,7 @@ class AdaptivePolicyTest {
         gpuRootPath = "/sys/class/kgsl/kgsl-3d0",
         uclampAvailable = true,
         fanModeAvailable = true,
+        gpuPowerCapAllowed = true,
     )
 
     private fun resolve(
@@ -238,5 +243,54 @@ class AdaptivePolicyTest {
         for (preset in AdaptivePreset.entries) {
             assertThat(preset.intent.rawSum).isWithin(1e-5f).of(1f)
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    //  v0.3.8 GPU-MAX POLICY — GPU is NOT a power lever unless the user opts in
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /** Caps with GPU power-capping OFF — the v0.3.8 default (mirrors [caps] otherwise). */
+    private val capsGpuMaxOff = caps.copy(gpuPowerCapAllowed = false)
+
+    @Test
+    fun gpuMaxPolicy_off_pinsFloorFractionToCeiling_everyPreset() {
+        // With the default policy (GPU power-capping OFF) the resolved floor fraction is
+        // pinned to 1.0 for EVERY preset — the GPU floor == ceiling, so GpuBandController
+        // has zero headroom to step the GPU down. Independent of the intent weights.
+        for (preset in AdaptivePreset.entries) {
+            val sp = AdaptivePolicy.resolve(preset.intent, capsGpuMaxOff, false, false)
+            assertThat(sp.gpuFloorFraction).isWithin(0.0001f).of(1.0f)
+        }
+    }
+
+    @Test
+    fun gpuMaxPolicy_on_restoresWeightDrivenFloorFraction() {
+        // Opting in (gpuPowerCapAllowed = true) restores the pre-0.3.8 weight-driven floor
+        // fraction exactly — e.g. BALANCED resolves to the canonical 0.2875 again.
+        val on = AdaptivePolicy.resolve(
+            AdaptivePreset.BALANCED.intent,
+            caps.copy(gpuPowerCapAllowed = true),
+            false,
+            false,
+        )
+        assertThat(on.gpuFloorFraction).isWithin(0.001f).of(0.2875f)
+
+        // ...and the same preset under the OFF default pins to the ceiling instead.
+        val off = AdaptivePolicy.resolve(AdaptivePreset.BALANCED.intent, capsGpuMaxOff, false, false)
+        assertThat(off.gpuFloorFraction).isWithin(0.0001f).of(1.0f)
+    }
+
+    @Test
+    fun gpuMaxPolicy_off_doesNotDisableGpuOverclockTier() {
+        // The OFF policy only stops GPU DOWN-capping; it must NOT suppress the upward OC
+        // tier (raising the GPU is still desired). A perf-lean intent with opt-in + probe
+        // still resolves BEYOND_STOCK even when GPU power-capping is off.
+        val sp = AdaptivePolicy.resolve(
+            AdaptivePreset.MAX_PERFORMANCE.intent,
+            capsGpuMaxOff,
+            userOptInBeyondStock = true,
+            probePassed = true,
+        )
+        assertThat(sp.gpuOcTier).isEqualTo(GpuOcTier.BEYOND_STOCK)
     }
 }

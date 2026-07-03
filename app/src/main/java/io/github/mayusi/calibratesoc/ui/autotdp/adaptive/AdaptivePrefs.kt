@@ -188,6 +188,41 @@ class AdaptivePrefs @Inject constructor(
         context.adaptivePrefsStore.edit { it[ADAPTIVE_MODE_ACTIVE_KEY] = active }
     }
 
+    // ── Allow GPU as a power-saving lever (advanced, opt-in) ──────────────────
+
+    /**
+     * Whether AutoTDP / Adaptive is allowed to cap the GPU clock DOWN as a
+     * power-saving lever.
+     *
+     * **Default FALSE — the deliberate new policy (v0.3.8+).** On-device testing
+     * showed GPU MHz barely moves battery on these handhelds, so capping the GPU
+     * down was pure FPS loss for ~no power gain. With this flag OFF the GPU is
+     * NEVER stepped down for power: it is pinned at/toward its ceiling whenever
+     * tuning is active, and ALL power management flows through the CPU/TDP levers
+     * (cap / min-floor / park / uclamp / perf-mode). Any GPU cap left over from a
+     * prior session or state is actively loosened back to the ceiling.
+     *
+     * **TRUE = the pre-0.3.8 behaviour restored exactly** — the GPU_DEVFREQ /
+     * GPU_FLOOR tighten levers and the Adaptive GPU band controller may step the
+     * GPU clock down again. This is the escape hatch for thermally-limited users
+     * who genuinely need GPU throttling as a lever.
+     *
+     * Threads into the pure engine + Adaptive controller via
+     * [io.github.mayusi.calibratesoc.data.autotdp.TdpCaps.gpuPowerCapAllowed]
+     * (mirrors how `cpuCapLeverWritable` / `supportsPerfMode` reach the engine).
+     * NOTE: [io.github.mayusi.calibratesoc.data.autotdp.TdpCaps.from] defaults
+     * `gpuPowerCapAllowed = false`, so the new policy is the out-of-the-box
+     * default even before any wiring reads this pref; the wiring layer copies
+     * this flag onto the derived caps to honour an explicit opt-in.
+     */
+    val allowGpuPowerCap: Flow<Boolean> = context.adaptivePrefsStore.data.map { prefs ->
+        prefs[ALLOW_GPU_POWER_CAP_KEY] ?: false
+    }
+
+    suspend fun setAllowGpuPowerCap(allow: Boolean) {
+        context.adaptivePrefsStore.edit { it[ALLOW_GPU_POWER_CAP_KEY] = allow }
+    }
+
     // ── Keys ─────────────────────────────────────────────────────────────────
 
     private companion object {
@@ -200,6 +235,7 @@ class AdaptivePrefs @Inject constructor(
         val BEYOND_STOCK_CONSENT_KEY         = booleanPreferencesKey("adaptive_beyond_stock_consent")
         val BEYOND_STOCK_PROBE_VERDICT_KEY   = stringPreferencesKey("adaptive_beyond_stock_probe_verdict")
         val ADAPTIVE_MODE_ACTIVE_KEY         = booleanPreferencesKey("adaptive_mode_active")
+        val ALLOW_GPU_POWER_CAP_KEY          = booleanPreferencesKey("adaptive_allow_gpu_power_cap")
     }
 }
 

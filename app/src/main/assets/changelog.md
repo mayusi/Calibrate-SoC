@@ -1,3 +1,19 @@
+## [0.3.8-alpha] — 2026-07-03
+
+Calibrate SoC now steps aside when another app is running the show — it hands the SoC back to stock and stops fighting.
+
+### Added — plays nice with your game runtime and other tuners
+- **AutoTDP now backs off automatically when another app is in control of performance.** If you launch your game runtime (Nova / GameNative), Winlator, or another performance tuner, AutoTDP no longer fights it — it instantly reverts the CPU/GPU back to stock and pauses its own tuning, so you get exactly the performance that app intends. The moment the other app is gone, AutoTDP resumes on its own. No restart, no fiddling.
+- **New "Pause tuning (another app in control)" switch** on the AutoTDP screen. Flip it on right before a Nova/GameNative session and AutoTDP steps aside immediately; flip it off and it resumes. It takes effect live, mid-session.
+- **It also notices when something else is overriding the clocks.** If another app keeps changing the CPU/GPU speed out from under Calibrate SoC, AutoTDP detects the tug-of-war and stands down rather than fighting a losing battle. (A one-off kernel adjustment is ignored — it only backs off on a real, sustained override.)
+- **GPU no longer gets throttled to save power.** GPU clock speed barely affects battery life, so capping it down just cost you frames for nothing. AutoTDP and Adaptive now keep the GPU running high and do all power management on the CPU/TDP side instead. (Thermal safety still trims the GPU if the device genuinely gets too hot, and there's an opt-in "allow GPU power-capping" switch in Adaptive's advanced settings if you specifically want the old behaviour.)
+- Backing off is steady, not twitchy: it stands down the instant another app takes over, and only resumes once things have been clear for a moment — a split-second flicker won't yank your tune around.
+- **And it leaves untuned games alone.** If a game is on screen that you haven't set up a Calibrate SoC profile for, AutoTDP keeps it on stock instead of guessing — games you HAVE configured are tuned exactly as before.
+- **You always see why.** When AutoTDP is paused, the screen shows "Suspended — …" with the reason (another app in control, an override, an untuned game, or your manual pause), so it's never a mystery.
+
+### Same safety as always
+- This is purely additive. AutoTDP's temperature and battery safety cut-offs are unchanged and still fully stop the daemon when needed. Backing off only ever means returning your device to its stock clocks — it never leaves anything pinned.
+
 ## [0.3.7-alpha] — 2026-07-02
 
 Granting live-tuning access now lights up the app right away — no reopen.

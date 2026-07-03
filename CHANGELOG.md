@@ -11,6 +11,72 @@ Nothing yet.
 
 ---
 
+## [0.3.8-alpha] — 2026-07-03
+
+AutoTDP now stands down when another app is driving performance — it reverts to
+stock and stops fighting, then auto-resumes on its own.
+
+### Added — non-interference back-off
+- **AutoTDP fully suspends and reverts to stock whenever another app is in control
+  of the SoC.** A new `InterferenceGuard` ORs four back-off signals; if ANY is true
+  the tick loop forces `effectiveTarget = TdpState.STOCK`, so the existing hardened
+  delta → `writeWithRetry` → convergence path reverts the clocks through the same
+  machinery every other target uses. This is a per-tick, repeatable suspend — it
+  auto-resumes the next tick a signal clears, and never uses `stopDaemon` or the
+  once-only revert latch (those are one-way teardowns).
+  - (a) **Known controller foreground** — new `KnownControllers` table (mirrors
+    `KnownGames`): exact `com.gamenative` / `com.winlator` plus prefix
+    `app.gamenative*` / `com.winlator*`, and a couple of extensible root-perf
+    manager examples. Covers Nova/GameNative and Winlator.
+  - (b) **Sysfs contention** — a moving-target detector (`TdpConvergence
+    .isExternalMovingTarget`): when a converged node's readback keeps landing at
+    values we never wrote across ≥3 consecutive ticks, an external driver is
+    overwriting us. A one-time kernel OPP-snap (readback settles) can never
+    false-fire it.
+  - (c) **Manual "Pause tuning" toggle** — a new `UserPrefs.autoTdpManuallyPaused`
+    flag, read LIVE by the daemon via a hot collector (not session-snapshotted),
+    so pausing/un-pausing takes effect mid-session within a tick.
+  - (d) **Untuned foreground game** — a foreground app that is a game (KnownGames
+    hit or `ApplicationInfo.CATEGORY_GAME`) AND has no user-created bundle. Games
+    the user explicitly configured are never flagged.
+- **Honest HUD surface.** A new `interferenceSuspendReason` on `AutoTdpRunState`
+  shows "Suspended — <reason>" while backed off; the daemon stays `RUNNING`
+  underneath. New prominent "Pause tuning (another app in control)" card on the
+  AutoTDP screen.
+- **Resume hysteresis.** Suspend engages immediately, but resume waits
+  `INTERFERENCE_RESUME_CLEAR_TICKS` (2) consecutive clear ticks, so a one-tick
+  controller/game foreground blip can't dump the tune and re-walk it. A manual-pause
+  release bypasses the debounce (deliberate user action).
+
+### Changed — GPU is no longer a power-saving lever (opt-in to restore)
+- **GPU clock is no longer capped down to save power.** GPU MHz has negligible battery
+  impact, so capping it was pure FPS loss. A new `TdpCaps.gpuPowerCapAllowed` flag
+  (default false, threaded from `AdaptivePrefs.allowGpuPowerCap`) gates every GPU
+  power-down path: the engine's `Lever.GPU_DEVFREQ` / `Lever.GPU_FLOOR` tighten branches
+  no-op (falling through to CPU/park — never halting the ladder), `pinGpuHigh` raises a
+  low GPU back to the top OPP each tick, `GpuBandController.tighten` early-returns, and
+  `AdaptivePolicy` pins `gpuFloorFraction = 1.0`. All power management is now CPU/TDP-side.
+- The flag is applied PER TICK (`tickCaps`), so the "allow GPU power-capping" toggle in
+  Adaptive's advanced settings takes effect live, mid-session, without a restart.
+- `GpuOcThermalGuard` / `GpuOcProber` are untouched — thermal safety still trims a
+  beyond-stock GPU OC on real heat, so GPU-max is not reckless.
+- AYANEO follow-up: on the perf-mode tier the GPU value is bundled per profile; layering a
+  `setGpuMaxFreq(ceiling)` override after the mode (so GPU-max applies on AYANEO too) is a
+  documented follow-up. Non-AYANEO (Odin/RP6/rooted) is fully covered.
+
+### Safety
+- The guard is ADDITIVE: it only drives target=STOCK while running, so it never
+  leaves clocks pinned fighting another app, and always auto-resumes when clear.
+  The thermal/battery safety kills are unchanged — a kill still fully STOPS.
+
+### Notes
+- Reverse Nova/GameNative active-marker detection (a 5th signal) is deferred: this
+  codebase does not define Nova's marker path/convention, and we do not invent one.
+  Nova is already covered by the foreground-package (`app.gamenative`) and
+  sysfs-contention signals.
+
+---
+
 ## [0.3.7-alpha] — 2026-07-02
 
 Out-of-band live-tuning grants now reflect in the app within ~2 s without a

@@ -98,4 +98,36 @@ internal object TdpConvergence {
             else -> null
         }
     }
+
+    /**
+     * EXTERNAL-DRIVE detector (non-interference signal (b)).
+     *
+     * A single [RejectKind.CONVERGE] is normal and benign: the kernel snapped our write to a
+     * neighbouring valid OPP and, having converged our controller to that readback, the very
+     * next tick's delta is computed from reality and the node SETTLES — the readback stops
+     * moving. That is a one-time OPP-snap and must NOT be treated as interference.
+     *
+     * An EXTERNAL DRIVER is different: some other app keeps writing scaling_max_freq (or the
+     * GPU devfreq) to values WE never asked for, so on every tick the readback lands at yet
+     * ANOTHER value — one that does not match what we converged-to last tick either. The
+     * readback is a MOVING TARGET we never wrote. This function reports that shape for a
+     * single node per tick; the service accumulates a per-node streak and only declares
+     * [InterferenceGuard.SuspendReason.SYSFS_CONTENTION] after N consecutive moving ticks
+     * (mirroring the STUCK_REJECT_TICKS backstop), so a lone OPP-snap can never false-fire.
+     *
+     * @param convergeReadback     the value the node read back on THIS tick's CONVERGE (the
+     *                             new truth the kernel chose). Null when this tick did not
+     *                             CONVERGE this node (then it is not a moving-target tick).
+     * @param lastConvergedValue   the value we converged this node to on the PREVIOUS tick,
+     *                             or null when we have no prior converged value for it (first
+     *                             CONVERGE — treated as a benign OPP-snap, not yet moving).
+     * @return true iff this looks like an EXTERNAL moving target: we have a prior converged
+     *         value AND this tick's readback differs from it (the kernel moved the node to a
+     *         value neither we nor last tick's convergence asked for). false for the settle-
+     *         once OPP-snap (no prior value, or the readback matches last tick's convergence).
+     */
+    fun isExternalMovingTarget(convergeReadback: Long?, lastConvergedValue: Long?): Boolean =
+        convergeReadback != null &&
+            lastConvergedValue != null &&
+            convergeReadback != lastConvergedValue
 }
